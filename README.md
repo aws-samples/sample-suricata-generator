@@ -827,7 +827,7 @@ This architecture provides excellent separation of concerns, making the codebase
 
 ## Version
 
-Current version: 1.14.5
+Current version: 1.15.7
 
 ## Support
 

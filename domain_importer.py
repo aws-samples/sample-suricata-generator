@@ -3,7 +3,7 @@ from tkinter import ttk, filedialog, messagebox
 import urllib.request
 import urllib.error
 import re
-from typing import List, Optional
+from typing import List, Optional, Dict
 
 from suricata_rule import SuricataRule
 
@@ -219,6 +219,7 @@ class DomainImporter:
                 action = action_var.get()
                 use_pcre = pcre_var.get()
                 alert_on_pass = alert_on_pass_var.get()
+                strict_domain = strict_domain_var.get()
                 
                 # Update message template based on action and alert settings
                 current_message = message_var.get()
@@ -261,14 +262,15 @@ class DomainImporter:
                     rules_per_domain = 2
                 info_label.config(text=info_text)
                 
-                # Calculate standard rule count
+                # Calculate standard rule count (without consolidation)
                 standard_total = len(domains) * rules_per_domain
                 
-                # Update standard count display
-                standard_count_label.config(text=f"Standard approach: {standard_total} rules ({len(domains)} domains × {rules_per_domain} rules each)")
-                
+                # Check if consolidation or PCRE optimization will be applied
                 if use_pcre:
-                    # Analyze domains for PCRE optimization (placeholder for now)
+                    # PCRE optimization mode
+                    standard_count_label.config(text=f"Standard approach: {standard_total} rules ({len(domains)} domains × {rules_per_domain} rules each)")
+                    
+                    # Analyze domains for PCRE optimization
                     pcre_analysis = self.analyze_domains_for_pcre(domains)
                     optimized_domain_groups = pcre_analysis['optimized_groups']
                     individual_domains = pcre_analysis['individual_domains']
@@ -290,7 +292,45 @@ class DomainImporter:
                             text=f"PCRE analysis: No optimization possible with current domains (would still create {pcre_total} rules)",
                             foreground="orange"
                         )
+                elif not strict_domain:
+                    # Domain consolidation mode (strict mode disabled)
+                    consolidation = self.consolidate_domains(domains)
+                    consolidated_count = len(consolidation['consolidated_groups'])
+                    individual_count = len(consolidation['individual_domains'])
+                    total_domains_after = consolidated_count + individual_count
+                    total_rules = total_domains_after * rules_per_domain
+                    
+                    if consolidated_count > 0:
+                        # Consolidation is possible
+                        consolidated_domain_count = sum(len(g['children']) for g in consolidation['consolidated_groups'])
+                        savings = standard_total - total_rules
+                        
+                        standard_count_label.config(text=f"Standard (no consolidation): {standard_total} rules ({len(domains)} domains × {rules_per_domain} rules each)")
+                        
+                        # Build smart preview text
+                        preview_text = f"With consolidation: {total_rules} rules - Saves {savings} rules!\n"
+                        preview_text += f"• {consolidated_count} parent domain(s) cover {consolidated_domain_count} domain(s)\n"
+                        preview_text += f"• {individual_count} individual domain(s) (no siblings)"
+                        
+                        # Show up to 3 consolidation group details
+                        if len(consolidation['consolidated_groups']) <= 3:
+                            preview_text += "\n\nConsolidation details:"
+                            for group in consolidation['consolidated_groups']:
+                                children_preview = ', '.join(group['children'][:3])
+                                if len(group['children']) > 3:
+                                    children_preview += f" (+{len(group['children'])-3} more)"
+                                preview_text += f"\n  • {group['parent']} ← {children_preview}"
+                        elif len(consolidation['consolidated_groups']) > 3:
+                            preview_text += f"\n\n({consolidated_count} consolidation groups - first 3 shown in comment after import)"
+                        
+                        pcre_count_label.config(text=preview_text, foreground="green")
+                    else:
+                        # No consolidation possible
+                        standard_count_label.config(text=f"With consolidation: {standard_total} rules ({len(domains)} domains × {rules_per_domain} rules each)")
+                        pcre_count_label.config(text="No consolidation possible - all domains are unique", foreground="gray")
                 else:
+                    # Strict mode enabled - no consolidation
+                    standard_count_label.config(text=f"Strict mode (no consolidation): {standard_total} rules ({len(domains)} domains × {rules_per_domain} rules each)")
                     pcre_count_label.config(text="")
                     
             except Exception as e:
@@ -392,6 +432,88 @@ class DomainImporter:
         dialog.wait_window()
         return result[0]
     
+    def consolidate_domains(self, domains: List[str]) -> Dict:
+        """Consolidate domains to their most specific common parent
+        
+        Analyzes a list of domains and groups them by their longest common suffix.
+        Only consolidates when 2 or more domains share a common parent.
+        
+        Args:
+            domains: List of domain names to analyze
+            
+        Returns:
+            Dictionary with:
+            - 'consolidated_groups': List of dicts with 'parent' and 'children' keys
+            - 'individual_domains': List of domains that don't have siblings
+            
+        Example:
+            Input: ['windows.microsoft.com', 'office.microsoft.com', 'google.com']
+            Output: {
+                'consolidated_groups': [
+                    {'parent': 'microsoft.com', 'children': ['windows.microsoft.com', 'office.microsoft.com']}
+                ],
+                'individual_domains': ['google.com']
+            }
+        """
+        if not domains:
+            return {'consolidated_groups': [], 'individual_domains': []}
+        
+        # Build parent-child relationships for all domains
+        parent_to_all_children = {}
+        
+        for domain in domains:
+            parts = domain.lower().split('.')
+            # Only consider parents with 2+ parts (skip TLDs like .com, .org)
+            for i in range(1, len(parts) - 1):  # -1 to skip TLD-only parents
+                parent = '.'.join(parts[i:])
+                if parent not in parent_to_all_children:
+                    parent_to_all_children[parent] = set()
+                parent_to_all_children[parent].add(domain)
+        
+        # Find the LEAST specific (shortest) parent that covers 2+ domains
+        # This ensures we consolidate to microsoft.com rather than prod.do.dsp.mp.microsoft.com
+        consolidated_groups = []
+        processed_domains = set()
+        
+        # Sort by number of parts (ascending) - LEAST specific first
+        sorted_parents = sorted(parent_to_all_children.keys(),
+                               key=lambda x: len(x.split('.')),
+                               reverse=False)
+        
+        for parent in sorted_parents:
+            all_children = parent_to_all_children[parent]
+            # Get unprocessed children
+            available_children = [c for c in all_children if c not in processed_domains]
+            
+            # Need at least 2 domains to consolidate
+            if len(available_children) >= 2:
+                # Don't consolidate if the parent itself is in the child list
+                # In that case, wait for a less specific parent
+                if parent in available_children:
+                    continue
+                
+                # Check if any children are also in the input domain list
+                # If so, include the parent domain too
+                children_in_input = [c for c in available_children if c in domains]
+                if parent in domains:
+                    children_in_input.append(parent)
+                
+                # Only consolidate if we have 2+ domains to group
+                if len(children_in_input) >= 2:
+                    consolidated_groups.append({
+                        'parent': parent,
+                        'children': sorted(children_in_input)
+                    })
+                    processed_domains.update(children_in_input)
+        
+        # Collect individual domains
+        individual_domains = [d for d in domains if d not in processed_domains]
+        
+        return {
+            'consolidated_groups': consolidated_groups,
+            'individual_domains': sorted(individual_domains)
+        }
+    
     def generate_domain_rules(self, domains: List[str], action: str, start_sid: int, message_template: str, alert_on_pass: bool = True, strict_domain: bool = False) -> List[SuricataRule]:
         """Generate Suricata rules for a list of domains based on specified action
         
@@ -409,10 +531,28 @@ class DomainImporter:
         Returns:
             List of SuricataRule objects ready for insertion
         """
+        # Apply domain consolidation when strict mode is disabled
+        consolidation = None
+        if not strict_domain:
+            consolidation = self.consolidate_domains(domains)
+            # Build list of domains to process (consolidated parents + individuals)
+            domains_to_process = [group['parent'] for group in consolidation['consolidated_groups']]
+            domains_to_process.extend(consolidation['individual_domains'])
+        else:
+            # Strict mode: process all domains individually
+            domains_to_process = domains
+        
         rules = []
         current_sid = start_sid
+        # Add consolidation summary comment if consolidation occurred
+        if consolidation and len(consolidation['consolidated_groups']) > 0:
+            summary_rule = SuricataRule()
+            summary_rule.is_comment = True
+            consolidated_count = sum(len(g['children']) for g in consolidation['consolidated_groups'])
+            summary_rule.comment_text = f"# Domain consolidation: {len(domains)} domains consolidated to {len(domains_to_process)} rules ({consolidated_count} consolidated, {len(consolidation['individual_domains'])} individual)"
+            rules.append(summary_rule)
         
-        for domain in domains:
+        for domain in domains_to_process:
             domain_rules = []
             
             if action == "pass":

@@ -1,5 +1,47 @@
 # Release Notes
 
+## Version 1.16.7 - November 12, 2025
+
+### Major Enhancement: Automatic Domain Consolidation
+- **Intelligent Domain Consolidation**: New automatic domain consolidation feature significantly reduces rule count by grouping related domains
+  - **Automatic Grouping**: Analyzes domain lists and consolidates domains sharing common parents (e.g., `subdomain1.example.com`, `subdomain2.example.com` → `example.com`)
+  - **Rule Reduction**: Achieves up to 40-90% rule count reduction for typical domain lists with related domains
+  - **Minimum Threshold**: Only consolidates when 2+ domains share a common parent, avoiding over-generalization
+  - **Shortest Common Parent**: Consolidates to the least specific parent (e.g., all `*.example.com` subdomains → `example.com`)
+  - **Same Rule Syntax**: Uses existing `dotprefix; content:".domain.com"` pattern (no syntax changes required)
+  - **Default Behavior**: Consolidation automatically enabled when "Strict domain list" is unchecked
+  - **Strict Mode Preserved**: When "Strict domain list" is checked, consolidation is disabled (maintains exact domain matching)
+- **Enhanced Import Dialog Preview**: Smart consolidation preview shows detailed information before import
+  - **Savings Display**: Shows exact rule count savings with consolidation (e.g., "Saves 70 rules!")
+  - **Breakdown Statistics**: Displays number of consolidated groups vs individual domains
+  - **Smart Details**: Shows first 3 consolidation groups with covered domains
+  - **Large List Handling**: For lists with many consolidations, shows summary with note about details in post-import comment
+  - **Consolidation Comment**: Adds informative comment header to imports showing consolidation summary
+- **Mixed Domain Handling**: Intelligently handles domain lists with multiple unrelated organizations
+  - **Example**: `['a.example.com', 'b.example.com', 'google.com']` → Creates `example.com` rule + `google.com` rule
+  - **Preservation**: Keeps domains without siblings as individual rules (no unnecessary consolidation)
+  - **PCRE Compatibility**: Consolidation runs independently of PCRE optimization
+  - **History Tracking**: Consolidation details captured in change history
+  - **Undo Support**: Full undo capability via Ctrl+Z
+
+### Technical Implementation
+- **Consolidation Algorithm**: New `consolidate_domains()` method with intelligent parent-child relationship analysis
+  - **TLD Protection**: Avoids consolidating to bare TLDs (e.g., won't consolidate to just `.com`)
+  - **Tree Analysis**: Builds domain hierarchy tree and finds optimal consolidation points
+  - **Least Specific Strategy**: Processes parents from shortest to longest to maximize consolidation
+- **Integration Points**: Enhanced `generate_domain_rules()` with consolidation pre-processing
+- **UI Enhancement**: Updated `update_rule_count_preview()` with consolidation statistics and smart preview
+- **Comment Generation**: Automatic summary comment generation showing consolidation details
+
+### User Impact
+- **Massive Rule Savings**: Reduces AWS Network Firewall capacity consumption for domain-heavy rule sets
+- **Improved Performance**: Fewer rules mean faster rule evaluation
+- **Simplified Management**: Fewer rules to maintain while providing identical security coverage
+- **Zero Learning Curve**: Works automatically with existing workflows - no new concepts to learn
+- **Transparency**: Clear preview and comments show exactly what consolidation occurred
+
+---
+
 ## Version 1.15.7 - November 11, 2025
 
 ### Security Enhancement: Input Validation Integration
@@ -121,7 +163,7 @@
 - **Strict Domain List Feature**: New checkbox option for precise domain matching control
   - **Subdomain Control**: Unchecked (default) allows domain and all subdomains using `dotprefix` transformation
   - **Exact Matching**: Checked restricts matching to exact domain only using `startswith; endswith;` keywords
-  - **False Positive Prevention**: `dotprefix` transformation prevents unwanted matches (e.g., "notmicrosoft.com" won't match "microsoft.com" rules)
+  - **False Positive Prevention**: `dotprefix` transformation prevents unwanted matches (e.g., "notexample.com" won't match "example.com" rules)
   - **PCRE Compatibility**: Automatically disabled when PCRE optimization is enabled
   - **Tooltip Documentation**: Hover tooltip explains: "Matches only exact domain (no subdomains) using startswith/endswith keywords"
 - **Alert on Pass Enhancement**: Flexible rule generation supporting separate alert and pass rules
@@ -1026,7 +1068,7 @@
 
 ### Major New Feature: PCRE Domain Optimization
 - **Smart Domain Grouping**: Revolutionary PCRE optimization for domain list imports that can reduce rule counts by 40-75%
-  - **TLD Variation Detection**: Automatically groups domains like `microsoft.com` and `microsoft.edu` into single PCRE rules: `microsoft\.(com|edu)`
+  - **TLD Variation Detection**: Automatically groups domains like `example.com` and `microsoft.edu` into single PCRE rules: `microsoft\.(com|edu)`
   - **Subdomain Pattern Detection**: Groups subdomains like `mail.google.com`, `drive.google.com`, `docs.google.com` into wildcard patterns: `.*\.google\.com`
   - **Mixed Optimization**: Intelligently combines PCRE groups with individual rules when some domains don't benefit from optimization
   - **Rule Structure Preservation**: Each PCRE group maintains proper rule structure (4 rules for "pass" action, 2 rules for "drop/reject")

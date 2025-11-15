@@ -3137,12 +3137,50 @@ class SuricataRuleGenerator:
                 # Save state for undo functionality (critical for bulk operations)
                 self.save_undo_state()
                 
+                # Close main dialog and show progress dialog
+                dialog.destroy()
+                
+                # Create progress dialog
+                progress_dialog = tk.Toplevel(self.root)
+                progress_dialog.title("Renumbering SIDs")
+                progress_dialog.geometry("400x120")
+                progress_dialog.transient(self.root)
+                progress_dialog.grab_set()
+                progress_dialog.resizable(False, False)
+                
+                # Center the progress dialog
+                progress_dialog.geometry("+%d+%d" % (self.root.winfo_rootx() + 200, self.root.winfo_rooty() + 200))
+                
+                # Progress frame
+                progress_frame = ttk.Frame(progress_dialog)
+                progress_frame.pack(fill=tk.BOTH, expand=True, padx=20, pady=20)
+                
+                # Status label
+                status_label = ttk.Label(progress_frame, text=f"Renumbering {rule_count} rules...")
+                status_label.pack(pady=(0, 10))
+                
+                # Progress bar
+                progress_bar = ttk.Progressbar(progress_frame, mode='determinate', length=350)
+                progress_bar.pack(pady=(0, 10))
+                
+                # Progress text label
+                progress_text = ttk.Label(progress_frame, text="0%")
+                progress_text.pack()
+                
+                # Force dialog to display
+                progress_dialog.update()
+                
                 # Apply the SID renumbering with conflict resolution
                 current_sid = start_sid
                 updated_count = 0
                 all_existing_sids = set(r.sid for r in all_actual_rules)
                 
-                for rule in rules_to_renumber:
+                for idx, rule in enumerate(rules_to_renumber):
+                    # Update progress bar
+                    progress = ((idx + 1) / rule_count) * 100
+                    progress_bar['value'] = progress
+                    progress_text.config(text=f"{int(progress)}% ({idx + 1}/{rule_count} rules)")
+                    progress_dialog.update()
                     # Handle conflict resolution strategies
                     if conflict_resolution["strategy"] == "skip":
                         # Skip conflicting SIDs - find next available
@@ -3184,13 +3222,13 @@ class SuricataRuleGenerator:
                     # Move to next SID for next rule
                     current_sid += increment
                 
+                # Close progress dialog
+                progress_dialog.destroy()
+                
                 # Refresh the UI to show changes
                 self.refresh_table()
                 self.modified = True
                 self.update_status_bar()
-                
-                # Close the dialog and show success message
-                dialog.destroy()
                 
                 # Show completion message
                 if updated_count > 0:

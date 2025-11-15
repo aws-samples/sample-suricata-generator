@@ -56,9 +56,9 @@ class UIManager:
         # File menu - file operations and domain import
         file_menu = tk.Menu(menubar, tearoff=0)
         menubar.add_cascade(label="File", menu=file_menu)
-        file_menu.add_command(label="New", command=self.parent.new_file)
-        file_menu.add_command(label="Open", command=self.parent.open_file)
-        file_menu.add_command(label="Save", command=self.parent.save_file)
+        file_menu.add_command(label="New", command=self.parent.new_file, accelerator="Ctrl+N")
+        file_menu.add_command(label="Open", command=self.parent.open_file, accelerator="Ctrl+O")
+        file_menu.add_command(label="Save", command=self.parent.save_file, accelerator="Ctrl+S")
         file_menu.add_command(label="Save As", command=self.parent.save_as_file)
         file_menu.add_command(label="Export", command=self.parent.export_file)
         file_menu.add_separator()
@@ -85,12 +85,17 @@ class UIManager:
         self.parent.tracking_menu_var = tk.BooleanVar(value=self.parent.tracking_enabled)
         tools_menu.add_checkbutton(label="Enable Change Tracking", variable=self.parent.tracking_menu_var, command=self.parent.toggle_tracking)
         
-        # Help menu - about dialog
+        # Help menu - about dialog and keyboard shortcuts
         help_menu = tk.Menu(menubar, tearoff=0)
         menubar.add_cascade(label="Help", menu=help_menu)
+        help_menu.add_command(label="Keyboard Shortcuts", command=self.show_keyboard_shortcuts)
+        help_menu.add_separator()
         help_menu.add_command(label="About", command=self.parent.show_about)
         
         # Keyboard shortcuts
+        self.parent.root.bind('<Control-n>', lambda e: self.parent.new_file())
+        self.parent.root.bind('<Control-o>', lambda e: self.parent.open_file())
+        self.parent.root.bind('<Control-s>', lambda e: self.parent.save_file())
         self.parent.root.bind('<Control-z>', lambda e: self.parent.undo_last_change())
         self.parent.root.bind('<Delete>', self.on_delete_key)
         self.parent.root.bind('<Control-c>', lambda e: self.handle_ctrl_c())
@@ -903,6 +908,109 @@ class UIManager:
         
         # Bind Enter key
         dialog.bind('<Return>', lambda e: on_go())
+    
+    def show_keyboard_shortcuts(self):
+        """Display keyboard shortcuts cheatsheet in a dialog"""
+        dialog = tk.Toplevel(self.parent.root)
+        dialog.title("Keyboard Shortcuts")
+        dialog.geometry("700x600")
+        dialog.transient(self.parent.root)
+        dialog.grab_set()
+        dialog.resizable(False, False)
+        
+        # Center the dialog
+        dialog.geometry("+%d+%d" % (self.parent.root.winfo_rootx() + 100, self.parent.root.winfo_rooty() + 50))
+        
+        # Main frame
+        main_frame = ttk.Frame(dialog)
+        main_frame.pack(fill=tk.BOTH, expand=True, padx=20, pady=20)
+        
+        # Title
+        title_label = ttk.Label(main_frame, text="Keyboard Shortcuts", 
+                               font=("TkDefaultFont", 14, "bold"))
+        title_label.pack(pady=(0, 15))
+        
+        # Create text widget with scrollbar for shortcuts
+        text_frame = ttk.Frame(main_frame)
+        text_frame.pack(fill=tk.BOTH, expand=True)
+        
+        text_widget = tk.Text(text_frame, wrap=tk.WORD, font=("TkDefaultFont", 10),
+                             bg=dialog.cget('bg'), relief=tk.FLAT, cursor="arrow")
+        scrollbar = ttk.Scrollbar(text_frame, orient=tk.VERTICAL, command=text_widget.yview)
+        text_widget.configure(yscrollcommand=scrollbar.set)
+        
+        text_widget.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        
+        # Configure text tags for formatting
+        text_widget.tag_configure("category", font=("TkDefaultFont", 11, "bold"), 
+                                foreground="#1976D2", spacing1=10, spacing3=5)
+        text_widget.tag_configure("shortcut", font=("Consolas", 10, "bold"))
+        text_widget.tag_configure("description", font=("TkDefaultFont", 10))
+        
+        # Add shortcuts organized by category
+        shortcuts = [
+            ("File Operations", [
+                ("Ctrl+S", "Save current file"),
+                ("Ctrl+O", "Open file"),
+                ("Ctrl+N", "New file"),
+            ]),
+            ("Editing & Selection", [
+                ("Ctrl+Z", "Undo last change"),
+                ("Ctrl+C", "Copy selected rules"),
+                ("Ctrl+V", "Paste rules"),
+                ("Ctrl+A", "Select all rules"),
+                ("Delete", "Delete selected rule(s) (when rules table has focus)"),
+                ("Space", "Toggle rule enabled/disabled (when rules table has focus)"),
+            ]),
+            ("Navigation", [
+                ("Home", "Jump to first rule"),
+                ("End", "Jump to placeholder/last rule"),
+                ("Down Arrow", "Navigate to placeholder when at last rule"),
+                ("Ctrl+G", "Go to line number"),
+            ]),
+            ("Search", [
+                ("Ctrl+F", "Open Find dialog"),
+                ("F3", "Find next occurrence"),
+                ("Escape", "Close search and clear highlights"),
+            ]),
+            ("Rules Table Interactions", [
+                ("Double-Click", "Edit selected rule or comment"),
+                ("Right-Click", "Show context menu with copy/paste options"),
+                ("Click below rules", "Add new rule (shows placeholder)"),
+            ]),
+        ]
+        
+        # Insert shortcuts into text widget
+        for category, shortcuts_list in shortcuts:
+            # Category header
+            text_widget.insert(tk.END, f"{category}\n", "category")
+            
+            # Shortcuts in this category
+            for shortcut, description in shortcuts_list:
+                text_widget.insert(tk.END, f"  {shortcut:<20}", "shortcut")
+                text_widget.insert(tk.END, f"{description}\n", "description")
+            
+            text_widget.insert(tk.END, "\n")
+        
+        # Add tip at the bottom
+        text_widget.insert(tk.END, "\n")
+        text_widget.tag_configure("tip", font=("TkDefaultFont", 9, "italic"), 
+                                foreground="#666666")
+        text_widget.insert(tk.END, "Tip: Most shortcuts work when the rules table has focus. ", "tip")
+        text_widget.insert(tk.END, "Click on the rules table first if a shortcut isn't working.", "tip")
+        
+        # Make text widget read-only
+        text_widget.config(state=tk.DISABLED)
+        
+        # Close button
+        button_frame = ttk.Frame(main_frame)
+        button_frame.pack(fill=tk.X, pady=(15, 0))
+        
+        ttk.Button(button_frame, text="Close", command=dialog.destroy).pack(side=tk.RIGHT)
+        
+        # Focus on dialog
+        dialog.focus_set()
     
     def show_sid_management(self):
         """Show SID Management dialog for bulk SID renumbering"""

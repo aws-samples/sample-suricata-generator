@@ -1,5 +1,41 @@
 # Release Notes
 
+## Version 1.17.7 - November 13, 2025
+
+### User Experience Enhancements
+
+#### Keyboard Shortcuts Cheatsheet
+- **Help > Keyboard Shortcuts Menu**: New comprehensive keyboard shortcuts reference dialog accessible from Help menu
+  - **Organized by Category**: Shortcuts grouped into logical categories (File Operations, Editing & Selection, Navigation, Search, Rules Table Interactions)
+  - **Professional Formatting**: Clean layout with monospace font for shortcuts and clear descriptions
+  - **Quick Reference**: Easy-to-scan format showing all available keyboard shortcuts in one convenient location
+  - **Context-Aware Tip**: Helpful reminder that most shortcuts require rules table focus to function
+  - **Zero Learning Curve**: Instantly accessible help for both new and experienced users
+
+#### Progress Bar for Bulk Operations
+- **Visual Progress Feedback**: Added animated progress bars to long-running bulk operations for better user experience
+  - **Domain Import Progress**: Shows real-time progress when importing domain lists with percentage complete and domain count (e.g., "45% (23/50 domains)")
+  - **SID Renumbering Progress**: Displays progress during bulk SID management operations with percentage and rule count (e.g., "75% (150/200 rules)")
+  - **Professional Appearance**: Modal progress dialogs with clean layout and status updates
+  - **Prevents UI Freeze Concerns**: Clear visual indication that application is working during large operations
+  - **Automatic Cleanup**: Progress dialogs automatically close upon completion
+
+### Technical Implementation
+- **Zero Dependencies**: Both features implemented using standard tkinter/ttk components already in use
+- **UIManager Enhancement**: Added `show_keyboard_shortcuts()` method to UIManager class
+- **DomainImporter Integration**: Enhanced `generate_domain_rules()` and `generate_domain_rules_with_pcre()` methods with progress bar parameters
+- **SID Management Integration**: Added progress bar to `show_sid_management()` operation in main application
+- **Non-Breaking Changes**: All existing functionality preserved - progress bars are additive enhancements
+- **Performance Optimized**: Progress updates don't significantly slow down bulk operations
+
+### User Impact
+- **Improved Discoverability**: Keyboard shortcuts now easy to find and reference via Help menu
+- **Enhanced User Confidence**: Progress indicators eliminate uncertainty during long-running operations
+- **Professional Polish**: Features commonly expected in enterprise applications now included
+- **Productivity Boost**: Users can learn shortcuts quickly and work more efficiently
+
+---
+
 ## Version 1.16.7 - November 12, 2025
 
 ### Major Enhancement: Automatic Domain Consolidation

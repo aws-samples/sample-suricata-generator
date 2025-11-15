@@ -360,11 +360,49 @@ class DomainImporter:
                 alert_on_pass = alert_on_pass_var.get()
                 strict_domain = strict_domain_var.get() and not use_pcre  # Disable strict if PCRE is enabled
                 
+                # Close the import dialog first
+                dialog.destroy()
+                
+                # Create progress dialog
+                progress_dialog = tk.Toplevel(self.parent.root)
+                progress_dialog.title("Importing Domains")
+                progress_dialog.geometry("400x120")
+                progress_dialog.transient(self.parent.root)
+                progress_dialog.grab_set()
+                progress_dialog.resizable(False, False)
+                
+                # Center the progress dialog
+                progress_dialog.geometry("+%d+%d" % (self.parent.root.winfo_rootx() + 200, self.parent.root.winfo_rooty() + 200))
+                
+                # Progress frame
+                progress_frame = ttk.Frame(progress_dialog)
+                progress_frame.pack(fill=tk.BOTH, expand=True, padx=20, pady=20)
+                
+                # Status label
+                status_label = ttk.Label(progress_frame, text=f"Processing {len(domains)} domains...")
+                status_label.pack(pady=(0, 10))
+                
+                # Progress bar
+                progress_bar = ttk.Progressbar(progress_frame, mode='determinate', length=350)
+                progress_bar.pack(pady=(0, 10))
+                
+                # Progress text label
+                progress_text = ttk.Label(progress_frame, text="0%")
+                progress_text.pack()
+                
+                # Force dialog to display
+                progress_dialog.update()
+                
                 # Generate rules for each domain (with optional PCRE optimization)
                 if use_pcre:
-                    new_rules = self.generate_domain_rules_with_pcre(domains, action, start_sid, message_template, alert_on_pass)
+                    new_rules = self.generate_domain_rules_with_pcre(domains, action, start_sid, message_template, alert_on_pass, 
+                                                                     progress_bar, progress_text, progress_dialog)
                 else:
-                    new_rules = self.generate_domain_rules(domains, action, start_sid, message_template, alert_on_pass, strict_domain)
+                    new_rules = self.generate_domain_rules(domains, action, start_sid, message_template, alert_on_pass, strict_domain,
+                                                           progress_bar, progress_text, progress_dialog)
+                
+                # Close progress dialog
+                progress_dialog.destroy()
                 
                 # Calculate domain SID ranges for history tracking
                 domain_details = []
@@ -514,7 +552,7 @@ class DomainImporter:
             'individual_domains': sorted(individual_domains)
         }
     
-    def generate_domain_rules(self, domains: List[str], action: str, start_sid: int, message_template: str, alert_on_pass: bool = True, strict_domain: bool = False) -> List[SuricataRule]:
+    def generate_domain_rules(self, domains: List[str], action: str, start_sid: int, message_template: str, alert_on_pass: bool = True, strict_domain: bool = False, progress_bar=None, progress_text=None, progress_dialog=None) -> List[SuricataRule]:
         """Generate Suricata rules for a list of domains based on specified action
         
         For 'pass' action: Creates Pass rules with optional alert keyword (2 rules per domain)
@@ -527,6 +565,9 @@ class DomainImporter:
             message_template: Template string with {domain} placeholder
             alert_on_pass: Whether to add alert keyword to pass rules
             strict_domain: Whether to use strict domain matching (exact match only, no subdomains)
+            progress_bar: Optional progress bar widget to update
+            progress_text: Optional progress text label to update
+            progress_dialog: Optional progress dialog to update
         
         Returns:
             List of SuricataRule objects ready for insertion
@@ -544,6 +585,8 @@ class DomainImporter:
         
         rules = []
         current_sid = start_sid
+        total_domains = len(domains_to_process)
+        
         # Add consolidation summary comment if consolidation occurred
         if consolidation and len(consolidation['consolidated_groups']) > 0:
             summary_rule = SuricataRule()
@@ -552,7 +595,14 @@ class DomainImporter:
             summary_rule.comment_text = f"# Domain consolidation: {len(domains)} domains consolidated to {len(domains_to_process)} rules ({consolidated_count} consolidated, {len(consolidation['individual_domains'])} individual)"
             rules.append(summary_rule)
         
-        for domain in domains_to_process:
+        for idx, domain in enumerate(domains_to_process):
+            # Update progress bar if provided
+            if progress_bar is not None and progress_text is not None and progress_dialog is not None:
+                progress = (idx / total_domains) * 100
+                progress_bar['value'] = progress
+                progress_text.config(text=f"{int(progress)}% ({idx}/{total_domains} domains)")
+                progress_dialog.update()
+            
             domain_rules = []
             
             if action == "pass":
@@ -780,6 +830,12 @@ class DomainImporter:
             
             rules.extend(domain_rules)
         
+        # Update progress to 100% when done
+        if progress_bar is not None and progress_text is not None and progress_dialog is not None:
+            progress_bar['value'] = 100
+            progress_text.config(text=f"100% (Complete)")
+            progress_dialog.update()
+        
         return rules
     
     def analyze_domains_for_pcre(self, domains):
@@ -865,7 +921,7 @@ class DomainImporter:
             'individual_domains': individual_domains
         }
     
-    def generate_domain_rules_with_pcre(self, domains, action, start_sid, message_template, alert_on_pass=True):
+    def generate_domain_rules_with_pcre(self, domains, action, start_sid, message_template, alert_on_pass=True, progress_bar=None, progress_text=None, progress_dialog=None):
         """Generate domain rules with PCRE optimization
         
         This method analyzes the domain list and creates PCRE-based rules where beneficial,
@@ -882,9 +938,19 @@ class DomainImporter:
         
         rules = []
         current_sid = start_sid
+        total_items = len(optimized_groups) + len(individual_domains)
+        current_item = 0
         
         # Generate PCRE rules for optimized groups
         for group in optimized_groups:
+            # Update progress bar if provided
+            if progress_bar is not None and progress_text is not None and progress_dialog is not None:
+                progress = (current_item / total_items) * 100
+                progress_bar['value'] = progress
+                progress_text.config(text=f"{int(progress)}% (Processing PCRE groups)")
+                progress_dialog.update()
+            
+            current_item += 1
             pattern = group['pattern']
             group_domains = group['domains']
             group_description = group['description']

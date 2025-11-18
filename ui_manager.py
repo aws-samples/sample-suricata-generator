@@ -64,6 +64,7 @@ class UIManager:
         file_menu.add_separator()
         file_menu.add_command(label="Load AWS Best Practices Template", command=self.parent.domain_importer.load_aws_template)
         file_menu.add_command(label="Import Domain List", command=self.parent.domain_importer.import_domains)
+        file_menu.add_command(label="Import Stateful Rule Group", command=self.parent.stateful_rule_importer.import_standard_rule_group)
         file_menu.add_separator()
         file_menu.add_command(label="Exit", command=self.parent.on_closing)
         

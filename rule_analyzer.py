@@ -30,9 +30,9 @@ class RuleAnalyzer:
             variables: Dictionary of network variable definitions for analysis
             
         Returns:
-            Dictionary with conflict categories: {'critical': [], 'warning': [], 'info': [], 'protocol_layering': [], 'sticky_buffer_order': [], 'udp_flow_established': []}
+            Dictionary with conflict categories: {'critical': [], 'warning': [], 'info': [], 'protocol_layering': [], 'sticky_buffer_order': [], 'udp_flow_established': [], 'protocol_keyword_mismatch': []}
         """
-        conflicts = {'critical': [], 'warning': [], 'info': [], 'protocol_layering': [], 'sticky_buffer_order': [], 'udp_flow_established': []}
+        conflicts = {'critical': [], 'warning': [], 'info': [], 'protocol_layering': [], 'sticky_buffer_order': [], 'udp_flow_established': [], 'protocol_keyword_mismatch': []}
         
         # Filter out comments and blank lines for analysis
         actual_rules = [r for r in rules if not getattr(r, 'is_comment', False) and not getattr(r, 'is_blank', False)]
@@ -80,6 +80,27 @@ class RuleAnalyzer:
         # Check for UDP flow:established issues
         udp_flow_issues = self.check_udp_flow_established_issues(rules)
         conflicts['udp_flow_established'] = udp_flow_issues
+        
+        # Check for protocol/keyword mismatches
+        protocol_keyword_issues = self.check_protocol_keyword_mismatch(rules)
+        conflicts['protocol_keyword_mismatch'] = protocol_keyword_issues
+        
+        # Check for port/protocol mismatches
+        port_protocol_issues = self.check_port_protocol_mismatch(rules)
+        conflicts['port_protocol_mismatch'] = port_protocol_issues
+        
+        # Check for contradictory flow keywords
+        contradictory_flow_issues = self.check_contradictory_flow_keywords(rules)
+        conflicts['contradictory_flow'] = contradictory_flow_issues
+        
+        # Check for missing nocase on domain rules
+        missing_nocase_issues = self.check_missing_nocase_on_domains(rules)
+        conflicts['missing_nocase'] = missing_nocase_issues
+        
+        # Check for packet-scope drop/reject conflicting with flow-scope pass
+        # This was a bug in Suricata <8.0 that has been fixed
+        packet_flow_conflicts = self.check_packet_drop_flow_pass_conflict(rules)
+        conflicts['packet_drop_flow_pass'] = packet_flow_conflicts
         
         return conflicts
     
@@ -929,9 +950,43 @@ class RuleAnalyzer:
         content = (rule.content or '').lower()
         protocol = rule.protocol.lower()
         
-        # FIRST: Check for variable-like keywords that force packet-level classification
+        # FIRST: Check for application layer sticky buffers - these take precedence
+        # Even with flow:established, if a rule uses app-layer sticky buffers, it's APP_TX
+        app_layer_buffers = [
+            'http.accept', 'http.accept_enc', 'http.accept_lang', 'http.connection',
+            'http.content_len', 'http.content_type', 'http.cookie', 'http.header',
+            'http.header_names', 'http.host', 'http.method', 'http.protocol',
+            'http.referer', 'http.request_body', 'http.request_header', 'http.request_line',
+            'http.response_body', 'http.response_header', 'http.response_line',
+            'http.server', 'http.start', 'http.stat_code', 'http.stat_msg',
+            'http.uri', 'http.uri.raw', 'http.user_agent',
+            'tls.cert_fingerprint', 'tls.cert_issuer', 'tls.cert_serial',
+            'tls.cert_subject', 'tls.certs', 'tls.sni', 'tls.version',
+            'dns.query', 'dns.answer',
+            'ssh.proto', 'ssh.software',
+            'ja3.hash', 'ja3.string', 'ja3s.hash', 'ja3s.string',
+            'ja4.hash', 'ja4.string',
+            'file.data', 'file.name',
+            'smb.named_pipe', 'smb.share',
+            'krb5.cname', 'krb5.sname',
+            'dcerpc.iface', 'dcerpc.stub_data',
+            'ftp.command', 'ftp.command_line'
+        ]
+        
+        if any(buffer in content for buffer in app_layer_buffers):
+            return 'SIG_TYPE_APPLAYER'
+        
+        # Application layer protocols (http, tls, etc.) are SIG_TYPE_APPLAYER
+        if protocol in ['dcerpc', 'dhcp', 'dns', 'ftp', 'http', 'http2', 'https', 'ikev2', 'imap', 'krb5', 'msn', 'ntp', 'quic', 'smb', 'smtp', 'ssh', 'tftp', 'tls']:
+            return 'SIG_TYPE_APPLAYER'
+        
+        # Rules with app-layer-protocol keywords are always SIG_TYPE_APPLAYER
+        if 'app-layer-protocol:' in content:
+            return 'SIG_TYPE_APPLAYER'
+        
+        # SECOND: Check for variable-like keywords that force packet-level classification
         # Per https://docs.suricata.io/en/latest/rules/rule-types.html#variable-like-keywords-sig-type
-        # Rules with flow:established or flow:not_established become packet rules regardless of protocol
+        # Rules with flow:established or flow:not_established become packet rules (if not app-layer)
         if 'flow:established' in content or 'flow:not_established' in content or 'not_established' in content:
             return 'SIG_TYPE_PKT'
         
@@ -946,27 +1001,16 @@ class RuleAnalyzer:
             if any(op in content for op in ['isset', 'notset']):
                 return 'SIG_TYPE_PKT'
         
-        # Rules with app-layer-protocol keywords are always SIG_TYPE_APPLAYER
-        if 'app-layer-protocol:' in content:
-            return 'SIG_TYPE_APPLAYER'
-        
-        # Low-level protocol rules (tcp, ip) with flow keywords (except the ones above) 
-        # get elevated to application layer processing
+        # Low-level protocol rules (tcp, ip) with flow keywords get elevated to application layer processing
         if protocol in ['tcp', 'ip'] and 'flow:' in content:
             return 'SIG_TYPE_APPLAYER'
         
-        # Application layer protocols (http, tls, etc.) are SIG_TYPE_APPLAYER 
-        # (unless already caught by variable-like keywords above)
-        if protocol in ['dcerpc', 'dhcp', 'dns', 'ftp', 'http', 'http2', 'https', 'ikev2', 'imap', 'krb5', 'msn', 'ntp', 'quic', 'smb', 'smtp', 'ssh', 'tftp', 'tls']:
-            return 'SIG_TYPE_APPLAYER'
-        
         # Other rules with flow keywords are SIG_TYPE_PKT
-        elif 'flow:' in content:
+        if 'flow:' in content:
             return 'SIG_TYPE_PKT'
         
         # Rules with no special keywords are SIG_TYPE_IPONLY
-        else:
-            return 'SIG_TYPE_IPONLY'
+        return 'SIG_TYPE_IPONLY'
     
     def check_rule_type_conflict(self, upper_rule: SuricataRule, lower_rule: SuricataRule,
                                 upper_line: int, lower_line: int, upper_type: str, lower_type: str,
@@ -2005,6 +2049,418 @@ class RuleAnalyzer:
         
         return issues
     
+    def check_protocol_keyword_mismatch(self, rules: List[SuricataRule]) -> List[Dict]:
+        """Check for protocols using incompatible application-layer keywords
+        
+        Uses transport layer hierarchy to detect:
+        1. INVALID combinations (WARNING): Protocol's transport incompatible with keyword's requirements
+        2. Suboptimal combinations (INFO): Low-level protocol when specific app protocol is better
+        
+        Args:
+            rules: List of SuricataRule objects to analyze
+            
+        Returns:
+            List of dictionaries describing protocol/keyword mismatches
+        """
+        issues = []
+        
+        # Protocol hierarchy: Map each protocol to its transport layer
+        protocol_transport_layer = {
+            # TCP-based protocols
+            'tcp': 'tcp',
+            'tls': 'tcp',
+            'http': 'tcp',
+            'http2': 'tcp',
+            'https': 'tcp',
+            'ssh': 'tcp',
+            'smtp': 'tcp',
+            'ftp': 'tcp',
+            'smb': 'tcp',
+            'dcerpc': 'tcp',
+            'krb5': 'tcp',
+            'imap': 'tcp',
+            'pop3': 'tcp',
+            'msn': 'tcp',
+            'ikev2': 'tcp',
+            'rdp': 'tcp',
+            
+            # UDP-based protocols
+            'udp': 'udp',
+            'dns': 'udp',
+            'dhcp': 'udp',
+            'ntp': 'udp',
+            'tftp': 'udp',
+            'snmp': 'udp',
+            'quic': 'udp',
+            'syslog': 'udp',
+            'radius': 'udp',
+            'nfs': 'udp',
+            
+            # Other
+            'icmp': 'icmp',
+            'ip': 'ip'  # IP can carry anything
+        }
+        
+        # Define protocol-to-keyword mappings
+        protocol_keyword_map = {
+            'tls': ['tls.sni', 'tls.cert_subject', 'tls.cert_issuer', 'tls.cert_serial',
+                    'tls.cert_fingerprint', 'tls.certs', 'tls.version', 'ja3.hash', 
+                    'ja3.string', 'ja3s.hash', 'ja3s.string', 'ja4.hash', 'ja4.string'],
+            'http': ['http.host', 'http.uri', 'http.method', 'http.user_agent', 'http.header',
+                     'http.cookie', 'http.accept', 'http.content_type', 'http.request_header',
+                     'http.response_header', 'http.request_body', 'http.response_body'],
+            'dns': ['dns.query', 'dns.answer'],
+            'ssh': ['ssh.proto', 'ssh.software', 'ssh.protoversion', 'ssh.softwareversion'],
+            'smtp': ['smtp.command', 'smtp.data'],
+            'ftp': ['ftp.command', 'ftp.command_line'],
+            'smb': ['smb.named_pipe', 'smb.share'],
+            'dcerpc': ['dcerpc.iface', 'dcerpc.stub_data'],
+            'krb5': ['krb5.cname', 'krb5.sname']
+        }
+        
+        # Map each app protocol to its required transport layer
+        keyword_transport_requirements = {
+            'tls': 'tcp',
+            'http': 'tcp',
+            'ssh': 'tcp',
+            'smtp': 'tcp',
+            'ftp': 'tcp',
+            'smb': 'tcp',
+            'dcerpc': 'tcp',
+            'krb5': 'tcp',
+            'dns': 'udp'
+        }
+        
+        # Filter out comments and blank lines
+        actual_rules = [r for r in rules if not getattr(r, 'is_comment', False) and not getattr(r, 'is_blank', False)]
+        
+        for rule in actual_rules:
+            # Get line number in original rules list
+            line_num = rules.index(rule) + 1
+            
+            protocol = rule.protocol.lower()
+            
+            # Get protocol's transport layer
+            protocol_transport = protocol_transport_layer.get(protocol, None)
+            if not protocol_transport:
+                continue  # Unknown protocol, skip
+            
+            # Get rule content
+            full_content = (rule.content or '') + ' ' + (rule.original_options or '')
+            full_content_lower = full_content.lower()
+            
+            # Check if rule uses any application-layer keywords
+            for app_protocol, keywords in protocol_keyword_map.items():
+                # Check if any of the app-layer keywords are present
+                mismatched_keywords = [kw for kw in keywords if kw in full_content_lower]
+                
+                if mismatched_keywords:
+                    keyword_list = ', '.join(f"'{kw}'" for kw in mismatched_keywords[:3])
+                    if len(mismatched_keywords) > 3:
+                        keyword_list += f" and {len(mismatched_keywords) - 3} more"
+                    
+                    # Get transport layer required by these keywords
+                    required_transport = keyword_transport_requirements.get(app_protocol)
+                    
+                    # Check for cross-protocol keyword mismatch (app-layer protocol using different app-layer keywords)
+                    if protocol in protocol_keyword_map and protocol != app_protocol:
+                        # App-layer protocol using keywords from DIFFERENT app-layer protocol
+                        # e.g., HTTP using tls.sni or TLS using http.host
+                        # This is INVALID - the keywords won't match the protocol's traffic
+                        issue = {
+                            'line': line_num,
+                            'rule': rule,
+                            'current_protocol': protocol.upper(),
+                            'suggested_protocol': app_protocol.upper(),
+                            'keywords': mismatched_keywords,
+                            'issue': (f"Rule uses {protocol.upper()} protocol with {app_protocol.upper()}-specific keyword(s): {keyword_list}. "
+                                     f"{protocol.upper()} traffic does not contain {app_protocol.upper()} data - this rule will never match"),
+                            'suggestion': f"Change protocol from '{protocol}' to '{app_protocol}' (or use appropriate {protocol.upper()} keywords instead)",
+                            'severity': 'warning'
+                        }
+                        issues.append(issue)
+                        break
+                    
+                    # Check transport compatibility
+                    if protocol == 'ip':
+                        # IP is universal - can't determine transport, skip check
+                        continue
+                    elif protocol_transport != required_transport:
+                        # INVALID: Transport layer mismatch
+                        # e.g., DHCP (udp) with tls.sni (requires tcp)
+                        issue = {
+                            'line': line_num,
+                            'rule': rule,
+                            'current_protocol': protocol.upper(),
+                            'suggested_protocol': app_protocol.upper(),
+                            'keywords': mismatched_keywords,
+                            'issue': (f"Rule uses {protocol.upper()} protocol with {app_protocol.upper()}-specific keyword(s): {keyword_list}. "
+                                     f"{app_protocol.upper()} requires {required_transport.upper()} transport but {protocol.upper()} uses {protocol_transport.upper()} - this rule will never match"),
+                            'suggestion': f"Change protocol from '{protocol}' to '{app_protocol}' to fix transport layer mismatch",
+                            'severity': 'warning'
+                        }
+                        issues.append(issue)
+                        break
+                    elif protocol in ['tcp', 'udp'] and protocol != app_protocol:
+                        # SUBOPTIMAL: Low-level protocol with app-layer keywords
+                        # Transport matches, but using specific protocol is better
+                        issue = {
+                            'line': line_num,
+                            'rule': rule,
+                            'current_protocol': protocol.upper(),
+                            'suggested_protocol': app_protocol.upper(),
+                            'keywords': mismatched_keywords,
+                            'issue': (f"Rule uses {protocol.upper()} protocol with {app_protocol.upper()}-specific keyword(s): {keyword_list}"),
+                            'suggestion': f"Consider using '{app_protocol}' protocol instead of '{protocol}' for better clarity and performance",
+                            'severity': 'info'
+                        }
+                        issues.append(issue)
+                        break
+        
+        return issues
+    
+    def check_port_protocol_mismatch(self, rules: List[SuricataRule]) -> List[Dict]:
+        """Check for protocols on unusual/unexpected ports
+        
+        Detects when protocols are used on non-standard ports that might indicate
+        configuration errors.
+        
+        Args:
+            rules: List of SuricataRule objects to analyze
+            
+        Returns:
+            List of dictionaries describing port/protocol mismatches
+        """
+        issues = []
+        
+        # Define typical ports for each protocol
+        protocol_typical_ports = {
+            'http': {80, 8080, 8000, 8888, 3000, 5000},
+            'https': {443, 8443},
+            'tls': {443, 8443, 465, 587, 993, 995, 636},  # HTTPS, SMTPS, IMAPS, POP3S, LDAPS
+            'ssh': {22},
+            'ftp': {20, 21},
+            'smtp': {25, 465, 587},  # SMTP, SMTPS, Submission
+            'dns': {53},
+            'dhcp': {67, 68},
+            'ntp': {123},
+            'snmp': {161, 162},
+            'tftp': {69},
+            'pop3': {110, 995},  # POP3, POP3S
+            'imap': {143, 993},  # IMAP, IMAPS
+            'smb': {139, 445},
+            'rdp': {3389}
+        }
+        
+        # Filter out comments and blank lines
+        actual_rules = [r for r in rules if not getattr(r, 'is_comment', False) and not getattr(r, 'is_blank', False)]
+        
+        for rule in actual_rules:
+            line_num = rules.index(rule) + 1
+            protocol = rule.protocol.lower()
+            
+            # Only check protocols that have typical ports defined
+            if protocol not in protocol_typical_ports:
+                continue
+            
+            # Check destination port (most relevant for protocol detection)
+            dst_port = rule.dst_port.strip()
+            
+            # Skip 'any' and variables - can't validate those
+            if dst_port.lower() == 'any' or dst_port.startswith(('$', '@', '[')):
+                continue
+            
+            # Parse single port
+            try:
+                port_num = int(dst_port)
+            except ValueError:
+                continue  # Not a simple port, skip
+            
+            # Check if port is in the typical set for this protocol
+            typical_ports = protocol_typical_ports[protocol]
+            if port_num not in typical_ports:
+                # Found mismatch
+                typical_ports_str = ', '.join(str(p) for p in sorted(typical_ports))
+                
+                issue = {
+                    'line': line_num,
+                    'rule': rule,
+                    'protocol': protocol.upper(),
+                    'port': port_num,
+                    'typical_ports': typical_ports_str,
+                    'issue': f"Rule uses {protocol.upper()} protocol on port {port_num}, but {protocol.upper()} typically uses ports: {typical_ports_str}",
+                    'suggestion': f"Verify that {protocol.upper()} is actually running on port {port_num}, or check if protocol should be changed",
+                    'severity': 'info'
+                }
+                issues.append(issue)
+        
+        return issues
+    
+    def check_contradictory_flow_keywords(self, rules: List[SuricataRule]) -> List[Dict]:
+        """Check for contradictory flow keywords in same rule
+        
+        Detects mutually exclusive flow states like:
+        - flow:to_server,to_client (can't be both directions)
+        - flow:established,not_established (can't be both states)
+        
+        Args:
+            rules: List of SuricataRule objects to analyze
+            
+        Returns:
+            List of dictionaries describing contradictory flow keywords
+        """
+        issues = []
+        
+        # Filter out comments and blank lines
+        actual_rules = [r for r in rules if not getattr(r, 'is_comment', False) and not getattr(r, 'is_blank', False)]
+        
+        for rule in actual_rules:
+            line_num = rules.index(rule) + 1
+            
+            # Extract flow keywords
+            flow_keywords = self.extract_flow_keywords((rule.content or '') + ' ' + (rule.original_options or ''))
+            
+            if not flow_keywords:
+                continue
+            
+            # Check for contradictions
+            contradictions = []
+            
+            # Check for both to_server and to_client
+            if 'to_server' in flow_keywords and 'to_client' in flow_keywords:
+                contradictions.append("'to_server' and 'to_client' (flow cannot be in both directions)")
+            
+            # Check for both established and not_established
+            if ('established' in flow_keywords or 'to_server' in flow_keywords or 'to_client' in flow_keywords) and 'not_established' in flow_keywords:
+                contradictions.append("'established' and 'not_established' (mutually exclusive states)")
+            
+            if contradictions:
+                contradiction_str = '; '.join(contradictions)
+                issue = {
+                    'line': line_num,
+                    'rule': rule,
+                    'contradictions': contradictions,
+                    'issue': f"Rule contains contradictory flow keywords: {contradiction_str}",
+                    'suggestion': "Remove one of the contradictory flow keywords - the rule will never match in its current state",
+                    'severity': 'warning'
+                }
+                issues.append(issue)
+        
+        return issues
+    
+    def check_missing_nocase_on_domains(self, rules: List[SuricataRule]) -> List[Dict]:
+        """Check for domain matching without nocase modifier
+        
+        Domain names are case-insensitive, so tls.sni and http.host content matches
+        should use the nocase modifier to match all case variations.
+        
+        Args:
+            rules: List of SuricataRule objects to analyze
+            
+        Returns:
+            List of dictionaries describing missing nocase modifiers
+        """
+        issues = []
+        
+        # Filter out comments and blank lines
+        actual_rules = [r for r in rules if not getattr(r, 'is_comment', False) and not getattr(r, 'is_blank', False)]
+        
+        for rule in actual_rules:
+            line_num = rules.index(rule) + 1
+            
+            full_content = (rule.content or '') + ' ' + (rule.original_options or '')
+            full_content_lower = full_content.lower()
+            
+            # Check for domain-matching keywords
+            has_tls_sni = 'tls.sni' in full_content_lower
+            has_http_host = 'http.host' in full_content_lower
+            
+            if not (has_tls_sni or has_http_host):
+                continue  # No domain keywords
+            
+            # Check if there's a content keyword after the sticky buffer
+            # Look for pattern: tls.sni; content:"..." (without nocase after)
+            
+            # Find all content matches that come after domain keywords
+            domain_keyword = 'tls.sni' if has_tls_sni else 'http.host'
+            
+            # Look for the pattern: domain_keyword followed by content without nocase
+            # Simple check: if domain keyword exists and content exists, check for nocase
+            if 'content:' in full_content_lower:
+                # Check if nocase appears anywhere in the rule
+                has_nocase = 'nocase' in full_content_lower
+                
+                if not has_nocase:
+                    # Extract domain from content for the message
+                    domain_match = re.search(r'content:\s*["\']([^"\']+)["\']', full_content, re.IGNORECASE)
+                    domain_value = domain_match.group(1) if domain_match else 'domain'
+                    
+                    issue = {
+                        'line': line_num,
+                        'rule': rule,
+                        'keyword': domain_keyword,
+                        'domain': domain_value,
+                        'issue': f"Rule uses {domain_keyword} with content:\"{domain_value}\" but lacks 'nocase' modifier. Domain matching is case-insensitive, so this may miss valid matches",
+                        'suggestion': "Add 'nocase;' modifier after the content keyword to match all case variations (e.g., content:\"amazon.com\"; nocase;)",
+                        'severity': 'warning'
+                    }
+                    issues.append(issue)
+        
+        return issues
+    
+    def check_packet_drop_flow_pass_conflict(self, rules: List[SuricataRule]) -> List[Dict]:
+        """Check for packet-scope DROP/REJECT conflicting with flow-scope PASS
+        
+        In Suricata versions before 8.0, packet-scope drop/reject and flow-scope pass
+        had ambiguous behavior. This was fixed in Suricata 8.0 with deconfliction logic.
+        
+        See: https://redmine.openinfosecfoundation.org/issues/7653
+        
+        Args:
+            rules: List of SuricataRule objects to analyze
+            
+        Returns:
+            List of dictionaries describing packet/flow action conflicts
+        """
+        issues = []
+        
+        # Filter out comments and blank lines
+        actual_rules = [r for r in rules if not getattr(r, 'is_comment', False) and not getattr(r, 'is_blank', False)]
+        
+        # Group rules by type for analysis
+        for i in range(len(actual_rules)):
+            for j in range(i + 1, len(actual_rules)):
+                rule1 = actual_rules[i]
+                rule2 = actual_rules[j]
+                line1 = rules.index(rule1) + 1
+                line2 = rules.index(rule2) + 1
+                
+                # Get rule types
+                type1 = self.get_suricata_rule_type(rule1)
+                type2 = self.get_suricata_rule_type(rule2)
+                
+                # Check if one is packet-scope DROP/REJECT and other is flow-scope PASS
+                is_packet_drop = (type1 == 'SIG_TYPE_PKT' and rule1.action.lower() in ['drop', 'reject'])
+                is_flow_pass = (type2 == 'SIG_TYPE_APPLAYER' and rule2.action.lower() == 'pass')
+                
+                if is_packet_drop and is_flow_pass:
+                    # Check if they could match same traffic
+                    if self.rules_could_match_same_traffic(rule1, rule2, {}):
+                        issue = {
+                            'line1': line1,
+                            'line2': line2,
+                            'rule1': rule1,
+                            'rule2': rule2,
+                            'issue': (f"Packet-scope {rule1.action.upper()} rule at line {line1} conflicts with flow-scope PASS rule at line {line2}. "
+                                     f"Behavior was ambiguous in Suricata <8.0 (fixed in 8.0+). "
+                                     f"Current AWS Network Firewall may block this traffic."),
+                            'suggestion': f"Move PASS rule (line {line2}) before {rule1.action.upper()} rule (line {line1}), or ensure rules don't overlap. See: https://redmine.openinfosecfoundation.org/issues/7653",
+                            'severity': 'warning'
+                        }
+                        issues.append(issue)
+        
+        return issues
+    
     def generate_analysis_report(self, conflicts: Dict[str, List[Dict]],
                                total_rules: int, current_file: str = None, 
                                version: str = None) -> str:
@@ -2097,6 +2553,62 @@ class RuleAnalyzer:
                 report += f"   Issue: {issue['issue']}\n"
                 report += f"   Rule: {issue['rule'].to_string()[:80]}...\n"
                 report += f"   Action: {issue['suggestion']}\n\n"
+        
+        # Protocol/keyword mismatch issues (can contain both WARNING and INFO severity)
+        if conflicts.get('protocol_keyword_mismatch'):
+            # Count severities
+            warning_count = sum(1 for issue in conflicts['protocol_keyword_mismatch'] if issue['severity'] == 'warning')
+            info_count = sum(1 for issue in conflicts['protocol_keyword_mismatch'] if issue['severity'] == 'info')
+            
+            report += f"⚠️ PROTOCOL/KEYWORD MISMATCH ({len(conflicts['protocol_keyword_mismatch'])})\n"
+            if warning_count > 0 and info_count > 0:
+                report += f"   ({warning_count} warnings, {info_count} info)\n"
+            report += f"-" * 30 + "\n"
+            for i, issue in enumerate(conflicts['protocol_keyword_mismatch'], 1):
+                severity_icon = "⚠️" if issue['severity'] == 'warning' else "ℹ️"
+                report += f"{i}. {severity_icon} Line {issue['line']}\n"
+                report += f"   Issue: {issue['issue']}\n"
+                report += f"   Rule: {issue['rule'].to_string()[:80]}...\n"
+                report += f"   Suggestion: {issue['suggestion']}\n\n"
+        
+        # Port/protocol mismatch issues
+        if conflicts.get('port_protocol_mismatch'):
+            report += f"ℹ️ PORT/PROTOCOL MISMATCH (INFO) ({len(conflicts['port_protocol_mismatch'])})\n"
+            report += f"-" * 30 + "\n"
+            for i, issue in enumerate(conflicts['port_protocol_mismatch'], 1):
+                report += f"{i}. Line {issue['line']}\n"
+                report += f"   Issue: {issue['issue']}\n"
+                report += f"   Rule: {issue['rule'].to_string()[:80]}...\n"
+                report += f"   Suggestion: {issue['suggestion']}\n\n"
+        
+        # Contradictory flow keywords
+        if conflicts.get('contradictory_flow'):
+            report += f"⚠️ CONTRADICTORY FLOW KEYWORDS ({len(conflicts['contradictory_flow'])})\n"
+            report += f"-" * 30 + "\n"
+            for i, issue in enumerate(conflicts['contradictory_flow'], 1):
+                report += f"{i}. Line {issue['line']}\n"
+                report += f"   Issue: {issue['issue']}\n"
+                report += f"   Rule: {issue['rule'].to_string()[:80]}...\n"
+                report += f"   Suggestion: {issue['suggestion']}\n\n"
+        
+        # Missing nocase on domains
+        if conflicts.get('missing_nocase'):
+            report += f"⚠️ MISSING NOCASE ON DOMAINS ({len(conflicts['missing_nocase'])})\n"
+            report += f"-" * 30 + "\n"
+            for i, issue in enumerate(conflicts['missing_nocase'], 1):
+                report += f"{i}. Line {issue['line']}\n"
+                report += f"   Issue: {issue['issue']}\n"
+                report += f"   Rule: {issue['rule'].to_string()[:80]}...\n"
+                report += f"   Suggestion: {issue['suggestion']}\n\n"
+        
+        # Packet-scope DROP/REJECT vs flow-scope PASS conflicts
+        if conflicts.get('packet_drop_flow_pass'):
+            report += f"⚠️ PACKET/FLOW ACTION CONFLICTS (Suricata <8.0 behavior) ({len(conflicts['packet_drop_flow_pass'])})\n"
+            report += f"-" * 30 + "\n"
+            for i, issue in enumerate(conflicts['packet_drop_flow_pass'], 1):
+                report += f"{i}. Line {issue['line1']} vs Line {issue['line2']}\n"
+                report += f"   Issue: {issue['issue']}\n"
+                report += f"   Suggestion: {issue['suggestion']}\n\n"
         
         report += "\nRECOMMENDATIONS:\n"
         report += "- Address protocol layering conflicts first (add flow constraints)\n"
@@ -2237,6 +2749,71 @@ class RuleAnalyzer:
                     html += f'<strong>Issue:</strong> {issue["issue"]}<br>'
                     html += f'<strong>Action:</strong> {issue["suggestion"]}<br>'
                     html += f'<div class="rule-text">Rule: {issue["rule"].to_string()[:100]}...</div>'
+                    html += '</div>'
+            
+            # Protocol/keyword mismatch issues (can contain both WARNING and INFO severity)
+            if conflicts.get('protocol_keyword_mismatch'):
+                warning_count = sum(1 for issue in conflicts['protocol_keyword_mismatch'] if issue['severity'] == 'warning')
+                info_count = sum(1 for issue in conflicts['protocol_keyword_mismatch'] if issue['severity'] == 'info')
+                
+                title = f'⚠️ PROTOCOL/KEYWORD MISMATCH ({len(conflicts["protocol_keyword_mismatch"])})'
+                if warning_count > 0 and info_count > 0:
+                    title += f' - {warning_count} warnings, {info_count} info'
+                
+                html += f'<h2 class="warning">{title}</h2>'
+                for i, issue in enumerate(conflicts['protocol_keyword_mismatch'], 1):
+                    # Use warning or info styling based on individual issue severity
+                    conflict_class = 'conflict-warning' if issue['severity'] == 'warning' else 'conflict-info'
+                    severity_icon = '⚠️' if issue['severity'] == 'warning' else 'ℹ️'
+                    
+                    html += f'<div class="conflict {conflict_class}">'
+                    html += f'<strong>{i}. {severity_icon} Line {issue["line"]}</strong><br>'
+                    html += f'<strong>Issue:</strong> {issue["issue"]}<br>'
+                    html += f'<strong>Suggestion:</strong> {issue["suggestion"]}<br>'
+                    html += f'<div class="rule-text">Rule: {issue["rule"].to_string()[:100]}...</div>'
+                    html += '</div>'
+            
+            # Port/protocol mismatch issues
+            if conflicts.get('port_protocol_mismatch'):
+                html += f'<h2 class="info">ℹ️ PORT/PROTOCOL MISMATCH (INFO) ({len(conflicts["port_protocol_mismatch"])})</h2>'
+                for i, issue in enumerate(conflicts['port_protocol_mismatch'], 1):
+                    html += f'<div class="conflict conflict-info">'
+                    html += f'<strong>{i}. Line {issue["line"]}</strong><br>'
+                    html += f'<strong>Issue:</strong> {issue["issue"]}<br>'
+                    html += f'<strong>Suggestion:</strong> {issue["suggestion"]}<br>'
+                    html += f'<div class="rule-text">Rule: {issue["rule"].to_string()[:100]}...</div>'
+                    html += '</div>'
+            
+            # Contradictory flow keywords
+            if conflicts.get('contradictory_flow'):
+                html += f'<h2 class="warning">⚠️ CONTRADICTORY FLOW KEYWORDS ({len(conflicts["contradictory_flow"])})</h2>'
+                for i, issue in enumerate(conflicts['contradictory_flow'], 1):
+                    html += f'<div class="conflict conflict-warning">'
+                    html += f'<strong>{i}. Line {issue["line"]}</strong><br>'
+                    html += f'<strong>Issue:</strong> {issue["issue"]}<br>'
+                    html += f'<strong>Suggestion:</strong> {issue["suggestion"]}<br>'
+                    html += f'<div class="rule-text">Rule: {issue["rule"].to_string()[:100]}...</div>'
+                    html += '</div>'
+            
+            # Missing nocase on domains
+            if conflicts.get('missing_nocase'):
+                html += f'<h2 class="warning">⚠️ MISSING NOCASE ON DOMAINS ({len(conflicts["missing_nocase"])})</h2>'
+                for i, issue in enumerate(conflicts['missing_nocase'], 1):
+                    html += f'<div class="conflict conflict-warning">'
+                    html += f'<strong>{i}. Line {issue["line"]}</strong><br>'
+                    html += f'<strong>Issue:</strong> {issue["issue"]}<br>'
+                    html += f'<strong>Suggestion:</strong> {issue["suggestion"]}<br>'
+                    html += f'<div class="rule-text">Rule: {issue["rule"].to_string()[:100]}...</div>'
+                    html += '</div>'
+            
+            # Packet-scope DROP/REJECT vs flow-scope PASS conflicts
+            if conflicts.get('packet_drop_flow_pass'):
+                html += f'<h2 class="warning">⚠️ PACKET/FLOW ACTION CONFLICTS (Suricata &lt;8.0) ({len(conflicts["packet_drop_flow_pass"])})</h2>'
+                for i, issue in enumerate(conflicts['packet_drop_flow_pass'], 1):
+                    html += f'<div class="conflict conflict-warning">'
+                    html += f'<strong>{i}. Line {issue["line1"]} vs Line {issue["line2"]}</strong><br>'
+                    html += f'<strong>Issue:</strong> {issue["issue"]}<br>'
+                    html += f'<strong>Suggestion:</strong> {issue["suggestion"]}<br>'
                     html += '</div>'
         
         html += '''

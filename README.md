@@ -484,6 +484,73 @@ pass tls $HOME_NET any -> any any (tls.sni; content:".example.com"; endswith; ms
 - **Save As**: Save with a new filename
 - **Export**: Generate Terraform or CloudFormation templates for AWS Network Firewall
 - **Load AWS Best Practices Template**: Fetch latest rules from AWS documentation
+- **Import Domain List**: Bulk import rules from text file containing domain names (one per line)
+- **Import Stateful Rule Group**: Import existing AWS Network Firewall stateful rule groups *(New in v1.18.7)*
+
+### Import Stateful Rule Group *(New in v1.18.7)*
+
+Import existing AWS Network Firewall stateful rule groups directly from AWS for editing and enhancement:
+
+#### Generating the JSON File
+
+Use the AWS CLI to export your rule group to JSON format:
+
+```bash
+aws network-firewall describe-rule-group --rule-group-arn <RULE_GROUP_ARN> > standard_rule_group.json
+```
+
+**Example:**
+```bash
+aws network-firewall describe-rule-group \
+  --rule-group-arn arn:aws:network-firewall:us-east-1:123456789012:stateful-rulegroup/MyRuleGroup \
+  > my_rule_group.json
+```
+
+**Alternative using Rule Group Name:**
+```bash
+aws network-firewall describe-rule-group \
+  --rule-group-name MyRuleGroup \
+  --type STATEFUL \
+  > my_rule_group.json
+```
+
+For complete AWS CLI documentation, see: [AWS CLI describe-rule-group reference](https://docs.aws.amazon.com/cli/latest/reference/network-firewall/describe-rule-group.html)
+
+#### Importing the Rule Group
+
+1. Go to **File > Import Stateful Rule Group**
+2. Select the JSON file generated from AWS CLI
+3. Review the preview dialog showing:
+   - Rule group name and description
+   - Number of rules and variables to import
+   - Preview of first 10 rules
+   - Any SID conflicts within the JSON (if present)
+4. Click "Import" to load the rule group
+
+#### Import Features
+
+- **Complete Data Import**: Imports rules, variables (IPSets and PortSets), and metadata
+- **Metadata Preservation**: Adds comment header with original AWS attributes:
+  ```
+  # Original Rule Group attributes:
+  #   RuleGroupArn: arn:aws:network-firewall:...
+  #   RuleGroupName: MyRuleGroup
+  #   RuleGroupId: abc123...
+  #   Description: Production firewall rules
+  ```
+- **Format Conversion**: Automatically converts AWS 5-tuple format to Suricata format
+- **Variable Mapping**: IPSets and PortSets imported with $ prefix (e.g., HOME_NET → $HOME_NET)
+- **Type Validation**: Only imports STATEFUL rule groups (rejects STATELESS with clear error)
+- **SID Management**: Detects and auto-renumbers any duplicate SIDs within the JSON
+- **Force New File**: Clears current content for clean import (prompts to save changes first)
+
+#### Use Cases
+
+- **Edit AWS Rules**: Import existing AWS Network Firewall stateful rule groups for modification in the GUI
+- **Round-Trip Workflow**: Export from AWS → Import to Generator → Edit → Export back to AWS
+- **Rule Documentation**: Add comments and organize imported rules before re-deployment
+- **Bulk Modifications**: Use SID Management and other tools on imported AWS rule groups
+- **Begin using Suricata**: Importing standard stateful rule groups allows for quickly and easily switching to Suricata for managing existing rule groups
 
 ### Color Coding
 
@@ -583,7 +650,7 @@ pass tls $HOME_NET any -> any any (tls.sni; content:".example.com"; endswith; no
 Source and destination network fields accept:
 - **"any"**: Matches all networks
 - **CIDR notation**: e.g., 192.168.1.0/24, 10.0.0.1/32
-- **Variables**: Starting with $ or @ (e.g., $HOME_NET, @WEB_PORTS)
+- **Variables**: Starting with $ or @ (e.g., $HOME_NET, @allow_list)
 
 ## Variable Management
 
@@ -670,6 +737,7 @@ The application includes comprehensive rule analysis to detect shadowing and con
 13. **Protocol Validation**: Pay attention to orange warning icons for unusual port combinations
 14. **Persistent Variables**: Variables are automatically saved with your .suricata files
 15. **Change Tracking**: Enable tracking for comprehensive audit trails and history logging
+16. **Begin using Suricata**: Use the import feature to easily convert existing stateful standard rule groups over to Suricata
 
 ## Troubleshooting
 
@@ -808,6 +876,7 @@ The application follows a modular architecture pattern with specialized managers
 - **Search Manager** (`search_manager.py`): Advanced search capabilities with filtering and navigation
 - **File Manager** (`file_manager.py`): All file operations, exports, and companion file management
 - **Domain Importer** (`domain_importer.py`): Bulk domain processing and AWS template integration
+- **Stateful Rule Importer** (`stateful_rule_importer.py`): Converts exported stateful rule groups to Suricata format
 - **Rule Analyzer** (`rule_analyzer.py`): Sophisticated conflict detection and analysis reporting
 - **Flow Tester** (`flow_tester.py`): Interactive flow testing and network traffic simulation
 - **Suricata Rule** (`suricata_rule.py`): Core rule parsing, validation, and string formatting
@@ -827,7 +896,7 @@ This architecture provides excellent separation of concerns, making the codebase
 
 ## Version
 
-Current version: 1.15.7
+Current version: 1.18.7
 
 ## Support
 

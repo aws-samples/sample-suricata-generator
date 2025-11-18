@@ -404,7 +404,16 @@ class FlowTester:
     def _test_flow_phase(self, classified_rules: Dict, src_ip: str, src_port: str,
                         dst_ip: str, dst_port: str, protocol: str, direction: str,
                         flow_state: str, results: Dict, url: str = None) -> bool:
-        """Test a single phase of the flow against rules
+        """Test a single phase of the flow against rules using Suricata's action scope model
+        
+        Suricata rules have different action scopes based on their type:
+        - SIG_TYPE_IPONLY: Action Scope = FLOW
+        - SIG_TYPE_PKT: Action Scope = PACKET
+        - SIG_TYPE_APPLAYER: Action Scope = FLOW
+        
+        When both packet-scope and flow-scope rules match:
+        - Flow-scope actions take precedence over packet-scope actions
+        - This is why a flow-level PASS can override a packet-level DROP
         
         Args:
             classified_rules: Classified rules by type
@@ -412,72 +421,114 @@ class FlowTester:
             protocol, direction: Protocol and direction
             flow_state: 'handshake', 'established', or 'all'
             results: Results dictionary to update
+            url: Optional URL for application layer matching
             
         Returns:
             True if flow passed (was allowed), False if blocked
         """
-        # Process rules in Suricata's order: SIG_TYPE_IPONLY -> SIG_TYPE_PKT -> SIG_TYPE_APPLAYER
-        # Later rule types override earlier types (within the same phase)
-        processing_order = ['SIG_TYPE_IPONLY', 'SIG_TYPE_PKT', 'SIG_TYPE_APPLAYER']
+        # Define action scopes for each rule type per Suricata documentation
+        action_scopes = {
+            'SIG_TYPE_IPONLY': 'FLOW',      # SIG_PROP_FLOW_ACTION_FLOW
+            'SIG_TYPE_PKT': 'PACKET',       # SIG_PROP_FLOW_ACTION_PACKET
+            'SIG_TYPE_APPLAYER': 'FLOW'     # SIG_PROP_FLOW_ACTION_FLOW
+        }
         
-        phase_action = None  # Track action for this phase
-        phase_rule = None    # Track which rule set the action
-        all_matches = []     # Track all matching rules before deciding which to keep
+        # Track actions at different scopes
+        packet_scope_action = None
+        packet_scope_rule = None
+        flow_scope_action = None
+        flow_scope_rule = None
         
-        for rule_type in processing_order:
+        # Collect all rules in LINE ORDER (not type order)
+        all_rules = []
+        for rule_type in ['SIG_TYPE_IPONLY', 'SIG_TYPE_PKT', 'SIG_TYPE_APPLAYER']:
             for rule_info in classified_rules.get(rule_type, []):
-                rule = rule_info['rule']
+                all_rules.append({
+                    'rule': rule_info['rule'],
+                    'line': rule_info['line'],
+                    'type': rule_type,
+                    'scope': action_scopes[rule_type]
+                })
+        
+        # Sort by line number to process in file order
+        all_rules.sort(key=lambda x: x['line'])
+        
+        # Process rules in line order, tracking actions at each scope
+        for rule_info in all_rules:
+            rule = rule_info['rule']
+            rule_type = rule_info['type']
+            scope = rule_info['scope']
+            
+            # Test if this rule matches the flow in this state
+            if self._rule_matches_flow(rule, src_ip, src_port, dst_ip, dst_port,
+                                      protocol, direction, flow_state, url):
+                match_info = {
+                    'rule': rule,
+                    'line': rule_info['line'],
+                    'type': rule_type,
+                    'action': rule.action,
+                    'phase': flow_state,
+                    'scope': scope  # Track action scope
+                }
                 
-                # Test if this rule matches the flow in this state
-                if self._rule_matches_flow(rule, src_ip, src_port, dst_ip, dst_port, 
-                                          protocol, direction, flow_state, url):
-                    match_info = {
-                        'rule': rule,
-                        'line': rule_info['line'],
-                        'type': rule_type,
-                        'action': rule.action,
-                        'phase': flow_state  # Track which phase this rule matched
-                    }
+                # Separate alert rules from action rules
+                if rule.action.lower() == 'alert':
+                    # Always include alert rules
+                    results['alert_rules'].append(match_info)
                     
-                    # Separate alert rules from action rules
-                    if rule.action.lower() == 'alert':
-                        # Always include alert rules
-                        results['alert_rules'].append(match_info)
-                        
-                        # Track for step mapping
-                        if flow_state not in results['step_rule_mapping']:
-                            results['step_rule_mapping'][flow_state] = []
-                        results['step_rule_mapping'][flow_state].append(match_info)
-                    else:
-                        # Track all action rule matches
-                        all_matches.append(match_info)
-                        
-                        # If this is an action rule (pass/drop/reject), update phase action
-                        # IMPORTANT: In strict rule ordering, first match wins WITHIN the same rule type
-                        # But a later rule type can override an earlier rule type
-                        if rule.action.lower() in ['pass', 'drop', 'reject']:
-                            # If no action set yet for this phase, or if this is a different (later) rule type
-                            if phase_action is None or (phase_rule and phase_rule['type'] != rule_type):
-                                phase_action = rule.action.lower()
-                                phase_rule = match_info
+                    # Track for step mapping
+                    if flow_state not in results['step_rule_mapping']:
+                        results['step_rule_mapping'][flow_state] = []
+                    results['step_rule_mapping'][flow_state].append(match_info)
+                else:
+                    # Action rules (pass/drop/reject)
+                    if rule.action.lower() in ['pass', 'drop', 'reject']:
+                        if scope == 'PACKET':
+                            # Packet-scope action: only set if not already set
+                            # (first match wins within packet scope)
+                            if packet_scope_action is None:
+                                packet_scope_action = rule.action.lower()
+                                packet_scope_rule = match_info
+                        else:  # scope == 'FLOW'
+                            # Flow-scope action: only set if not already set
+                            # (first match wins within flow scope)
+                            if flow_scope_action is None:
+                                flow_scope_action = rule.action.lower()
+                                flow_scope_rule = match_info
         
-        # Only add the final matching action rule (not overridden ones)
-        if phase_rule:
-            results['matched_rules'].append(phase_rule)
-            
-            # Track step-to-rule mapping with only the final rule
-            if flow_state not in results['step_rule_mapping']:
-                results['step_rule_mapping'][flow_state] = []
-            results['step_rule_mapping'][flow_state].append(phase_rule)
-            
-            # Update final action
-            results['final_action'] = phase_action.upper()
-            results['final_rule'] = phase_rule
-            # Return whether this phase passed (allows next phase)
-            return phase_action == 'pass'
+        # Determine final action using Suricata 8.0+ deconfliction logic
+        # Per bug fix: https://redmine.openinfosecfoundation.org/issues/7653
+        # If packet-scope DROP/REJECT matches, flow-scope PASS is skipped
+        if packet_scope_action in ['drop', 'reject'] and flow_scope_action == 'pass':
+            # Packet-scope DROP/REJECT blocks flow-scope PASS (Suricata 8.0+ behavior)
+            final_action = packet_scope_action
+            final_rule = packet_scope_rule
+        elif flow_scope_action is not None:
+            # Flow-level action wins (normal case)
+            final_action = flow_scope_action
+            final_rule = flow_scope_rule
+        elif packet_scope_action is not None:
+            # Packet-level action (no flow-level action matched)
+            final_action = packet_scope_action
+            final_rule = packet_scope_rule
+        else:
+            # No action rules matched this phase, continue to next phase
+            return True
         
-        # No action rule matched this phase, continue to next phase
-        return True
+        # Store the final matching rule
+        results['matched_rules'].append(final_rule)
+        
+        # Track step-to-rule mapping
+        if flow_state not in results['step_rule_mapping']:
+            results['step_rule_mapping'][flow_state] = []
+        results['step_rule_mapping'][flow_state].append(final_rule)
+        
+        # Update final action
+        results['final_action'] = final_action.upper()
+        results['final_rule'] = final_rule
+        
+        # Return whether this phase passed (allows next phase)
+        return final_action == 'pass'
     
     def _flow_state_matches(self, rule: SuricataRule, flow_state: str) -> bool:
         """Check if rule's flow state requirements match the tested flow state

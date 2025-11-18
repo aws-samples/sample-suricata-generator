@@ -37,6 +37,14 @@ class SuricataRule:
     
     def to_string(self) -> str:
         """Convert rule to Suricata format string"""
+        # Handle special rule types first
+        if self.is_blank:
+            return ""
+        
+        if self.is_comment:
+            return self.comment_text
+        
+        # Build normal Suricata rule string
         rule_parts = [
             self.action,
             self.protocol,

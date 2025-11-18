@@ -11,6 +11,7 @@ from suricata_rule import SuricataRule
 from rule_analyzer import RuleAnalyzer
 from file_manager import FileManager
 from domain_importer import DomainImporter
+from stateful_rule_importer import StatefulRuleImporter
 from search_manager import SearchManager
 from ui_manager import UIManager
 from flow_tester import FlowTester
@@ -43,6 +44,7 @@ class SuricataRuleGenerator:
         self.rule_analyzer = RuleAnalyzer()  # Rule analysis engine
         self.file_manager = FileManager()  # File operations manager
         self.domain_importer = DomainImporter(self)  # Domain import functionality
+        self.stateful_rule_importer = StatefulRuleImporter(self)  # Stateful rule group import functionality
         self.search_manager = SearchManager(self)  # Search functionality manager
         self.ui_manager = UIManager(self)  # UI components manager
         
@@ -91,13 +93,16 @@ class SuricataRuleGenerator:
         # Remove $EXTERNAL_NET as it's implicitly defined by AWS Network Firewall
         detected_vars.discard('$EXTERNAL_NET')
         
-        # Remove variables that are no longer used in any rules
+        # Remove variables that are no longer used in any rules AND have no definition
+        # (Keep variables with explicit definitions even if not currently used)
         # Create a copy of the keys to iterate over since we'll be modifying the dict
         current_vars = list(self.variables.keys())
         for var in current_vars:
             if var not in detected_vars and var != '$EXTERNAL_NET':
-                # Variable is no longer used, remove it
-                del self.variables[var]
+                # Only remove if the variable has no definition (is empty or whitespace)
+                if not self.variables[var].strip():
+                    del self.variables[var]
+                # If variable has a definition, keep it even if not currently used
         
         # Add detected variables to our variables dict with sensible defaults
         for var in detected_vars:

@@ -2,12 +2,12 @@
 
 ## Version 1.18.12 - November 17, 2025
 
-### Flow Tester Enhancement (v1.0.2) - Suricata 8.0+ Deconfliction Logic
-- **Modifying for Suricata 8.0+**: Implemented deconfliction logic matching Suricata 8.0+ behavior for packet-scope DROP/REJECT vs flow-scope PASS conflicts
-  - **Background**: Discovered Suricata bug #7653 (https://redmine.openinfosecfoundation.org/issues/7653) that was fixed in version 8.0
-  - **The Issue**: In Suricata <8.0, packet-scope DROP/REJECT and flow-scope PASS had ambiguous/conflicting behavior
-  - **The Fix**: Suricata 8.0+ added deconfliction logic where packet-scope DROP/REJECT blocks flow-scope PASS from being applied
-- **Enhanced Action Processing**: Updated flow tester to correctly simulate Suricata 8.0+ deconfliction behavior
+### Flow Tester Enhancement (v1.0.2) - Suricata Deconfliction Logic
+- **Modifying for Suricata Analysis**: Implemented deconfliction logic matching current Suricata behavior for packet-scope DROP/REJECT vs flow-scope PASS conflicts
+  - **Background**: Reviewed Suricata bug #7653 (https://redmine.openinfosecfoundation.org/issues/7653) that was fixed in version 8.0
+  - **The Issue**: In previous versions of Suricata <8.0, packet-scope DROP/REJECT and flow-scope PASS had ambiguous/conflicting behavior
+  - **The Fix**: Added deconfliction logic where packet-scope DROP/REJECT blocks flow-scope PASS from being applied
+- **Enhanced Action Processing**: Updated flow tester to correctly simulate Suricata deconfliction behavior
   - **Deconfliction Rule**: When packet-scope DROP/REJECT matches, flow-scope PASS is skipped (blocked)
   - **Normal Case**: Flow-level actions continue to take precedence in non-conflicting scenarios
 
@@ -18,12 +18,12 @@
   - **Warning Severity**: Flagged as WARNING with clear explanation linking to bug report
   - **Example Conflict**: `reject tcp ... (flow:established)` vs `pass tls ... (tls.sni; content:"amazon.com")`
 - **Enhanced Analysis Reports**: New dedicated section for packet/flow action conflicts
-  - **Report Section**: "⚠️ PACKET/FLOW ACTION CONFLICTS (Suricata <8.0 behavior)"
+  - **Report Section**: "⚠️ PACKET/FLOW ACTION CONFLICTS (previous Suricata behavior)"
   - **Detailed Information**: Shows line numbers, actions, protocols, and full rule text
   - **Educational Value**: Explains Suricata processing model and why conflicts occur
   - **Actionable Guidance**: Recommends rule reordering or using consistent action scopes
-- **Future-Proofing Recommendations**: Helps users prepare rulesets for Suricata 8.x
-  - **Behavior Change Warning**: Alerts users to rules that may behave differently after Suricata 8.x
+- **Future-Proofing Recommendations**: Helps users prepare better rulesets
+  - **Behavior Change Warning**: Alerts users to rules that may behave differently after bug fix
   - **Version Context**: Documentation references Suricata bug report and version-specific behavior
 
 ### Technical Implementation

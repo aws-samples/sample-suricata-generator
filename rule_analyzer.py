@@ -2330,9 +2330,9 @@ class RuleAnalyzer:
             if 'to_server' in flow_keywords and 'to_client' in flow_keywords:
                 contradictions.append("'to_server' and 'to_client' (flow cannot be in both directions)")
             
-            # Check for both established and not_established
-            if ('established' in flow_keywords or 'to_server' in flow_keywords or 'to_client' in flow_keywords) and 'not_established' in flow_keywords:
-                contradictions.append("'established' and 'not_established' (mutually exclusive states)")
+        # Check for both established and not_established
+        if 'established' in flow_keywords and 'not_established' in flow_keywords:
+            contradictions.append("'established' and 'not_established' (mutually exclusive states)")
             
             if contradictions:
                 contradiction_str = '; '.join(contradictions)

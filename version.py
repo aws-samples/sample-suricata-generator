@@ -9,7 +9,7 @@ The rule analyzer and flow tester have their own separate version numbers.
 MAIN_VERSION = "1.18.12"
 
 # Rule analyzer version (managed separately)
-ANALYZER_VERSION = "1.8.1"
+ANALYZER_VERSION = "1.8.2"
 
 # Flow tester version (managed separately)
 FLOW_TESTER_VERSION = "1.0.2"

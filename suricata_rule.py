@@ -14,7 +14,7 @@ class SuricataRule:
     """Represents a single Suricata rule with all its components"""
     
     def __init__(self, action="pass", protocol="tcp", src_net="$HOME_NET", src_port="any", 
-                 dst_net="$EXTERNAL_NET", dst_port="any", message="", content="", sid=100, 
+                 dst_net="$EXTERNAL_NET", dst_port="any", message="", content="", sid=1, 
                  direction="->", original_options="", rev=1):
         # Core rule components
         self.action = action
@@ -127,7 +127,7 @@ class SuricataRule:
         # Initialize default values
         message = ""
         content = ""
-        sid = 100
+        sid = SuricataConstants.SID_MIN
         rev = 1
         original_options = options_str or ""
         

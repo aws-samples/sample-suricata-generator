@@ -4,7 +4,7 @@ A GUI application for creating, editing, and managing Suricata rules specificall
 
 ## Overview
 
-This application provides an intuitive graphical interface for generating Suricata rules with features tailored for AWS Network Firewall use cases. It supports individual rule creation, bulk domain rule generation, and comprehensive rule management with inline editing capabilities.
+This application provides an intuitive graphical interface for generating Suricata rules with features tailored for AWS Network Firewall use cases. It supports individual rule creation, bulk domain rule generation, and comprehensive rule management with inline editing capabilities.  It also includes an advanced editor with IDE like capabilities for those that prefer more direct control *(New in v1.19.0)*.
 
 ## Screenshot
 
@@ -12,24 +12,89 @@ This application provides an intuitive graphical interface for generating Surica
 
 *The main interface showing the color-coded rules table, tabbed editor with Rule Editor and Rule Variables tabs, and comprehensive rule management controls.*
 
+## Table of Contents
+
+- [Quick Start](#quick-start)
+- [Features](#features)
+- [Requirements](#requirements)
+- [Prerequisites](#prerequisites)
+- [Installation](#installation)
+- [Creating a Standalone Executable (Optional)](#creating-a-standalone-executable-optional)
+- [Basic Usage](#basic-usage)
+- [Advanced Usage](#advanced-usage)
+- [Rule Format](#rule-format)
+- [Network Field Validation](#network-field-validation)
+- [Variable Management](#variable-management)
+- [SID Management](#sid-management)
+- [File Format](#file-format)
+- [Rule Conflict Analysis](#rule-conflict-analysis)
+- [Tips](#tips)
+- [Troubleshooting](#troubleshooting)
+- [Infrastructure as Code Export](#infrastructure-as-code-export)
+- [Copy/Paste Workflow](#copypaste-workflow)
+- [Advanced Features](#advanced-features)
+- [Content Keywords JSON Structure](#content-keywords-json-structure)
+- [Technical Architecture](#technical-architecture)
+- [Version](#version)
+- [Support](#support)
+
+---
+
+## Quick Start
+
+> 💡 **New to the application?** Follow these steps to get started quickly!
+
+### For Experienced Python Users
+
+```bash
+# 1. Verify Python 3.6+ is installed
+python3 --version
+
+# 2. Clone the repository
+git clone https://github.com/aws-samples/sample-suricata-generator
+cd sample-suricata-generator
+
+# 3. Run the application
+python3 suricata_generator.py
+```
+
+### First Time Setup
+
+1. ✅ **Install Python 3.6+** - See [Prerequisites](#prerequisites) for detailed instructions
+2. ✅ **Verify tkinter** - Run: `python3 -c "import tkinter; print('tkinter is available')"`
+3. ✅ **Download** - Clone repository or download ZIP file
+4. ✅ **Run** - Execute: `python3 suricata_generator.py`
+
+### Your First Rule
+
+1. 📝 Click in the empty area below the table to add a new rule
+2. 🎯 Fill in the fields (Action, Protocol, Networks, Ports, Message, SID)
+3. 💾 Click "Save Changes"
+4. 🎉 Your rule appears in the table!
+
+> ⚠️ **Need help?** Check the [Installation](#installation) section for detailed setup instructions or [Troubleshooting](#troubleshooting) if you encounter issues.
+
+---
+
 ## Features
 
 - **Visual Rule Management**: Color-coded table display with line numbers
 - **Tabbed Interface**: Rule Editor and Rule Variables tabs for organized workflow
 - **Inline Editing**: Bottom panel editor for modifying rules
+- **Advanced Editor**: *(New in v1.19.0)* IDE-style text editor with auto-complete, syntax validation, and find/replace
 - **Variable Management**: Auto-detection and management of network variables ($HOME_NET, @PORT_SETS)
 - **Infrastructure Export**: Generate Terraform (.tf) and CloudFormation (.cft) templates
 - **Copy/Paste Functionality**: Copy rules with Ctrl+C/V and right-click context menus
-- **Toggle Selection**: Click selected rules again to deselect for improved workflow
-- **Bulk Domain Import**: Generate multiple rules from domain lists with optional PCRE optimization
+- **Toggle Selection**: Click selected rules again to deselect for improved workflow experience
+- **Bulk Domain Import**: Generate multiple rules from domain lists with automatic domain consolidation
 - **Rule Validation**: Network field validation and SID uniqueness checking
 - **File Operations**: Open, save, and manage .suricata rule files
 - **Comment Support**: Add and edit comment lines with proper formatting
 - **Undo Functionality**: Revert changes with Ctrl+Z
 - **Rule Movement**: Reorder rules with up/down controls
-- **AWS Template Loading**: Dynamic fetching of latest AWS best practices rules
+- **AWS Template Loading**: Dynamic fetching of latest AWS best practices rules template
 - **Click-to-Insert**: Click below last rule to add new entries
-- **Keyboard Navigation**: Down arrow and End key navigation to placeholder row
+- **Keyboard Navigation**: Down arrow and End key navigates to placeholder row
 - **Rule Conflict Analysis**: Comprehensive shadow detection and conflict reporting
 - **Enhanced Search Functionality**: Comprehensive field-specific search with advanced filtering options
 - **Enhanced Analysis Reports**: Professional HTML/PDF export with timestamps and version info
@@ -46,11 +111,11 @@ This application provides an intuitive graphical interface for generating Surica
 - tkinter (usually included with Python)
 - Standard Python libraries: re, os, ipaddress, typing
 
-## Installation
+---
 
-### Prerequisites
+## Prerequisites
 
-Before installing the Suricata Rule Generator, ensure your system meets the following requirements:
+> ⚠️ **Before installing**, ensure your system meets these requirements.
 
 ### Step 1: Install Python 3.6 or Higher
 
@@ -112,7 +177,7 @@ The application requires Python 3.6 or higher. Follow the instructions for your 
 
 ### Step 2: Install and Verify tkinter
 
-The application uses tkinter for its graphical user interface. **Important:** tkinter is NOT installed by default on macOS and some Linux distributions require separate installation.
+The application uses tkinter for its graphical user interface. **Important:** tkinter may not installed by default on macOS and some Linux distributions require separate installation.
 
 #### Verify tkinter is installed:
 ```bash
@@ -385,9 +450,62 @@ python3 setup.py py2app
 
 The .app bundle will be created in the `dist` directory and can be dragged to Applications folder.
 
-## Usage
+## Installation
 
-### Starting the Application
+> 💡 **Prerequisites installed?** See the [Prerequisites](#prerequisites) section above if you haven't set up Python and tkinter yet.
+
+### Step 1: Download the Application
+
+1. **Clone the repository (if you have Git):**
+   ```bash
+   git clone https://github.com/aws-samples/sample-suricata-generator
+   cd sample-suricata-generator
+   ```
+
+2. **Or download as ZIP:**
+   - Download the ZIP file from [GitHub repository](https://github.com/aws-samples/sample-suricata-generator)
+   - Extract to a folder of your choice
+   - Navigate to the extracted folder in your terminal/command prompt
+
+### Step 2: Verify Dependencies
+
+Run this command to verify all required Python modules are available:
+
+```bash
+python3 -c "
+import tkinter
+import re
+import os
+import ipaddress
+import typing
+import urllib.request
+import urllib.error
+print('All dependencies are available!')
+"
+```
+
+> ✅ **Success?** If this command completes without errors, you're ready to run the application!
+
+### Step 3: Run the Application
+
+Navigate to the application directory and run:
+
+```bash
+python3 suricata_generator.py
+```
+
+**Windows users may need to use:**
+```cmd
+python suricata_generator.py
+```
+
+> ⚠️ **Trouble starting?** Check the [Troubleshooting](#troubleshooting) section below for common solutions.
+
+---
+
+## Basic Usage
+
+### 🚀 Starting the Application
 
 Launch the program to see a blank canvas with the tabbed editor at the bottom. The interface consists of:
 
@@ -396,7 +514,7 @@ Launch the program to see a blank canvas with the tabbed editor at the bottom. T
 - **Tabbed Editor**: Bottom panel with Rule Editor and Rule Variables tabs
 - **Control Buttons**: Rule management operations (context-sensitive display)
 
-### Creating Rules
+### 📝 Creating Rules
 
 #### Individual Rules
 1. Click in the empty area below existing rules to create a placeholder
@@ -408,8 +526,10 @@ Launch the program to see a blank canvas with the tabbed editor at the bottom. T
    - **Ports**: Source and destination ports
    - **Message**: Descriptive text for the rule
    - **Content Keywords**: Suricata detection keywords
-   - **SID**: Unique identifier (100-999999999)
+   - **SID**: Unique identifier (1-999999999)
 3. Click "Save Changes" to add the rule
+
+> 💡 **Tip:** The application auto-generates the next available SID for new rules, but you can change it to any unique value between 1-999999999.
 
 #### Rev Keyword Support *(New in v1.9.0)*
 
@@ -431,16 +551,75 @@ The application automatically manages Suricata rev keywords for rule versioning:
 pass tls $HOME_NET any -> any any (tls.sni; content:".example.com"; endswith; msg:"Allow example.com"; sid:100; rev:2;)
 ```
 
-### Bulk Domain Import
+### ✏️ Editing Rules
+
+#### Inline Editing
+1. Select a rule from the table
+2. Modify fields in the bottom editor panel
+3. Click "Save Changes" to apply modifications
+
+#### Double-Click Editing
+- 🖱️ **Rule Editing**: Double-click any rule to open a comprehensive edit dialog
+- 💬 **Comment Editing**: Double-click comment lines to edit comment text directly
+  - **Streamlined Interface**: Comment editing shows only the comment field without unnecessary rule fields
+  - **Automatic Formatting**: Dialog strips `#` prefix for editing and ensures proper formatting when saving
+
+#### Rule Management
+- 🗑️ **Delete**: Select rules and press Delete key or use "Delete Selected" button
+- ⬆️⬇️ **Move**: Use "Move Up"/"Move Down" buttons to reorder rules
+- ➕ **Insert**: Use "Insert Rule" to add rules at specific positions
+- 💬 **Comments**: Use "Insert Comment" to add documentation
+
+### 📁 File Operations
+
+- **New**: Start with a blank rule set
+- **Open**: Load existing .suricata files
+- **Save**: Save current rules to file
+- **Save As**: Save with a new filename
+
+> 💡 **Tip:** The application supports persistent variables - your variable definitions are automatically saved alongside your .suricata files as companion .var files.
+
+### 🎨 Color Coding
+
+Rules are color-coded in the table by action type:
+- 🟢 **Green**: pass actions
+- 🔵 **Blue**: alert actions  
+- 🔴 **Red**: drop actions
+- 🟣 **Purple**: reject actions
+- ⚫ **Grey**: comments
+- 🟡 **Yellow**: search result highlights (when searching)
+
+### ⌨️ Keyboard Shortcuts
+
+> 💡 **Pro tip:** Learn these shortcuts to work more efficiently!
+
+- **Ctrl+Z**: Undo last change
+- **Ctrl+C**: Copy selected rules to clipboard
+- **Ctrl+V**: Paste rules from clipboard
+- **Delete**: Delete selected rules (context-sensitive)
+- **Space**: Toggle selected rules between enabled/disabled
+- **Down Arrow**: Navigate to placeholder row when at last rule
+- **End**: Jump to placeholder row for new rule insertion
+- **Home**: Jump to first rule and select it
+- **Ctrl+G**: Jump to specific line number dialog
+- **Ctrl+F**: Open Find dialog for searching rules
+- **Ctrl+E**: Open advanced editor window
+- **F3**: Find next occurrence in search results
+- **Escape**: Close search mode and clear highlights
+
+---
+
+## Advanced Usage
+
+### 📦 Bulk Domain Import
 1. Go to **File > Import Domain List**
 2. Select a .txt file containing one domain per line
 3. Configure the import settings:
    - **Action**: pass, drop, or reject
    - **Starting SID**: First SID to use
    - **Message Template**: Use {domain} as placeholder
-   - **PCRE Optimization**: *(New in v1.8.0)* Check to enable PCRE optimization for rule count reduction
-   - **Alert on pass**: *(New in v1.12.7)* Control whether pass rules include alert keyword for logging
-   - **Strict domain list**: *(New in v1.14.4)* Create a strict domain list (domain name must exactly match what is in the list.)
+   - **Alert on pass**: Control whether pass rules include alert keyword for logging
+   - **Strict domain list**: Create a strict domain list (domain name must exactly match what is in the list)
 4. Click "Import" to generate rules
 
 **Rule Generation Logic:**
@@ -448,46 +627,16 @@ pass tls $HOME_NET any -> any any (tls.sni; content:".example.com"; endswith; ms
 - **Pass action with "Alert on pass" enabled** *(default)*: Pass rules include embedded alert keyword for logging
 - **Pass action with "Alert on pass" disabled**: Alert rule created for each Pass rule (each domain creates 4 rules for pass action)
 
-**PCRE Optimization *(New in v1.8.0)*:**
-- **Smart Domain Grouping**: Automatically groups related domains to reduce rule count by 40-75%
-- **TLD Variations**: Groups `microsoft.com` and `microsoft.edu` → `microsoft\.(com|edu)` (8 rules → 4 rules)
-- **Subdomain Patterns**: Groups `mail.google.com`, `drive.google.com` → `.*\.google\.com` (12 rules → 4 rules)
-- **Real-time Preview**: Shows exact rule count savings before import
-- **Mixed Approach**: Combines PCRE groups with individual rules for maximum efficiency
-- **Professional PCRE Rules**: Uses proper Suricata `pcre:"/pattern/i"` syntax with case-insensitive matching
+> ⚡ **Automatic Domain Consolidation** Default behavior reduces rule count by finding the most specific common parent domains!
 
-### Editing Rules
+**Domain Consolidation Benefits:**
+- 📊 **Smart Grouping**: Automatically finds most specific common parent for related domains
+- 🎯 **Optimal Parents**: Groups `mail.server.com`, `web.server.com`, `server.com` → `*.server.com` (6 rules → 2 rules)
+- 💡 **Intelligent Algorithm**: Filters subset groups to find maximal consolidation opportunities
+- 👁️ **Real-time Preview**: Shows exact rule count savings before import
+- 🔧 **Automatic**: Enabled by default when "Strict domain list" is unchecked
 
-#### Inline Editing
-1. Select a rule from the table
-2. Modify fields in the bottom editor panel
-3. Click "Save Changes" to apply modifications
-
-#### Double-Click Editing *(Enhanced in v1.8.1)*
-- **Rule Editing**: Double-click any rule to open a comprehensive edit dialog
-- **Comment Editing**: Double-click comment lines to edit comment text directly
-  - **Streamlined Interface**: Comment editing shows only the comment field without unnecessary rule fields
-  - **Automatic Formatting**: Dialog strips `#` prefix for editing and ensures proper formatting when saving
-  - **Consistent Experience**: Double-click works uniformly for both rules and comments
-
-#### Rule Management
-- **Delete**: Select rules and press Delete key or use "Delete Selected" button
-- **Move**: Use "Move Up"/"Move Down" buttons to reorder rules
-- **Insert**: Use "Insert Rule" to add rules at specific positions
-- **Comments**: Use "Insert Comment" to add documentation or double-click existing comments to edit
-
-### File Operations
-
-- **New**: Start with a blank rule set
-- **Open**: Load existing .suricata files
-- **Save**: Save current rules to file
-- **Save As**: Save with a new filename
-- **Export**: Generate Terraform or CloudFormation templates for AWS Network Firewall
-- **Load AWS Best Practices Template**: Fetch latest rules from AWS documentation
-- **Import Domain List**: Bulk import rules from text file containing domain names (one per line)
-- **Import Stateful Rule Group**: Import existing AWS Network Firewall stateful rule groups *(New in v1.18.7)*
-
-### Import Stateful Rule Group *(New in v1.18.7)*
+### 📥 Import Stateful Rule Group *(New in v1.18.7)*
 
 Import existing AWS Network Firewall stateful rule groups directly from AWS for editing and enhancement:
 
@@ -496,7 +645,7 @@ Import existing AWS Network Firewall stateful rule groups directly from AWS for 
 Use the AWS CLI to export your rule group to JSON format:
 
 ```bash
-aws network-firewall describe-rule-group --rule-group-arn <RULE_GROUP_ARN> > standard_rule_group.json
+aws network-firewall describe-rule-group --rule-group-arn <RULE_GROUP_ARN> > stateful_rule_group.json
 ```
 
 **Example:**
@@ -552,225 +701,139 @@ For complete AWS CLI documentation, see: [AWS CLI describe-rule-group reference]
 - **Bulk Modifications**: Use SID Management and other tools on imported AWS rule groups
 - **Begin using Suricata**: Importing standard stateful rule groups allows for quickly and easily switching to Suricata for managing existing rule groups
 
-### Color Coding
+### 🔢 SID Management
 
-Rules are color-coded in the table by action type:
-- **Green**: pass actions
-- **Blue**: alert actions  
-- **Red**: drop actions
-- **Purple**: reject actions
-- **Grey**: comments
-- **Yellow**: search result highlights (when searching)
+> 💡 **Managing lots of rules?** Use SID Management to bulk renumber rules and avoid conflicts.
 
-### Keyboard Shortcuts
-
-- **Ctrl+Z**: Undo last change
-- **Ctrl+C**: Copy selected rules to clipboard
-- **Ctrl+V**: Paste rules from clipboard
-- **Delete**: Delete selected rules (context-sensitive - only when rules table has focus)
-- **Space**: Toggle selected rules between enabled/disabled state (context-sensitive)
-- **Down Arrow**: Navigate to placeholder row when at last rule
-- **End**: Jump to placeholder row for new rule insertion
-- **Home**: Jump to first rule and select it
-- **Ctrl+G**: Jump to specific line number dialog
-- **Enter**: Confirm dialogs
-- **Ctrl+F**: Open Find dialog for searching rules
-- **F3**: Find next occurrence in search results
-- **Escape**: Close search mode and clear highlights
-
-#### New Keyboard Features *(Added in v1.5.6)*
-- **Space Bar Toggle**: Press Space to toggle selected rules between enabled (rule) and disabled (comment) state
-  - **Smart Detection**: Only converts comments back to rules if they contain directional indicators
-  - **Context Sensitive**: Only works when rules table has focus, preserves normal space behavior in text fields
-  - **Multiple Selection**: Works on single rule or multiple selected rules simultaneously
-- **Jump to Line (Ctrl+G)**: Navigate directly to any line number in the rules table
-  - **Line Number Dialog**: Shows popup asking for target line number with validation
-  - **Smart Navigation**: Jumps to placeholder row if line number exceeds total lines
-
-### SID Management *(Added in v1.0.3)*
 - **Tools > SID Management**: Open bulk SID renumbering dialog
 - **Scope Options**: All rules, selected rules, or rules by action type
 - **Conflict Detection**: Check for SID conflicts before applying changes
 - **Resolution Strategies**: Skip conflicts, restart with safe SIDs, or overwrite existing rules
-- **Undo Support**: All SID changes can be reverted with Ctrl+Z
+- ↩️ **Undo Support**: All SID changes can be reverted with Ctrl+Z
 
-### Enhanced Search Functionality *(Added in v1.6.6)*
+### 🔍 Enhanced Search Functionality
+
 - **Edit > Find (Ctrl+F)**: Open comprehensive search dialog with advanced filtering options
 - **Field-Specific Search**: Search within specific fields or all fields
-  - **Message**: Search rule message text
-  - **Content**: Search content keywords and options
-  - **Networks**: Search source and destination network fields
-  - **Ports**: Search source and destination port fields
-  - **SID**: Search specific rule IDs
-  - **Protocol**: Search protocol types (tcp, udp, http, tls, etc.)
-  - **All Fields**: Search across all rule components (default)
+  - 💬 **Message**: Search rule message text
+  - 📄 **Content**: Search content keywords and options
+  - 🌐 **Networks**: Search source and destination network fields
+  - 🔌 **Ports**: Search source and destination port fields
+  - 🔢 **SID**: Search specific rule IDs
+  - 📡 **Protocol**: Search protocol types (tcp, udp, http, tls, etc.)
+  - 🌍 **All Fields**: Search across all rule components (default)
 - **Action-Based Filtering**: Filter search results by rule action types
-  - **Pass/Drop/Reject/Alert**: Individual action type filtering
-  - **Comments**: Include or exclude comment lines from search
-  - **Select All/Deselect All**: Convenient bulk selection controls
+  - Pass/Drop/Reject/Alert: Individual action type filtering
+  - Comments: Include or exclude comment lines from search
+  - Select All/Deselect All: Convenient bulk selection controls
 - **Advanced Search Options**: Flexible search behavior controls
-  - **Case Sensitive**: Toggle case-sensitive matching
-  - **Whole Word**: Match complete words only (word boundary detection)
-  - **Regular Expression**: Use regex patterns for complex searches
-  - **Include Comments**: Control whether comments are included in results
-- **Search Navigation**: Efficient result browsing
-  - **F3**: Find next occurrence in search results
-  - **Escape**: Close search mode and clear highlights
-  - **Visual Highlighting**: Yellow background highlighting of matches
-- **Status Bar Integration**: Real-time search feedback
-  - **Position Display**: Shows current position (e.g., "Search: 2 of 5 matches for 'tcp'")
-  - **Match Count**: Total number of matches found
-  - **Search Term**: Currently active search term
+  - Case Sensitive, Whole Word, Regular Expression
+  - Visual Highlighting: Yellow background for matches
+- **Navigation**: F3 for next, Shift+F3 for previous, Escape to close
 
-### Change Tracking *(Added in v1.2.0)*
+### 📊 Change Tracking
+
+> 📝 **Need an audit trail?** Enable Change Tracking to log all operations with timestamps and detailed history.
+
 - **Tools > Enable Change Tracking**: Toggle comprehensive change tracking on/off
 - **Change History Tab**: View detailed audit trail of all operations
 - **Automatic Headers**: Files include creation and modification timestamps when tracking enabled
 - **Persistent History**: Changes saved to companion .history files
 - **History Export**: Export change history to text files for documentation
 - **Operation Tracking**: Logs rule additions, modifications, deletions, moves, and bulk operations
-- **Variable Tracking**: Tracks variable definitions, modifications, and deletions
-- **File Operations**: Records file creation, opening, and saving activities
 - **Auto-Detection**: Automatically enables tracking when opening files with existing history
 
-## Rule Format
+### 💻 Advanced Editor *(New in v1.19.0)*
 
-The application generates standard Suricata rule format:
-```
-action protocol src_net src_port direction dst_net dst_port (options)
-```
+The Advanced Editor provides a powerful IDE-style text interface for users who prefer direct rule editing:
 
-Example:
-```
-pass tls $HOME_NET any -> any any (tls.sni; content:".example.com"; endswith; nocase; msg:"Domain allow rule for example.com"; sid:100;)
-```
+#### Accessing the Advanced Editor
+- **Tools > Advanced Editor** (Ctrl+E)
+- **Modal Window**: 1000x700 resizable with line numbers and status bar
+- **Scope**: Edits all rules with variables displayed as-is (e.g., $HOME_NET)
 
-## Network Field Validation
+#### Real-Time Syntax Validation
+- **Two-Level System**: Red underlines for errors, orange for warnings
+- **Error Detection**: Invalid actions, protocols, networks, ports, direction, malformed syntax
+- **Warning Detection**: Unknown keywords, undefined variables, duplicate SIDs
+- **Live Feedback**: Validates as you type (500ms delay) with error counts in status bar
+- **Hover Tooltips**: Mouse over underlined text for detailed error information with suggestions
+- **Auto-Comment**: Rules with errors automatically commented out with `# [SYNTAX ERROR]` when saving back to main program
 
-Source and destination network fields accept:
-- **"any"**: Matches all networks
-- **CIDR notation**: e.g., 192.168.1.0/24, 10.0.0.1/32
-- **Variables**: Starting with $ or @ (e.g., $HOME_NET, @allow_list)
+#### Smart Auto-Complete
+- **Context-Aware**: Intelligent suggestions based on cursor position
+  - Actions: alert, pass, drop, reject, # (comment)
+  - Protocols: All 26 supported protocols (tcp, udp, tls, http, dns, etc.)
+  - Networks/Ports: "any", common CIDRs, port ranges, and defined variables
+  - Content Keywords: 50+ Suricata keywords loaded from content_keywords.json
+- **Trigger Methods**: Auto-appears while typing or manual with Ctrl+Space
+- **Accept**: Tab or Enter, navigate with Up/Down arrows
 
-## Variable Management
+#### Advanced Editing Features
+- **Auto-Close Characters**: `(` `[` `"` automatically insert matching closing character
+- **Smart Tab**: Tab jumps to next semicolon in rule options for rapid keyword entry
+- **Smart Backspace**: Deleting opening bracket/quote also deletes matching closing character
+- **Comment Toggle**: Ctrl+/ to comment/uncomment selected lines
+- **Clipboard**: Standard Ctrl+X/C/V with system clipboard integration
+- **Undo/Redo**: Full multi-level undo (Ctrl+Z) and redo (Ctrl+Y)
+- **Go to Line**: Ctrl+G for quick navigation
 
-The Rule Variables tab provides comprehensive variable management:
+#### Find and Replace
+- **Unified Dialog**: Ctrl+F opens comprehensive Find and Replace dialog
+- **Field-Specific**: Search in specific fields (message, content, networks, ports, SID, protocol, or all)
+- **Action Filtering**: Include/exclude pass, drop, reject, alert rules and comments
+- **Advanced Options**: Case-sensitive, whole word matching, regular expression support
+- **Visual Highlighting**: Current match in yellow, other matches in gray
+- **Navigation**: F3 for next, Shift+F3 for previous, Escape to close
+- **Replace Operations**: Replace current match or Replace All with confirmation
 
-### Variable Types
-- **IP Sets ($)**: Network variables like $HOME_NET with CIDR definitions
-- **Port Sets ($)**: Port variables like $WEB_PORTS with port/range definitions  
-- **Reference Sets (@)**: AWS VPC IP Set Reference ARNs for dynamic updates
+#### User Interface
+- **Line Numbers**: Always visible in left gutter
+- **Status Bar**: Cursor position (Ln/Col), total lines, current rule number, modification status, validation status
+- **Synchronized Scrolling**: Line numbers scroll with editor content
+- **Right-Click Menu**: Cut/copy/paste, select all, find/replace, toggle comment, error details
+- **Keyboard Shortcuts**: Built-in reference guide via "Shortcuts" button
 
-### Variable Features
-- **Auto-Detection**: Automatically discovers variables used in rules
-- **Persistent Storage**: Variables automatically saved/loaded via companion .var files
-- **Default Values**: HOME_NET defaults to RFC1918 private address space
-- **Validation**: CIDR and port format validation with negation support
-- **Export Integration**: Variables are included in Terraform/CloudFormation exports
+#### Content Keywords Customization
+- **External JSON**: `content_keywords.json` contains all Suricata keyword definitions
+- **Hot Reload**: File loaded each time editor opens (edit JSON, reopen to see changes)
+- **Easy Customization**: Add new keywords without modifying program code
+- **Comprehensive Coverage**: Syntax, valid values, descriptions, and categories for each keyword
+- **Graceful Degradation**: If file missing/corrupted, editor continues with basic auto-complete
+- **Future-Proof**: Unknown keywords generate warnings (not errors) for new Suricata features
 
-### Variable Formats
-- **CIDR Lists**: `192.168.1.0/24,10.0.0.0/8,!172.16.0.0/12`
-- **Port Lists**: `80,443,[8080:8090],!22`
-- **Reference ARNs**: `arn:aws:ec2:region:account:managed-prefix-list/pl-id`
+#### Save and Validation
+- **Comprehensive Validation**: All rules validated and categorized when clicking OK
+- **Error Rules**: Auto-commented with `# [SYNTAX ERROR]` prefix
+- **Warning Rules**: Preserved as-is (unknown keywords, undefined variables allowed)
+- **Confirmation Dialog**: Shows detailed summary of errors, warnings, and actions
+- **Auto-Create Variables**: Undefined variables automatically created with empty definitions
+- **Cancel Protection**: Unsaved changes prompt confirmation before discarding
 
-## SID Management
+**Use Cases:**
+- **Power Users**: Text-based workflow for those comfortable with Suricata syntax
+- **Bulk Editing**: Efficient for large-scale modifications and copy/paste operations
+- **Professional IDE**: Auto-complete and validation match modern code editor expectations
+- **Safety Net**: Real-time validation prevents invalid rules from breaking rule sets
 
-- SIDs must be unique within the rule group
-- Valid range: 100-999999999
-- Application auto-generates next available SID for new rules
-- Duplicate SID validation prevents conflicts
+### 📤 Infrastructure Export
 
-## File Format
-
-Rules are saved in standard Suricata format (.suricata extension) with:
-- Proper line endings
-- Comment preservation
-- Blank line support
-- Original syntax preservation
-
-## Rule Conflict Analysis
-
-The application includes comprehensive rule analysis to detect shadowing and conflicts:
-
-### Analysis Menu
-- **Review Rules**: Analyze current ruleset for conflicts and shadowing issues
-- **Variable Definition**: Define CIDR ranges for network variables during analysis
-- **Detailed Reporting**: Categorized findings with severity levels and recommendations
-
-### Conflict Detection
-- **Complete Shadow Detection**: Only flags cases where upper rule ALWAYS prevents lower rule execution
-- **Enhanced Protocol Layering Detection**: Universal detection across all protocol combinations (IP, ICMP, UDP, TCP vs HTTP, TLS, DNS, FTP, SSH, SMTP, etc.)
-- **Flow State Analysis**: Understands Suricata flow keywords (established vs not_established)
-- **Protocol Layer Separation**: Distinguishes between application and network layer rules with comprehensive protocol classification
-- **Smart Mitigation Detection**: Recognizes flow keywords (established, to_server, to_client, stateless, flowbits) that prevent layering issues
-- **Geographic Specificity**: Recognizes intentional geographic rule layering
-- **Flowbits Dependencies**: Accounts for conditional rule execution
-- **Action-Aware Analysis**: Different handling for alert vs pass vs drop/reject combinations
-
-### Report Categories
-- **Critical**: Security bypasses (pass rules shadowing drop/reject rules)
-- **Warning**: Missing alerts (drop/reject rules shadowing alert rules) and unreachable rules
-- **Informational**: Redundant rules with same actions
-
-### Enhanced Report Features
-- **Professional HTML Export**: Formatted reports with timestamps and version info
-- **PDF Export**: Browser-based PDF generation for documentation
-- **Right-click Copy**: Copy analysis results to clipboard
-- **Disclaimer Boilerplate**: Professional analysis disclaimers with legal language
-- **Actionable Recommendations**: Specific suggestions for rule reordering
-- **Comprehensive Metadata**: Tool version, analysis timestamp, and file information
-
-## Tips
-
-1. **Start Simple**: Begin with basic pass/drop rules before adding complex content keywords
-2. **Use Templates**: Leverage AWS best practices template and bulk domain import
-3. **Organize Rules**: Use comments to document rule sections
-4. **Manage Variables**: Use the Variables tab to define and organize network variables
-5. **Export Early**: Generate infrastructure templates to validate deployment requirements
-6. **Copy/Paste Workflow**: Use toggle selection to copy rules, deselect, then paste elsewhere
-7. **Validate Networks**: Ensure network fields use proper CIDR notation or variables
-8. **Analyze Conflicts**: Use Tools > Review Rules to check for shadowing issues
-9. **Click-to-Insert**: Click below the last rule to quickly add new entries
-10. **Backup Files**: Save frequently and use version control for rule files
-11. **Search Efficiently**: Use Ctrl+F to find rules, F3 to navigate results
-12. **Monitor Status**: Watch the status bar for rule counts, SID ranges, and warnings
-13. **Protocol Validation**: Pay attention to orange warning icons for unusual port combinations
-14. **Persistent Variables**: Variables are automatically saved with your .suricata files
-15. **Change Tracking**: Enable tracking for comprehensive audit trails and history logging
-16. **Begin using Suricata**: Use the import feature to easily convert existing stateful standard rule groups over to Suricata
-
-## Troubleshooting
-
-**Common Issues:**
-- **SID Conflicts**: Ensure all SIDs are unique before saving (auto-resolved in copy/paste)
-- **Network Validation**: Use proper CIDR format or predefined variables
-- **Variable Definitions**: Define variables in Variables tab for export and analysis
-- **File Permissions**: Ensure write access to save locations
-- **Large Files**: Application handles files up to 200K characters efficiently
-- **Network Connectivity**: AWS template loading and export require internet access
-- **Analysis Variables**: Define network variables for accurate conflict detection
-- **Export Capacity**: Ensure rule count plus buffer fits within AWS limits (30,000 capacity)
-- **Search Not Working**: Ensure search term matches rule content (case-insensitive)
-- **Variables Not Persisting**: Check for companion .var files in same directory as .suricata files
-- **Protocol Warnings**: Orange warning icons indicate unusual protocol/port combinations (informational only)
-- **Status Bar Issues**: Undefined variables warning indicates missing variable definitions
-
-## Infrastructure as Code Export
+> 🏗️ **Deploy to AWS** Export your rules as Terraform or CloudFormation templates for infrastructure as code deployment.
 
 Generate AWS Network Firewall resources for deployment:
 
-### Export Formats
+**Export Formats:**
 - **Terraform (.tf)**: Complete resource definition with variables and references
 - **CloudFormation (.cft)**: JSON template with proper AWS resource structure
 
-### Export Features
-- **Dynamic Capacity**: Calculates actual rule count plus 100 buffer for growth
-- **Variable Integration**: Includes IP sets, port sets, and reference sets from Variables tab
-- **STRICT_ORDER**: Configures rule processing order for predictable behavior
-- **Version Tracking**: Includes generator version in resource descriptions
-- **Proper Escaping**: Handles special characters for infrastructure syntax
+**Export Features:**
+- ⚙️ **Dynamic Capacity**: Calculates actual rule count plus 100 buffer for growth
+- 🔗 **Variable Integration**: Includes IP sets, port sets, and reference sets from Variables tab
+- 📋 **STRICT_ORDER**: Configures rule processing order for predictable behavior
+- 📝 **Version Tracking**: Includes generator version in resource descriptions
+- 🔒 **Proper Escaping**: Handles special characters for infrastructure syntax
 
-### Template Structure
+**Template Structure Example:**
 ```hcl
 resource "aws_networkfirewall_rule_group" "suricata_rule_group" {
   capacity = 150  # Auto-calculated
@@ -790,82 +853,379 @@ resource "aws_networkfirewall_rule_group" "suricata_rule_group" {
 }
 ```
 
+### 🌐 AWS Template Loading
+
+- **File > Load AWS Best Practices Template**: Dynamically fetches latest rules from AWS documentation
+- **HTML Parsing**: Extracts Suricata rules from AWS security guides
+- **Template Updates**: Stay current with AWS Network Firewall recommendations
+
+> ⚠️ **Note:** Requires internet connection to fetch templates from AWS documentation.
+
+---
+
+## Rule Format
+
+The application generates standard Suricata rule format:
+```
+action protocol src_net src_port direction dst_net dst_port (options)
+```
+
+**Example:**
+```
+pass tls $HOME_NET any -> any any (tls.sni; content:".example.com"; endswith; nocase; msg:"Domain allow rule for example.com"; sid:100;)
+```
+
+---
+
+## Network Field Validation
+
+Source and destination network fields accept:
+- 🌍 **"any"**: Matches all networks
+- 📍 **CIDR notation**: e.g., 192.168.1.0/24, 10.0.0.1/32
+- 🔤 **Variables**: Starting with $ or @ (e.g., $HOME_NET, @allow_list)
+
+---
+
+## Variable Management
+
+> 💡 **Variables** simplify rule management by allowing reusable network and port definitions.
+
+The Rule Variables tab provides comprehensive variable management:
+
+### Variable Types
+- **IP Sets ($)**: Network variables like $HOME_NET with CIDR definitions
+- **Port Sets ($)**: Port variables like $WEB_PORTS with port/range definitions  
+- **Reference Sets (@)**: AWS VPC IP Set Reference ARNs for dynamic updates
+
+### Variable Features
+- 🔍 **Auto-Detection**: Automatically discovers variables used in rules
+- 💾 **Persistent Storage**: Variables automatically saved/loaded via companion .var files
+- 🏠 **Default Values**: HOME_NET defaults to RFC1918 private address space
+- ✅ **Validation**: CIDR and port format validation with negation support
+- 📤 **Export Integration**: Variables are included in Terraform/CloudFormation exports
+
+### Variable Formats
+- **CIDR Lists**: `192.168.1.0/24,10.0.0.0/8,!172.16.0.0/12`
+- **Port Lists**: `80,443,[8080:8090],!22`
+- **Reference ARNs**: `arn:aws:ec2:region:account:managed-prefix-list/pl-id`
+
+---
+
+## SID Management
+
+> 🔢 **SIDs** (Signature IDs) must be unique within your rule group.
+
+- ✅ **Valid Range**: 1-999999999
+- 🤖 **Auto-Generation**: Application auto-generates next available SID for new rules
+- ⚠️ **Duplicate Prevention**: Built-in validation prevents conflicts
+
+---
+
+## File Format
+
+Rules are saved in standard text format (.suricata extension) with:
+- ✅ Proper line endings
+- 💬 Comment preservation
+- ⬜ Blank line support
+- 🔒 Original syntax preservation
+
+---
+
+## Rule Conflict Analysis
+
+> 🔍 **Analyze your rules** to detect shadowing and potential conflicts before deployment.
+
+The rules analysis engine was designed to catch many of the common issues that customers make when working with Suricata. The application includes comprehensive rule analysis to detect rule shadowing and conflicts:
+
+### Analysis Menu
+- **Tools > Review Rules**: Analyze current ruleset for conflicts and shadowing issues
+- **Variable Definition**: Define CIDR ranges for network variables during analysis
+- **Detailed Reporting**: Categorized findings with severity levels and recommendations
+
+### Conflict Detection Features
+- ✅ **Complete Shadow Detection**: Only flags cases where upper rule ALWAYS prevents lower rule execution
+- 🔄 **Protocol Layering Detection**: Universal detection across all protocol combinations
+- 📊 **Flow State Analysis**: Understands Suricata flow keywords
+- 🌐 **Geographic Specificity**: Recognizes intentional geographic rule layering
+- 🎯 **Action-Aware Analysis**: Different handling for alert vs pass vs drop/reject combinations
+
+### Report Categories
+- 🔴 **Critical**: Security bypasses (pass rules shadowing drop/reject rules)
+- 🟠 **Warning**: Missing alerts (drop/reject rules shadowing alert rules) and unreachable rules
+- 🔵 **Informational**: Redundant rules with same actions
+
+### Report Export
+- 📄 **HTML Export**: Professional formatted reports with timestamps
+- 📑 **PDF Export**: Browser-based PDF generation for documentation
+- 📋 **Copy Support**: Right-click to copy analysis results
+
+---
+
+## Tips
+
+> 💡 **Best Practices** for effective rule management
+
+1. 🎯 **Start Simple**: Begin with basic pass/drop rules before adding complex content keywords
+2. 📚 **Use Templates**: Leverage AWS best practices template and bulk domain import
+3. 📝 **Organize Rules**: Use comments to document rule sections
+4. 🔤 **Manage Variables**: Use the Variables tab to define and organize network variables
+5. 🏗️ **Export Early**: Generate infrastructure templates to validate deployment requirements
+6. 📋 **Copy/Paste Workflow**: Use toggle selection to copy rules, deselect, then paste elsewhere
+7. ✅ **Validate Networks**: Ensure network fields use proper CIDR notation or variables
+8. 🔍 **Analyze Conflicts**: Use Tools > Review Rules to check for shadowing issues
+9. ➕ **Click-to-Insert**: Click below the last rule to quickly add new entries
+10. 💾 **Backup Files**: Save frequently and use version control for rule files
+11. 🔎 **Search Efficiently**: Use Ctrl+F to find rules, F3 to navigate results
+12. 📊 **Monitor Status**: Watch the status bar for rule counts, SID ranges, and warnings
+13. ⚠️ **Protocol Validation**: Pay attention to orange warning icons for unusual port combinations
+14. 🔐 **Persistent Variables**: Variables are automatically saved with your .suricata files
+15. 📈 **Change Tracking**: Enable tracking for comprehensive audit trails and history logging
+16. 🚀 **Begin using Suricata**: Use the import feature to easily convert existing stateful standard rule groups over to Suricata
+
+---
+
+## Troubleshooting
+
+> ⚠️ **Having issues?** Check these common problems and solutions.
+
+### Common Issues
+
+**🔴 SID Conflicts**
+- Ensure all SIDs are unique before saving (auto-resolved in copy/paste)
+
+**🌐 Network Validation**
+- Use proper CIDR format or predefined variables
+
+**🔤 Variable Definitions**
+- Define variables in Variables tab for export and analysis
+
+**📁 File Permissions**
+- Ensure write access to save locations
+
+**📊 Large Files**
+- Application handles files up to 200K characters efficiently
+
+**🌍 Network Connectivity**
+- AWS template loading and export require internet access
+
+**🔍 Analysis Variables**
+- Define network variables for accurate conflict detection
+
+**📦 Export Capacity**
+- Ensure rule count plus buffer fits within AWS limits (30,000 capacity)
+
+**🔎 Search Not Working**
+- Ensure search term matches rule content (case-insensitive by default)
+
+**💾 Variables Not Persisting**
+- Check for companion .var files in same directory as .suricata files
+
+**⚠️ Protocol Warnings**
+- Orange warning icons indicate unusual protocol/port combinations (informational only)
+
+---
+
+## Infrastructure as Code Export
+
+> 🏗️ **Deploy to AWS** with infrastructure as code templates.
+
+*(See [Advanced Usage > Infrastructure Export](#-infrastructure-export) section for detailed information)*
+
+---
+
 ## Copy/Paste Workflow
 
-Efficient rule management with clipboard operations:
+> 📋 **Efficient rule management** with clipboard operations.
+
+### Intelligent Dual-Clipboard System
+
+The application uses a sophisticated dual-clipboard system to handle different copy/paste scenarios:
+
+#### Internal Clipboard (Pasting Within the Program)
+When you copy rules with **Ctrl+C** and paste them with **Ctrl+V** within the same program instance:
+- ✅ **Automatic SID Renumbering**: New SIDs are automatically generated to prevent conflicts
+- ✅ **Conflict-Free**: Rules can be safely pasted multiple times without SID collisions
+- ✅ **Seamless Workflow**: No manual SID adjustment needed when duplicating rules
+
+**Example:**
+```
+1. Copy rule with SID:100
+2. Paste within program → Automatically assigned SID:200 (or next available)
+3. Paste again → Automatically assigned SID:201
+```
+
+#### System Clipboard (Pasting to External Programs)
+When you copy rules to paste into external text editors, other files, or share with colleagues:
+- 📋 **Original SIDs Preserved**: Rules maintain their original SID numbers
+- 🔄 **Cross-File Sharing**: Enables moving rules between different .suricata files with SID integrity
+- 🤝 **Collaboration**: Share rules with exact SID references for team coordination
+
+**Example:**
+```
+1. Copy rule with SID:100
+2. Paste to Notepad/TextEdit → Rule shows "sid:100;" (original SID preserved)
+3. Paste to another .suricata file → Rule shows "sid:100;" (for manual management)
+```
+
+### How It Works
+
+The application maintains **two clipboards simultaneously**:
+1. **Internal clipboard**: Pre-calculated with new SIDs for conflict-free internal pasting
+2. **System clipboard**: Contains rules with original SIDs for external use
+
+**Smart Detection:**
+- Internal paste: Uses internal clipboard when content matches last copy operation
+- External paste: Detects external clipboard content and auto-assigns new SIDs to prevent conflicts
+- Re-import protection: External rules pasted back get new SIDs automatically
 
 ### Copy Operations
-- **Multi-Select**: Copy multiple rules simultaneously
-- **SID Regeneration**: Automatically assigns new SIDs to prevent conflicts
-- **Structure Preservation**: Maintains comments, blank lines, and formatting
-- **Keyboard Shortcuts**: Ctrl+C or right-click context menu
+- **Multi-Select**: Copy multiple rules simultaneously (Ctrl+C or right-click)
+- **Dual Population**: Automatically populates both internal and system clipboards
+- **Structure Preservation**: Maintains comments, blank lines, and formatting in both clipboards
 
 ### Paste Operations
-- **Position Control**: Paste at selected location or end of list
-- **Conflict Prevention**: Auto-generates unique SIDs for pasted rules
-- **Undo Support**: Full undo capability for paste operations
-- **Visual Feedback**: Confirmation messages with paste details
+- **Position Control**: Paste at selected location or end of list (Ctrl+V or right-click)
+- **Intelligent Source**: Automatically detects whether to use internal or system clipboard
+- **Conflict Prevention**: Always generates unique SIDs regardless of paste source
+- ↩️ **Undo Support**: Full undo capability for all paste operations
 
-### Selection Management
-- **Toggle Selection**: Click selected rules again to deselect
-- **Clear Selection**: Click empty areas to clear all selections
-- **Context Menus**: Right-click for copy/paste options
-- **Multi-Rule Operations**: Select multiple rules for batch operations
+### Use Cases
+
+**Within Program (Internal Clipboard):**
+- ✅ Duplicate rules for variations
+- ✅ Copy templates to create similar rules
+- ✅ Reorganize rules within the same file
+
+**External Sharing (System Clipboard):**
+- ✅ Share rules via email/chat with original SID references
+- ✅ Copy rules to documentation with accurate SID numbers
+- ✅ Move rules between different .suricata files for manual integration
+- ✅ Copy to text editor for external editing and processing
+
+---
 
 ## Advanced Features
 
-### AWS Integration
-- **Dynamic Template Loading**: Fetches latest best practices from AWS documentation
-- **HTML Parsing**: Extracts Suricata rules from AWS security guides
-- **Template Updates**: Stay current with AWS Network Firewall recommendations
-- **Infrastructure Export**: Generate deployment-ready Terraform and CloudFormation
+> 🚀 **Power User Features** for advanced workflows.
 
-### User Interface Enhancements
-- **Tabbed Interface**: Organized workflow with Rule Editor and Variables tabs
-- **Context-Sensitive UI**: Buttons appear/hide based on active tab
-- **Placeholder Row Management**: Visual indicator for new rule insertion points
-- **Keyboard Navigation**: Efficient rule navigation without mouse interaction
-- **Inline Comment Editing**: Edit comments directly in the bottom panel
-- **Multiple Selection**: Select and delete multiple rules simultaneously
-- **Toggle Selection**: Click to deselect for improved copy/paste workflow
-- **Enhanced Status Bar**: Real-time statistics with colored action counts and warnings
-- **Search Integration**: Traditional Windows-style search with highlighting
-- **Protocol Validation**: Subtle tooltip warnings for unusual protocol/port combinations
+*(This section provides a high-level overview. See [Advanced Usage](#advanced-usage) for detailed documentation of each feature.)*
 
-### Rule Analysis Engine
-- **Complete Shadow Detection**: Advanced algorithm to eliminate false positives
-- **Multi-dimensional Analysis**: Protocol, network, port, and content overlap detection
-- **Intentional Pattern Recognition**: Identifies legitimate layered security architectures
-- **Variable Resolution**: Handles network variable definitions for accurate analysis
-- **Flow State Analysis**: Understands Suricata flow keywords and dependencies
-- **Professional Reporting**: HTML/PDF export with comprehensive metadata and disclaimers
+### Key Capabilities
+- 🌐 **AWS Integration**: Dynamic template loading and infrastructure export
+- 🎨 **UI Enhancements**: Tabbed interface, context-sensitive controls, enhanced status bar
+- 🔍 **Rule Analysis Engine**: Complete shadow detection and professional reporting
+- 💾 **Data Persistence**: Companion files for variables and change history
+- 📊 **Change Tracking System**: Comprehensive audit trail with history logging
+- 🏗️ **Modular Architecture**: Well-organized codebase with dedicated manager modules
 
-### Data Persistence
-- **Companion .var Files**: Automatic variable storage alongside .suricata files
-- **JSON Format**: Human-readable variable definitions for version control
-- **Automatic Loading**: Variables restored when opening associated .suricata files
-- **Cross-Session Continuity**: Variable definitions persist between application sessions
+---
 
-### Change Tracking System
-- **Comprehensive Audit Trail**: Complete logging of all rule and variable operations
-- **Timestamped Headers**: Automatic file headers with creation and modification timestamps
-- **Persistent History**: Companion .history files store detailed change logs
-- **Operation Categories**: Rule operations, variable operations, file operations, and bulk operations
-- **History Export**: Export change history for documentation and compliance
-- **Auto-Detection**: Seamless integration with existing files that have history
-- **User Control**: Toggle tracking on/off based on project requirements
-- **Cross-Session Continuity**: History persists across application sessions
+## Content Keywords JSON Structure
 
-### Modular Architecture *(Enhanced in v1.6.7)*
-- **Component Separation**: Well-organized codebase with dedicated modules for specific functionality
-- **UIManager**: Centralized management of all user interface components, menus, event handling, and visual elements
-- **SearchManager**: Comprehensive search functionality with field-specific search, filtering, and navigation
-- **FileManager**: All file I/O operations including .suricata files, companion .var files, and export functionality  
-- **DomainImporter**: Bulk domain import operations and AWS template loading capabilities
-- **RuleAnalyzer**: Advanced rule conflict detection, shadowing analysis, and professional report generation
-- **SuricataRule**: Core rule parsing, validation, and formatting functionality
-- **Composition Pattern**: Main application uses manager instances through composition for better maintainability
-- **Enhanced Maintainability**: Focused modules with single responsibilities for easier testing and code reuse
+> 🔧 **Customize auto-complete** by editing the content_keywords.json file.
+
+The `content_keywords.json` file allows users to customize and extend the auto-complete functionality in the Advanced Editor. This file defines all Suricata content keywords with their syntax, valid values, and descriptions.
+
+### JSON File Format
+
+```json
+{
+  "version": "1.0",
+  "description": "AWS Network Firewall Suricata Content Keywords",
+  "keywords": [
+    {
+      "name": "keyword_name",
+      "syntax": "keyword_name:<value>",
+      "values": ["optional", "list", "of", "valid", "values"],
+      "description": "Human-readable description",
+      "category": "general|flow|http|tls|dns|protocol"
+    }
+  ]
+}
+```
+
+### Field Definitions
+
+- **version**: Version number of the keyword definitions file (for tracking changes)
+- **description**: Brief description of the keyword set
+- **keywords**: Array of keyword objects, each containing:
+  - **name** (required): The keyword name (e.g., "flow", "msg", "sid")
+  - **syntax** (required): Template showing proper keyword syntax (e.g., "msg:\"<message>\"")
+  - **values** (optional): Array of valid values for keywords with enumerated options
+  - **description** (required): Human-readable explanation of the keyword's purpose
+  - **category** (optional): Grouping category for organization
+
+### Example Keywords
+
+```json
+{
+  "version": "1.0",
+  "description": "AWS Network Firewall Suricata Content Keywords",
+  "keywords": [
+    {
+      "name": "flow",
+      "syntax": "flow:<value>",
+      "values": ["to_server", "to_client", "established", "not_established", "stateless"],
+      "description": "Match on direction and state of the flow",
+      "category": "flow"
+    },
+    {
+      "name": "msg",
+      "syntax": "msg:\"<message>\"",
+      "description": "Rule message/description",
+      "category": "general"
+    },
+    {
+      "name": "sid",
+      "syntax": "sid:<number>",
+      "description": "Rule signature ID (1-999999999)",
+      "category": "general"
+    },
+    {
+      "name": "http.host",
+      "syntax": "http.host; content:\"<domain>\"",
+      "description": "Match HTTP host header",
+      "category": "http"
+    },
+    {
+      "name": "tls.sni",
+      "syntax": "tls.sni; content:\"<domain>\"",
+      "description": "Match TLS Server Name Indication",
+      "category": "tls"
+    }
+  ]
+}
+```
+
+### Adding New Keywords
+
+To add a new keyword to the Advanced Editor's auto-complete:
+
+1. 📝 **Open** `content_keywords.json` in a text editor
+2. ➕ **Add** a new keyword object to the `keywords` array
+3. 💾 **Save** the file
+4. 🔄 **Reopen** the Advanced Editor (it reloads the JSON each time it opens)
+5. ✅ **Test** the new keyword appears in auto-complete suggestions
+
+### Hot Reload Feature
+
+The Advanced Editor automatically reloads `content_keywords.json` each time it opens, allowing you to:
+- Edit the JSON file while the main application is running
+- Close the Advanced Editor
+- Reopen the Advanced Editor to see your changes immediately
+- No need to restart the main application
+
+### Validation
+
+> ⚠️ **Unknown keywords** generate warnings (not errors) for future compatibility.
+
+The Advanced Editor validates unknown keywords as **warnings** (not errors), which means:
+- Rules using undefined keywords are preserved (not commented out)
+- Users can use new Suricata features before updating the JSON
+- The JSON file can be gradually updated over time
+- Forward compatibility is maintained
+
+---
 
 ## Technical Architecture
 
@@ -873,6 +1233,7 @@ The application follows a modular architecture pattern with specialized managers
 
 - **Main Application** (`suricata_generator.py`): Core application logic and manager coordination
 - **UI Manager** (`ui_manager.py`): Complete user interface management and event handling
+- **Advanced Editor** (`advanced_editor.py`): *(New in v1.19.0)* IDE-style text editor with auto-complete, validation, and find/replace
 - **Search Manager** (`search_manager.py`): Advanced search capabilities with filtering and navigation
 - **File Manager** (`file_manager.py`): All file operations, exports, and companion file management
 - **Domain Importer** (`domain_importer.py`): Bulk domain processing and AWS template integration
@@ -884,7 +1245,12 @@ The application follows a modular architecture pattern with specialized managers
 - **Constants** (`constants.py`): Application constants, limits, and validation patterns
 - **Version** (`version.py`): Centralized version management for main application and components
 
+### Configuration Files
+- **Content Keywords** (`content_keywords.json`): *(New in v1.19.0)* Extensible keyword definitions for Advanced Editor auto-complete
+
 ### Security Features
+> 🔒 **Security First** - Built-in protection against common vulnerabilities.
+
 The Security Validator module provides protection against:
 - **Injection Attacks**: Filters dangerous patterns and script injection attempts
 - **Path Traversal**: Validates filenames and prevents directory traversal
@@ -892,12 +1258,21 @@ The Security Validator module provides protection against:
 - **File Operation Security**: Validates file sizes and access permissions
 - **Domain Validation**: Ensures proper domain name format and safety
 
-This architecture provides excellent separation of concerns, making the codebase more maintainable, testable, and extensible while maintaining robust security controls throughout the application.
+---
 
 ## Version
 
-Current version: 1.18.7
+Current version: 1.19.1
 
 ## Support
 
-For issues or questions, refer to the application's Help > About dialog or review the source code comments for detailed implementation information.
+For issues, questions, or to contribute to the project:
+
+- 📚 **GitHub Repository**: [https://github.com/aws-samples/sample-suricata-generator](https://github.com/aws-samples/sample-suricata-generator)
+- 💬 **Help Dialog**: Use Help > About in the application for version information
+- 📖 **Documentation**: Review the source code comments for detailed implementation information
+- 🐛 **Issues**: Report bugs or request features via GitHub Issues
+
+---
+
+**Repository**: [aws-samples/sample-suricata-generator](https://github.com/aws-samples/sample-suricata-generator)

@@ -93,10 +93,6 @@ class RuleAnalyzer:
         contradictory_flow_issues = self.check_contradictory_flow_keywords(rules)
         conflicts['contradictory_flow'] = contradictory_flow_issues
         
-        # Check for missing nocase on domain rules
-        missing_nocase_issues = self.check_missing_nocase_on_domains(rules)
-        conflicts['missing_nocase'] = missing_nocase_issues
-        
         # Check for packet-scope drop/reject conflicting with flow-scope pass
         # This was a bug in Suricata <8.0 that has been fixed
         packet_flow_conflicts = self.check_packet_drop_flow_pass_conflict(rules)
@@ -2348,66 +2344,6 @@ class RuleAnalyzer:
         
         return issues
     
-    def check_missing_nocase_on_domains(self, rules: List[SuricataRule]) -> List[Dict]:
-        """Check for domain matching without nocase modifier
-        
-        Domain names are case-insensitive, so tls.sni and http.host content matches
-        should use the nocase modifier to match all case variations.
-        
-        Args:
-            rules: List of SuricataRule objects to analyze
-            
-        Returns:
-            List of dictionaries describing missing nocase modifiers
-        """
-        issues = []
-        
-        # Filter out comments and blank lines
-        actual_rules = [r for r in rules if not getattr(r, 'is_comment', False) and not getattr(r, 'is_blank', False)]
-        
-        for rule in actual_rules:
-            line_num = rules.index(rule) + 1
-            
-            full_content = (rule.content or '') + ' ' + (rule.original_options or '')
-            full_content_lower = full_content.lower()
-            
-            # Check for domain-matching keywords
-            has_tls_sni = 'tls.sni' in full_content_lower
-            has_http_host = 'http.host' in full_content_lower
-            
-            if not (has_tls_sni or has_http_host):
-                continue  # No domain keywords
-            
-            # Check if there's a content keyword after the sticky buffer
-            # Look for pattern: tls.sni; content:"..." (without nocase after)
-            
-            # Find all content matches that come after domain keywords
-            domain_keyword = 'tls.sni' if has_tls_sni else 'http.host'
-            
-            # Look for the pattern: domain_keyword followed by content without nocase
-            # Simple check: if domain keyword exists and content exists, check for nocase
-            if 'content:' in full_content_lower:
-                # Check if nocase appears anywhere in the rule
-                has_nocase = 'nocase' in full_content_lower
-                
-                if not has_nocase:
-                    # Extract domain from content for the message
-                    domain_match = re.search(r'content:\s*["\']([^"\']+)["\']', full_content, re.IGNORECASE)
-                    domain_value = domain_match.group(1) if domain_match else 'domain'
-                    
-                    issue = {
-                        'line': line_num,
-                        'rule': rule,
-                        'keyword': domain_keyword,
-                        'domain': domain_value,
-                        'issue': f"Rule uses {domain_keyword} with content:\"{domain_value}\" but lacks 'nocase' modifier. Domain matching is case-insensitive, so this may miss valid matches",
-                        'suggestion': "Add 'nocase;' modifier after the content keyword to match all case variations (e.g., content:\"amazon.com\"; nocase;)",
-                        'severity': 'warning'
-                    }
-                    issues.append(issue)
-        
-        return issues
-    
     def check_packet_drop_flow_pass_conflict(self, rules: List[SuricataRule]) -> List[Dict]:
         """Check for packet-scope DROP/REJECT conflicting with flow-scope PASS
         
@@ -2586,16 +2522,6 @@ class RuleAnalyzer:
             report += f"⚠️ CONTRADICTORY FLOW KEYWORDS ({len(conflicts['contradictory_flow'])})\n"
             report += f"-" * 30 + "\n"
             for i, issue in enumerate(conflicts['contradictory_flow'], 1):
-                report += f"{i}. Line {issue['line']}\n"
-                report += f"   Issue: {issue['issue']}\n"
-                report += f"   Rule: {issue['rule'].to_string()[:80]}...\n"
-                report += f"   Suggestion: {issue['suggestion']}\n\n"
-        
-        # Missing nocase on domains
-        if conflicts.get('missing_nocase'):
-            report += f"⚠️ MISSING NOCASE ON DOMAINS ({len(conflicts['missing_nocase'])})\n"
-            report += f"-" * 30 + "\n"
-            for i, issue in enumerate(conflicts['missing_nocase'], 1):
                 report += f"{i}. Line {issue['line']}\n"
                 report += f"   Issue: {issue['issue']}\n"
                 report += f"   Rule: {issue['rule'].to_string()[:80]}...\n"
@@ -2788,17 +2714,6 @@ class RuleAnalyzer:
             if conflicts.get('contradictory_flow'):
                 html += f'<h2 class="warning">⚠️ CONTRADICTORY FLOW KEYWORDS ({len(conflicts["contradictory_flow"])})</h2>'
                 for i, issue in enumerate(conflicts['contradictory_flow'], 1):
-                    html += f'<div class="conflict conflict-warning">'
-                    html += f'<strong>{i}. Line {issue["line"]}</strong><br>'
-                    html += f'<strong>Issue:</strong> {issue["issue"]}<br>'
-                    html += f'<strong>Suggestion:</strong> {issue["suggestion"]}<br>'
-                    html += f'<div class="rule-text">Rule: {issue["rule"].to_string()[:100]}...</div>'
-                    html += '</div>'
-            
-            # Missing nocase on domains
-            if conflicts.get('missing_nocase'):
-                html += f'<h2 class="warning">⚠️ MISSING NOCASE ON DOMAINS ({len(conflicts["missing_nocase"])})</h2>'
-                for i, issue in enumerate(conflicts['missing_nocase'], 1):
                     html += f'<div class="conflict conflict-warning">'
                     html += f'<strong>{i}. Line {issue["line"]}</strong><br>'
                     html += f'<strong>Issue:</strong> {issue["issue"]}<br>'

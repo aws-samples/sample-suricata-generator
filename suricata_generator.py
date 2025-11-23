@@ -1136,9 +1136,9 @@ class SuricataRuleGenerator:
                 return None
             
             sid = int(sid_str)
-            if not (100 <= sid <= 999999999):
+            if not (SuricataConstants.SID_MIN <= sid <= SuricataConstants.SID_MAX):
                 if show_errors:
-                    messagebox.showerror("Error", "SID must be between 100 and 999999999.")
+                    messagebox.showerror("Error", f"SID must be between {SuricataConstants.SID_MIN} and {SuricataConstants.SID_MAX}.")
                 return None
             
             # Get rev value (should be set from UI or default to 1)
@@ -1881,8 +1881,8 @@ class SuricataRuleGenerator:
                     return
                 
                 sid = int(sid_var.get().strip())
-                if not (100 <= sid <= 999999999):
-                    messagebox.showerror("Error", "SID must be between 100 and 999999999.")
+                if not (SuricataConstants.SID_MIN <= sid <= SuricataConstants.SID_MAX):
+                    messagebox.showerror("Error", f"SID must be between {SuricataConstants.SID_MIN} and {SuricataConstants.SID_MAX}.")
                     return
                 
                 # Validate port fields
@@ -2037,8 +2037,8 @@ class SuricataRuleGenerator:
                     return
                 
                 sid = int(sid_str)
-                if not (100 <= sid <= 999999999):
-                    messagebox.showerror("Error", "SID must be between 100 and 999999999.")
+                if not (SuricataConstants.SID_MIN <= sid <= SuricataConstants.SID_MAX):
+                    messagebox.showerror("Error", f"SID must be between {SuricataConstants.SID_MIN} and {SuricataConstants.SID_MAX}.")
                     return
                 
                 # Check for duplicate SID (excluding current rule)
@@ -2332,8 +2332,8 @@ class SuricataRuleGenerator:
                 return
             
             sid = int(sid_str)
-            if not (100 <= sid <= 999999999):
-                messagebox.showerror("Error", "SID must be between 100 and 999999999.")
+            if not (SuricataConstants.SID_MIN <= sid <= SuricataConstants.SID_MAX):
+                messagebox.showerror("Error", f"SID must be between {SuricataConstants.SID_MIN} and {SuricataConstants.SID_MAX}.")
                 return
             
             # Validate network fields
@@ -3100,8 +3100,8 @@ class SuricataRuleGenerator:
                 scope = scope_var.get()
                 
                 # Validate input values
-                if start_sid < 100 or start_sid > 999999999:
-                    messagebox.showerror("Error", "Starting SID must be between 100 and 999999999.")
+                if start_sid < SuricataConstants.SID_MIN or start_sid > SuricataConstants.SID_MAX:
+                    messagebox.showerror("Error", f"Starting SID must be between {SuricataConstants.SID_MIN} and {SuricataConstants.SID_MAX}.")
                     return
                 if increment < 1 or increment > 1000:
                     messagebox.showerror("Error", "Increment must be between 1 and 1000.")
@@ -3265,6 +3265,182 @@ class SuricataRuleGenerator:
     
 
     
+    def analyze_advanced_editor_changes(self, original_rules, new_rules):
+        """Analyze changes made in Advanced Editor and return summary
+        
+        Args:
+            original_rules: List of rules before Advanced Editor
+            new_rules: List of rules after Advanced Editor
+            
+        Returns:
+            dict: Summary of changes with statistics and details
+        """
+        # Count actual rules (non-comment, non-blank)
+        original_actual = [r for r in original_rules if not getattr(r, 'is_comment', False) and not getattr(r, 'is_blank', False)]
+        new_actual = [r for r in new_rules if not getattr(r, 'is_comment', False) and not getattr(r, 'is_blank', False)]
+        
+        original_count = len(original_actual)
+        new_count = len(new_actual)
+        
+        # Calculate basic statistics
+        rules_added = new_count - original_count if new_count > original_count else 0
+        rules_deleted = original_count - new_count if original_count > new_count else 0
+        
+        # Track modified rules by comparing SIDs
+        original_sids = {r.sid: r for r in original_actual}
+        new_sids = {r.sid: r for r in new_actual}
+        
+        rules_modified = 0
+        for sid, new_rule in new_sids.items():
+            if sid in original_sids:
+                original_rule = original_sids[sid]
+                # Check if rule content changed (excluding rev)
+                if (original_rule.action != new_rule.action or
+                    original_rule.protocol != new_rule.protocol or
+                    original_rule.src_net != new_rule.src_net or
+                    original_rule.src_port != new_rule.src_port or
+                    original_rule.dst_net != new_rule.dst_net or
+                    original_rule.dst_port != new_rule.dst_port or
+                    original_rule.content != new_rule.content or
+                    original_rule.message != new_rule.message):
+                    rules_modified += 1
+        
+        # Calculate SID ranges
+        original_sid_range = None
+        new_sid_range = None
+        if original_actual:
+            original_sids_list = [r.sid for r in original_actual]
+            original_sid_range = (min(original_sids_list), max(original_sids_list))
+        if new_actual:
+            new_sids_list = [r.sid for r in new_actual]
+            new_sid_range = (min(new_sids_list), max(new_sids_list))
+        
+        # Calculate action distribution changes
+        original_actions = {}
+        for rule in original_actual:
+            action = rule.action.lower()
+            original_actions[action] = original_actions.get(action, 0) + 1
+        
+        new_actions = {}
+        for rule in new_actual:
+            action = rule.action.lower()
+            new_actions[action] = new_actions.get(action, 0) + 1
+        
+        return {
+            'rules_before': original_count,
+            'rules_after': new_count,
+            'rules_added': rules_added,
+            'rules_deleted': rules_deleted,
+            'rules_modified': rules_modified,
+            'original_sid_range': original_sid_range,
+            'new_sid_range': new_sid_range,
+            'original_actions': original_actions,
+            'new_actions': new_actions
+        }
+    
+    def add_advanced_editor_history(self, change_summary):
+        """Add history entry for Advanced Editor changes
+        
+        Implements hybrid approach: small changes (1-2 rules) are tracked individually
+        with special marking, larger changes get a summary entry.
+        
+        Args:
+            change_summary: Dictionary containing change statistics
+        """
+        if not self.tracking_enabled:
+            return
+        
+        total_changes = (change_summary['rules_added'] + 
+                        change_summary['rules_deleted'] + 
+                        change_summary['rules_modified'])
+        
+        # For small changes (1-2 rules), track individually but mark as from Advanced Editor
+        if total_changes <= 2:
+            # Generate individual entries with special marking
+            if change_summary['rules_added'] > 0:
+                details = {
+                    'count': change_summary['rules_added'],
+                    'source': 'advanced_editor',
+                    'rules_before': change_summary['rules_before'],
+                    'rules_after': change_summary['rules_after']
+                }
+                self.add_history_entry('advanced_editor_rules_added', details)
+            
+            if change_summary['rules_deleted'] > 0:
+                details = {
+                    'count': change_summary['rules_deleted'],
+                    'source': 'advanced_editor',
+                    'rules_before': change_summary['rules_before'],
+                    'rules_after': change_summary['rules_after']
+                }
+                self.add_history_entry('advanced_editor_rules_deleted', details)
+            
+            if change_summary['rules_modified'] > 0:
+                details = {
+                    'count': change_summary['rules_modified'],
+                    'source': 'advanced_editor',
+                    'rules_before': change_summary['rules_before'],
+                    'rules_after': change_summary['rules_after']
+                }
+                self.add_history_entry('advanced_editor_rules_modified', details)
+        else:
+            # For larger changes, create a summary entry
+            details = {
+                'rules_before': change_summary['rules_before'],
+                'rules_after': change_summary['rules_after'],
+                'rules_added': change_summary['rules_added'],
+                'rules_deleted': change_summary['rules_deleted'],
+                'rules_modified': change_summary['rules_modified'],
+                'net_change': change_summary['rules_after'] - change_summary['rules_before']
+            }
+            
+            # Add SID range info if available
+            if change_summary['original_sid_range']:
+                details['original_sid_range'] = f"{change_summary['original_sid_range'][0]}-{change_summary['original_sid_range'][1]}"
+            if change_summary['new_sid_range']:
+                details['new_sid_range'] = f"{change_summary['new_sid_range'][0]}-{change_summary['new_sid_range'][1]}"
+            
+            # Add action distribution changes if significant
+            if change_summary['original_actions'] or change_summary['new_actions']:
+                details['action_changes'] = {
+                    'before': change_summary['original_actions'],
+                    'after': change_summary['new_actions']
+                }
+            
+            self.add_history_entry('advanced_editor_bulk_changes', details)
+    
+    def show_advanced_editor(self):
+        """Show the Advanced Editor for text-based rule editing"""
+        from advanced_editor import AdvancedEditor
+        
+        # Save original state before opening editor
+        original_rules = self.rules.copy()
+        
+        # Launch the Advanced Editor with reference to main app for validation methods
+        editor = AdvancedEditor(self.root, self.rules, self.variables, main_app=self)
+        
+        # If user clicked OK, update the main window
+        if editor.result:
+            # Save state for undo
+            self.save_undo_state()
+            
+            # Analyze changes made in Advanced Editor
+            change_summary = self.analyze_advanced_editor_changes(original_rules, editor.result)
+            
+            # Add history entry based on change magnitude
+            if change_summary:
+                self.add_advanced_editor_history(change_summary)
+            
+            # Update rules and variables
+            self.rules = editor.result
+            self.variables = editor.variables.copy()
+            
+            # Refresh UI
+            self.refresh_table()
+            self.auto_detect_variables()
+            self.modified = True
+            self.update_status_bar()
+    
     def show_about(self):
         """Show About dialog with version information and release notes from RELEASE_NOTES.md"""
         # Try to read release notes from file
@@ -3308,22 +3484,43 @@ class SuricataRuleGenerator:
         # Insert title
         text_widget.insert(tk.END, "Suricata Rule Generator for AWS Network Firewall\n")
         
-        # Insert author line with hyperlink
-        text_widget.insert(tk.END, "Author: Brian Westmoreland (")
+        # Insert authors heading
+        text_widget.insert(tk.END, "Authors:\n")
         
-        # Insert LinkedIn hyperlink
-        linkedin_start = text_widget.index(tk.INSERT)
+        # Insert Brian's author line with bolded name and hyperlink
+        brian_name_start = text_widget.index(tk.INSERT)
+        text_widget.insert(tk.END, "Brian Westmoreland")
+        brian_name_end = text_widget.index(tk.INSERT)
+        text_widget.tag_add("bold", brian_name_start, brian_name_end)
+        
+        text_widget.insert(tk.END, " (")
+        
+        brian_linkedin_start = text_widget.index(tk.INSERT)
         text_widget.insert(tk.END, "LinkedIn")
-        linkedin_end = text_widget.index(tk.INSERT)
-        text_widget.tag_add("hyperlink", linkedin_start, linkedin_end)
+        brian_linkedin_end = text_widget.index(tk.INSERT)
+        text_widget.tag_add("hyperlink", brian_linkedin_start, brian_linkedin_end)
+        text_widget.tag_add("brian_linkedin", brian_linkedin_start, brian_linkedin_end)
         
         text_widget.insert(tk.END, ")\n")
         
-        # Insert version
-        version_start = text_widget.index(tk.INSERT)
-        text_widget.insert(tk.END, f"Version {self.get_version_number()}")
-        version_end = text_widget.index(tk.INSERT)
-        text_widget.tag_add("bold", version_start, version_end)
+        # Insert Jesse's author line with bolded name and hyperlink
+        jesse_name_start = text_widget.index(tk.INSERT)
+        text_widget.insert(tk.END, "Jesse Lepich")
+        jesse_name_end = text_widget.index(tk.INSERT)
+        text_widget.tag_add("bold", jesse_name_start, jesse_name_end)
+        
+        text_widget.insert(tk.END, " (")
+        
+        jesse_linkedin_start = text_widget.index(tk.INSERT)
+        text_widget.insert(tk.END, "LinkedIn")
+        jesse_linkedin_end = text_widget.index(tk.INSERT)
+        text_widget.tag_add("hyperlink", jesse_linkedin_start, jesse_linkedin_end)
+        text_widget.tag_add("jesse_linkedin", jesse_linkedin_start, jesse_linkedin_end)
+        
+        text_widget.insert(tk.END, ")\n")
+        
+        # Insert version (unbolded)
+        text_widget.insert(tk.END, f"\nVersion {self.get_version_number()}")
         
         text_widget.insert(tk.END, "\n\n")
         
@@ -3338,10 +3535,15 @@ class SuricataRuleGenerator:
             "see the RELEASE_NOTES.md file in the project directory."
         )
         
-        # Configure hyperlink behavior
-        def on_hyperlink_click(event):
+        # Configure hyperlink behavior for Brian's LinkedIn
+        def on_brian_hyperlink_click(event):
             import webbrowser
             webbrowser.open("https://www.linkedin.com/in/brian-westmoreland-b55b755/")
+        
+        # Configure hyperlink behavior for Jesse's LinkedIn
+        def on_jesse_hyperlink_click(event):
+            import webbrowser
+            webbrowser.open("https://www.linkedin.com/in/jesselepich/")
         
         def on_hyperlink_enter(event):
             text_widget.config(cursor="hand2")
@@ -3351,10 +3553,15 @@ class SuricataRuleGenerator:
             text_widget.config(cursor="")
             text_widget.tag_configure("hyperlink", foreground="blue", underline=True)
         
-        # Bind hyperlink events
-        text_widget.tag_bind("hyperlink", "<Button-1>", on_hyperlink_click)
-        text_widget.tag_bind("hyperlink", "<Enter>", on_hyperlink_enter)
-        text_widget.tag_bind("hyperlink", "<Leave>", on_hyperlink_leave)
+        # Bind hyperlink events for Brian's LinkedIn
+        text_widget.tag_bind("brian_linkedin", "<Button-1>", on_brian_hyperlink_click)
+        text_widget.tag_bind("brian_linkedin", "<Enter>", on_hyperlink_enter)
+        text_widget.tag_bind("brian_linkedin", "<Leave>", on_hyperlink_leave)
+        
+        # Bind hyperlink events for Jesse's LinkedIn
+        text_widget.tag_bind("jesse_linkedin", "<Button-1>", on_jesse_hyperlink_click)
+        text_widget.tag_bind("jesse_linkedin", "<Enter>", on_hyperlink_enter)
+        text_widget.tag_bind("jesse_linkedin", "<Leave>", on_hyperlink_leave)
         
         text_widget.config(state=tk.DISABLED)
         

@@ -260,8 +260,10 @@ class StatefulRuleImporter:
         Returns:
             Tuple of (message, sid, rev, content)
         """
+        from constants import SuricataConstants
+        
         msg = ""
-        sid = 100
+        sid = SuricataConstants.SID_MIN
         rev = 1
         content_parts = []
         
@@ -279,7 +281,7 @@ class StatefulRuleImporter:
                     try:
                         sid = int(settings[0])
                     except ValueError:
-                        sid = 100
+                        sid = SuricataConstants.SID_MIN
             elif keyword == 'rev':
                 # Extract revision
                 if settings:

@@ -1,5 +1,125 @@
 # Release Notes
 
+## Version 1.19.1 - November 22, 2025
+
+### Bug Fix: Domain Consolidation Algorithm
+- **Critical Domain Consolidation Fix**: Fixed bug where domain consolidation was selecting overly broad parent domains instead of the most specific common parent
+  - **Root Cause**: Algorithm was using greedy processing that selected subset groups before supersets, preventing optimal consolidation
+  - **Impact**: Domain lists like `['one.two.three.server.appstate.edu', 'five.three.server.appstate.edu', 'server.appstate.edu', 'two.server.appstate.edu']` were incorrectly consolidated to multiple groups instead of single optimal parent
+  - **Solution**: Implemented maximal group filtering that prioritizes largest consolidation groups and eliminates subset groups
+  - **Before Fix**: Consolidated to `['three.server.appstate.edu', 'server.appstate.edu']` (2 groups)
+  - **After Fix**: Consolidated to `['server.appstate.edu']` (1 group covering all 4 domains)
+  - **Algorithm Enhancement**: Now groups parents by exact children sets, filters subsets, then selects most specific parent for each maximal group
+
+### Feature Removal: PCRE Optimization
+- **Removed PCRE Functionality**: Eliminated PCRE optimization feature as it became redundant with improved domain consolidation
+  - **Analysis**: After fixing consolidation bug, determined PCRE only provided benefit for TLD variations (e.g., `example.com`, `example.edu`)
+  - **Consolidation Achievement**: Default consolidation now achieves same results as PCRE for subdomain grouping (most common use case)
+  - **Simpler Codebase**: Removed ~240 lines of PCRE-specific code including UI elements, methods, and logic
+  - **Removed Components**:
+    - PCRE checkbox and info label from import dialog
+    - `analyze_domains_for_pcre()` method
+    - `generate_domain_rules_with_pcre()` method
+    - `generate_pcre_group_rules()` method
+  - **User Impact**: Simplified import dialog, reduced complexity, same or better consolidation results
+  - **Future-Proofing**: Users needing TLD variation patterns can manually create PCRE rules via Advanced Editor
+
+### Technical Implementation
+- **Maximal Group Algorithm**: Uses frozenset-based grouping with subset filtering for O(p²) complexity where p is number of parent groups
+- **Efficient Processing**: Handles thousands of domains efficiently with intelligent parent selection
+- **Cleaner Code**: Removal of redundant PCRE functionality improves maintainability
+
+### User Impact
+- **More Accurate Consolidation**: Domain consolidation now finds optimal common parents consistently
+- **Simpler Interface**: Removed unnecessary PCRE option that didn't add value over improved consolidation
+- **Better Performance**: Smart consolidation provides maximum rule reduction without PCRE complexity
+
+---
+
+## Version 1.19.0 - November 21, 2025
+
+### Major New Feature: Advanced Editor
+- **IDE-Style Text Editor for Rules**: New advanced editor provides a powerful IDE-like interface for users who prefer text-based rule editing
+  - **Access Methods**: Available via Tools > Advanced Editor (Ctrl+E)
+  - **Full Text Control**: Direct editing of all rule components with complete flexibility
+  - **Modal Window**: 1000x700 resizable window with line numbers, scrollbars, and status bar
+  - **Scope**: Edits all rules in current file with variables displayed as-is (e.g., $HOME_NET, @REFERENCE_SET)
+
+#### Real-Time Syntax Validation
+- **Two-Level Validation System**: Distinguishes between errors (red highlighting) and warnings (orange highlighting)
+  - **Errors**: Invalid actions, protocols, networks, ports, direction, malformed syntax, missing SID
+  - **Warnings**: Unknown content keywords, undefined variables, duplicate SIDs
+  - **Live Feedback**: Validation occurs as you type (500ms delay) with status bar showing error/warning counts
+  - **Hover Tooltips**: Mouse over underlined text to see detailed error information with suggestions
+  - **Auto-Comment**: Rules with errors automatically commented out with `# [SYNTAX ERROR]` marker when saving back to main application
+
+#### Smart Auto-Complete
+- **Context-Aware Suggestions**: Intelligent auto-complete based on cursor position
+  - **Actions**: alert, pass, drop, reject, # (comment)
+  - **Protocols**: All Network Firewall protocols supported (tcp, udp, tls, http, dns, etc.)
+  - **Networks/Ports**: Suggestions include "any", common CIDRs, port ranges, and defined variables
+  - **Content Keywords**: Loaded from external `content_keywords.json` file with 50+ Suricata keywords
+  - **Multi-Value Keywords**: Auto-complete shows valid values for keywords like flow:to_server, flow:established
+- **Trigger Methods**: Auto-appears while typing or manual trigger with Ctrl+Space
+- **Accept Suggestions**: Tab or Enter key, navigate with Up/Down arrows
+
+#### Advanced Editing Features
+- **Auto-Close Characters**: Typing `(` `[` `"` automatically inserts matching closing character with cursor positioned between
+- **Smart Tab Navigation**: Tab key jumps to next semicolon in rule options section for rapid keyword entry
+- **Smart Backspace**: Deleting opening bracket/quote also deletes matching closing character
+- **Comment Toggle**: Ctrl+/ to comment/uncomment selected lines or current line
+- **Clipboard Operations**: Standard Ctrl+X/C/V for cut/copy/paste with system clipboard integration
+- **Undo/Redo**: Full multi-level undo (Ctrl+Z) and redo (Ctrl+Y) support
+- **Go to Line**: Ctrl+G for quick navigation to specific line numbers
+
+#### Find and Replace
+- **Comprehensive Search**: Unified Find and Replace dialog (Ctrl+F) with advanced options
+  - **Field-Specific Search**: Search in all fields, message, content, networks, ports, SID, or protocol
+  - **Action-Based Filtering**: Include/exclude pass, drop, reject, alert rules and comments from search
+  - **Advanced Options**: Case-sensitive, whole word matching, and regular expression support
+  - **Visual Highlighting**: Current match highlighted in yellow, other matches in gray
+  - **Navigation**: F3 for next match, Shift+F3 for previous match
+  - **Replace Operations**: Replace current match or Replace All with detailed confirmation
+
+#### User Interface
+- **Line Numbers**: Always visible in left gutter for easy reference
+- **Status Bar**: Real-time display of cursor position (Ln/Col), total lines, current rule number, modification status, and validation status
+- **Synchronized Scrolling**: Line numbers scroll in sync with editor content
+- **Right-Click Context Menu**: Quick access to cut/copy/paste, select all, find/replace, toggle comment, and error details
+- **Keyboard Shortcuts Dialog**: Complete reference guide accessible from "Shortcuts" button
+
+#### Content Keywords Customization
+- **External JSON File**: `content_keywords.json` contains Suricata keyword definitions
+  - **Hot Reload**: File loaded each time Advanced Editor opens (edit JSON, reopen to see changes)
+  - **Easy Customization**: Add new keywords without modifying program code
+  - **Comprehensive Coverage**: Includes syntax, valid values, descriptions, and categories for each keyword
+  - **Graceful Degradation**: If file missing/corrupted, editor continues with basic auto-complete functionality
+- **Future-Proof Design**: Unknown keywords generate warnings (not errors) to support new Suricata features
+
+#### Save and Validation Workflow
+- **Comprehensive Validation**: When clicking OK, all rules validated and categorized
+  - **Error Rules**: Auto-commented with `# [SYNTAX ERROR]` prefix
+  - **Warning Rules**: Preserved as-is (unknown keywords, undefined variables allowed)
+  - **Confirmation Dialog**: Shows detailed summary of errors, warnings, and actions to be taken
+- **Auto-Create Variables**: Undefined variables automatically created with empty definitions
+- **Cancel Protection**: Unsaved changes prompt confirmation before discarding
+
+### Technical Implementation
+- **New Module**: `advanced_editor.py` with AdvancedEditor class (2,600+ lines)
+- **Content Keywords**: `content_keywords.json` with extensible keyword definitions
+- **Integration**: Seamless integration with existing validation, variable management, and rule parsing
+- **Zero Dependencies**: Built entirely with tkinter/ttk (no external dependencies added)
+- **Non-Breaking**: All existing functionality preserved - Advanced Editor is purely additive
+
+### User Impact
+- **Power User Tool**: Provides text-based workflow for users comfortable with Suricata syntax
+- **Bulk Editing**: Efficient for large-scale rule modifications, copy/paste operations, and multi-line edits
+- **Professional IDE Experience**: Auto-complete, syntax validation, find/replace match expectations from modern code editors
+- **Safety Net**: Real-time validation and auto-commenting prevent invalid rules from breaking rule sets
+- **Flexibility**: Coexists with GUI editor - users can choose the best tool for each task
+
+---
+
 ## Version 1.18.12 - November 19, 2025
 
 ### Rules Analysis Engine Bug Fix (v1.8.2) - Flow Keyword Detection

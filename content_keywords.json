@@ -1,0 +1,540 @@
+{
+  "version": "1.0.0",
+  "last_updated": "2025-11-22",
+  "description": "AWS Network Firewall Suricata Content Keywords",
+  "note": "This file contains keywords verified to work with AWS Network Firewall. Users can add new keywords as AWS/Suricata adds features.",
+  "keywords": [
+    {
+      "name": "flow",
+      "syntax": "flow:<value>[,<value>]",
+      "values": [
+        "to_server",
+        "to_client",
+        "from_client",
+        "from_server",
+        "established",
+        "not_established",
+        "stateless",
+        "only_stream",
+        "no_stream",
+        "only_frag",
+        "no_frag"
+      ],
+      "multi_value": true,
+      "description": "Match on direction and state of the flow. Supports multiple comma-separated values",
+      "category": "flow",
+      "example": "flow:to_server",
+      "examples": [
+        "flow:to_server;",
+        "flow:to_client, established;",
+        "flow:not_established, to_server;",
+        "flow:established, only_stream;",
+        "flow:to_server, established, only_stream;"
+      ],
+      "notes": [
+        "to_server = match packets from client to server",
+        "to_client = match packets from server to client",
+        "from_client = same as to_server",
+        "from_server = same as to_client",
+        "established = match on established connections",
+        "not_established = match on packets not part of established connection",
+        "stateless = match packets part of a flow regardless of connection state",
+        "only_stream = match on reassembled stream packets",
+        "no_stream = match on packets not reassembled by stream engine",
+        "only_frag = match on reassembled fragment packets",
+        "no_frag = match on packets not reassembled from fragments"
+      ]
+    },
+    {
+      "name": "content",
+      "syntax": "content:\"<pattern>\"",
+      "modifiers": [
+        "nocase",
+        "startswith",
+        "endswith",
+        "offset",
+        "depth",
+        "distance",
+        "within",
+        "!",
+        "isdataat"
+      ],
+      "description": "Match specific content in payload. Can be negated with ! prefix",
+      "category": "general",
+      "example": "content:\"example.com\"; nocase; endswith;"
+    },
+    {
+      "name": "msg",
+      "syntax": "msg:\"<message>\"",
+      "description": "Rule message/description that appears in logs",
+      "category": "general",
+      "example": "msg:\"Suspicious traffic detected\""
+    },
+    {
+      "name": "sid",
+      "syntax": "sid:<number>",
+      "description": "Rule signature ID (1-999999999)",
+      "category": "general",
+      "required": true,
+      "example": "sid:1000001"
+    },
+    {
+      "name": "rev",
+      "syntax": "rev:<number>",
+      "description": "Rule revision number (1 or greater)",
+      "category": "general",
+      "example": "rev:1"
+    },
+    {
+      "name": "tls.sni",
+      "syntax": "tls.sni; content:\"<domain>\"",
+      "modifiers": [
+        "content",
+        "nocase",
+        "startswith",
+        "endswith",
+        "dotprefix"
+      ],
+      "description": "Match TLS Server Name Indication (SNI) field",
+      "category": "tls",
+      "example": "tls.sni; content:\"example.com\"; nocase; endswith;"
+    },
+    {
+      "name": "tls.cert_issuer",
+      "syntax": "tls.cert_issuer; content:\"<issuer>\"",
+      "modifiers": [
+        "content",
+        "nocase",
+        "pcre",
+        "isdataat"
+      ],
+      "description": "Match TLS/SSL certificate Issuer field. Sticky buffer for certificate issuer DN",
+      "category": "tls",
+      "example": "tls.cert_issuer; content:\"WoSign\"; nocase; isdataat:!1,relative;",
+      "examples": [
+        "tls.cert_issuer; content:\"WoSign\"; nocase;",
+        "tls.cert_issuer; content:\"StartCom\"; nocase; pcre:\"/StartCom$/\";"
+      ]
+    },
+    {
+      "name": "http.host",
+      "syntax": "http.host; content:\"<domain>\"",
+      "modifiers": [
+        "content",
+        "startswith",
+        "endswith",
+        "dotprefix"
+      ],
+      "description": "Match HTTP host header",
+      "category": "http",
+      "example": "http.host; content:\"example.com\"; endswith;"
+    },
+    {
+      "name": "http.uri",
+      "syntax": "http.uri; content:\"<path>\"",
+      "modifiers": [
+        "content",
+        "nocase",
+        "startswith",
+        "endswith"
+      ],
+      "description": "Match HTTP URI path",
+      "category": "http",
+      "example": "http.uri; content:\"/api/\"; startswith;"
+    },
+    {
+      "name": "http.method",
+      "syntax": "http.method; content:\"<method>\"",
+      "values": [
+        "GET",
+        "POST",
+        "PUT",
+        "DELETE",
+        "HEAD",
+        "OPTIONS",
+        "PATCH"
+      ],
+      "description": "Match HTTP method",
+      "category": "http",
+      "example": "http.method; content:\"POST\";"
+    },
+    {
+      "name": "http.header_names",
+      "syntax": "http.header_names; content:\"|0d 0a|<header>|0d 0a|\"",
+      "modifiers": [
+        "content",
+        "startswith",
+        "endswith",
+        "!",
+        "distance",
+        "bsize"
+      ],
+      "description": "Match on HTTP header names for presence, absence, or order checking. Starts with CRLF and ends with extra CRLF",
+      "category": "http",
+      "example": "http.header_names; content:\"|0d 0a|Host|0d 0a|\";",
+      "examples": [
+        "http.header_names; content:\"|0d 0a|Host|0d 0a|Connection|0d 0a 0d 0a|\"; bsize:22;",
+        "http.header_names; content:\"|0d 0a|Host|0d 0a|\";",
+        "http.header_names; content:!\"|0d 0a|User-Agent|0d 0a|\";"
+      ],
+      "notes": [
+        "Use flow:to_server for request headers, flow:to_client for response headers",
+        "Buffer starts with \\r\\n and ends with extra \\r\\n",
+        "Format: |0d 0a|HeaderName|0d 0a|",
+        "Useful for header presence/absence checking",
+        "Can detect header order with distance modifier",
+        "Negation (!) checks for header absence"
+      ]
+    },
+    {
+      "name": "dns.query",
+      "syntax": "dns.query; content:\"<domain>\"",
+      "modifiers": [
+        "content",
+        "nocase",
+        "startswith",
+        "endswith"
+      ],
+      "description": "Match DNS query name",
+      "category": "dns",
+      "example": "dns.query; content:\"example.com\"; endswith;"
+    },
+    {
+      "name": "ja3.hash",
+      "syntax": "ja3.hash; content:\"<hash>\"",
+      "modifiers": [
+        "content",
+        "!"
+      ],
+      "description": "Match JA3 TLS client fingerprint hash",
+      "category": "tls",
+      "example": "ja3.hash; content:!\"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\";"
+    },
+    {
+      "name": "ja3s.hash",
+      "syntax": "ja3s.hash; content:\"<hash>\"",
+      "modifiers": [
+        "content",
+        "!"
+      ],
+      "description": "Match JA3S TLS server fingerprint hash",
+      "category": "tls",
+      "example": "ja3s.hash; content:!\"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\";"
+    },
+    {
+      "name": "ja4.hash",
+      "syntax": "ja4.hash; content:\"<pattern>\"",
+      "modifiers": [
+        "content",
+        "startswith",
+        "offset",
+        "depth",
+        "!"
+      ],
+      "description": "Match JA4 TLS fingerprint hash (newer version)",
+      "category": "tls",
+      "example": "ja4.hash; content:\"_\"; startswith;"
+    },
+    {
+      "name": "ssl_state",
+      "syntax": "ssl_state:<value>",
+      "values": [
+        "client_hello",
+        "server_hello",
+        "client_keyx",
+        "server_keyx",
+        "unknown"
+      ],
+      "description": "Match on SSL/TLS handshake state. Multiple states can be specified with | (OR)",
+      "category": "tls",
+      "example": "ssl_state:client_hello",
+      "examples": [
+        "ssl_state:client_hello;",
+        "ssl_state:server_hello;",
+        "ssl_state:client_hello|server_hello;"
+      ]
+    },
+    {
+      "name": "app-layer-protocol",
+      "syntax": "app-layer-protocol:<protocol>",
+      "values": [
+        "http",
+        "tls",
+        "ssh",
+        "ftp",
+        "smtp",
+        "dns",
+        "!tls",
+        "!http",
+        "!ssh"
+      ],
+      "description": "Match on application layer protocol. Can be negated with ! prefix",
+      "category": "protocol",
+      "example": "app-layer-protocol:!tls"
+    },
+    {
+      "name": "geoip",
+      "syntax": "geoip:<direction>,<country_code>",
+      "values": [
+        "src",
+        "dst"
+      ],
+      "description": "Match on GeoIP country code. Direction can be 'src' or 'dst'",
+      "category": "network",
+      "example": "geoip:dst,RU"
+    },
+    {
+      "name": "metadata",
+      "syntax": "metadata:<key> <value>",
+      "description": "Add metadata tags to the rule for organizational purposes",
+      "category": "general",
+      "example": "metadata:geo RU"
+    },
+    {
+      "name": "flowbits",
+      "syntax": "flowbits:<operation>,<name>",
+      "values": [
+        "set",
+        "isset",
+        "isnotset",
+        "toggle",
+        "unset",
+        "noalert"
+      ],
+      "description": "Set or check flow-based state tracking",
+      "category": "flow",
+      "example": "flowbits:set,blocked"
+    },
+    {
+      "name": "noalert",
+      "syntax": "noalert",
+      "description": "Suppress alert generation (useful with flowbits for tracking without alerting)",
+      "category": "general",
+      "example": "noalert"
+    },
+    {
+      "name": "ip_proto",
+      "syntax": "ip_proto:<protocol>",
+      "values": [
+        "TCP",
+        "UDP",
+        "ICMP",
+        "!TCP",
+        "!UDP",
+        "!ICMP"
+      ],
+      "description": "Match on IP protocol. Can be negated with ! prefix",
+      "category": "network",
+      "example": "ip_proto:!TCP"
+    },
+    {
+      "name": "dotprefix",
+      "syntax": "dotprefix",
+      "description": "Match domain and all subdomains. Must be placed before 'content' and domain must include leading dot",
+      "category": "general",
+      "example": "tls.sni; dotprefix; content:\".example.com\"; endswith;"
+    },
+    {
+      "name": "startswith",
+      "syntax": "startswith",
+      "description": "Content modifier - match at the beginning of the buffer",
+      "category": "modifier",
+      "example": "content:\"GET\"; startswith;"
+    },
+    {
+      "name": "endswith",
+      "syntax": "endswith",
+      "description": "Content modifier - match at the end of the buffer",
+      "category": "modifier",
+      "example": "content:\".com\"; endswith;"
+    },
+    {
+      "name": "nocase",
+      "syntax": "nocase",
+      "description": "Content modifier - case-insensitive matching",
+      "category": "modifier",
+      "example": "content:\"example\"; nocase;"
+    },
+    {
+      "name": "offset",
+      "syntax": "offset:<bytes>",
+      "description": "Content modifier - number of bytes to skip before starting pattern match",
+      "category": "modifier",
+      "example": "content:\"pattern\"; offset:3;"
+    },
+    {
+      "name": "depth",
+      "syntax": "depth:<bytes>",
+      "description": "Content modifier - how far into the buffer to search",
+      "category": "modifier",
+      "example": "content:\"pattern\"; depth:100;"
+    },
+    {
+      "name": "distance",
+      "syntax": "distance:<bytes>",
+      "description": "Content modifier - bytes to skip after previous match before starting next match",
+      "category": "modifier",
+      "example": "content:\"first\"; content:\"second\"; distance:10;"
+    },
+    {
+      "name": "within",
+      "syntax": "within:<bytes>",
+      "description": "Content modifier - search within specified bytes after previous match",
+      "category": "modifier",
+      "example": "content:\"first\"; content:\"second\"; within:50;"
+    },
+    {
+      "name": "alert",
+      "syntax": "alert",
+      "description": "Force alert even on pass rules (shows verdict as 'alert' instead of 'pass')",
+      "category": "general",
+      "example": "pass tls $HOME_NET any -> any any (alert; tls.sni; content:\"example.com\"; sid:100; rev:1;)"
+    },
+    {
+      "name": "isdataat",
+      "syntax": "isdataat:<position>",
+      "description": "Check if data exists at specified position in payload",
+      "category": "general",
+      "example": "isdataat:100"
+    },
+    {
+      "name": "pcre",
+      "syntax": "pcre:\"/<pattern>/<modifiers>\"",
+      "description": "Perl Compatible Regular Expression pattern matching",
+      "category": "general",
+      "example": "pcre:\"/^GET\\s+\\/[^\\s]*\\s+HTTP/i\""
+    },
+    {
+      "name": "byte_test",
+      "syntax": "byte_test:<bytes>,<operator>,<value>,<offset>",
+      "description": "Test byte values at specific offset",
+      "category": "payload",
+      "example": "byte_test:2,>,1000,0"
+    },
+    {
+      "name": "byte_jump",
+      "syntax": "byte_jump:<bytes>,<offset>",
+      "description": "Jump forward in payload based on byte value",
+      "category": "payload",
+      "example": "byte_jump:2,0"
+    },
+    {
+      "name": "dsize",
+      "syntax": "dsize:<operator><size>",
+      "values": [
+        "<",
+        ">",
+        "="
+      ],
+      "description": "Match on payload data size",
+      "category": "payload",
+      "example": "dsize:>1000"
+    },
+    {
+      "name": "flags",
+      "syntax": "flags:[modifier]<flags>[,<mask>]",
+      "values": [
+        "F",
+        "S",
+        "R",
+        "P",
+        "A",
+        "U",
+        "C",
+        "E",
+        "0"
+      ],
+      "modifiers": [
+        "+",
+        "*",
+        "!",
+        "="
+      ],
+      "multi_value": true,
+      "description": "Match TCP flags. Supports multiple flags (e.g., SA, FPU), modifiers (+/*!/=), and optional mask (e.g., S,CE)",
+      "category": "protocol",
+      "example": "flags:S",
+      "examples": [
+        "flags:S",
+        "flags:SA",
+        "flags:FPU",
+        "flags:+S",
+        "flags:*SA",
+        "flags:!F",
+        "flags:S,CE",
+        "flags:FPU,CE",
+        "flags:0"
+      ],
+      "notes": [
+        "F=FIN, S=SYN, R=RST, P=PSH, A=ACK, U=URG, C=CWR, E=ECE, 0=No flags",
+        "+ = match all specified bits plus any others",
+        "* = match if any specified bits are set",
+        "! = match if bits are not set",
+        "= = match only specified bits and no others",
+        "Mask: S,CE checks for SYN flag regardless of CWR/ECE bits"
+      ]
+    },
+    {
+      "name": "threshold",
+      "syntax": "threshold:type <type>, track <track>, count <count>, seconds <seconds>",
+      "values": [
+        "limit",
+        "threshold",
+        "both"
+      ],
+      "description": "Rate limiting and thresholds for alerts",
+      "category": "general",
+      "example": "threshold:type limit, track by_src, count 1, seconds 60"
+    },
+    {
+      "name": "classtype",
+      "syntax": "classtype:<class>",
+      "description": "Classify rule for priority assignment",
+      "category": "general",
+      "example": "classtype:trojan-activity"
+    },
+    {
+      "name": "priority",
+      "syntax": "priority:<number>",
+      "description": "Set rule priority (1=highest, 4=lowest)",
+      "category": "general",
+      "example": "priority:1"
+    },
+    {
+      "name": "reference",
+      "syntax": "reference:<system>,<id>",
+      "description": "External reference for the rule",
+      "category": "general",
+      "example": "reference:cve,2021-44228"
+    },
+    {
+      "name": "xbits",
+      "syntax": "xbits:<operation>,<name>,track <track_type>",
+      "values": [
+        "set",
+        "unset",
+        "isset",
+        "isnotset",
+        "toggle"
+      ],
+      "description": "Set, unset, toggle and check for bits stored per host, ip_pair or transaction. Supports optional expire parameter",
+      "category": "flow",
+      "example": "xbits:set,badssh,track ip_src,expire 3600",
+      "examples": [
+        "xbits:set,badssh,track ip_src;",
+        "xbits:set,badssh,track ip_src,expire 3600;",
+        "xbits:isset,badssh,track ip_src;",
+        "xbits:unset,badssh,track ip_dst;",
+        "xbits:toggle,blocked,track ip_pair;",
+        "xbits:set,suspicious,track tx;"
+      ],
+      "notes": [
+        "Track types: ip_src, ip_dst, ip_pair, tx",
+        "Optional: expire <seconds> parameter",
+        "Use with noalert to track without alerting",
+        "If you set on client request with track ip_dst, check on server response with track ip_src",
+        "Transaction (tx) support is protocol-dependent"
+      ]
+    }
+  ]
+}

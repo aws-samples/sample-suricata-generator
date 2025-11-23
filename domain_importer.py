@@ -161,28 +161,17 @@ class DomainImporter:
         message_entry = ttk.Entry(config_frame, textvariable=message_var, width=40)
         message_entry.grid(row=2, column=1, columnspan=2, sticky=tk.W+tk.E, padx=5, pady=5)
         
-        # PCRE Optimization option
-        pcre_var = tk.BooleanVar(value=False)
-        pcre_checkbox = ttk.Checkbutton(config_frame, text="Use PCRE optimization to reduce rule count", 
-                                       variable=pcre_var)
-        pcre_checkbox.grid(row=3, column=0, columnspan=3, sticky=tk.W, padx=5, pady=5)
-        
-        # PCRE info label
-        pcre_info_text = "Analyzes domains for patterns and groups similar domains into PCRE rules when possible"
-        pcre_info_label = ttk.Label(config_frame, text=pcre_info_text, font=("TkDefaultFont", 8), foreground="blue")
-        pcre_info_label.grid(row=4, column=0, columnspan=3, sticky=tk.W, padx=20, pady=(0, 5))
-        
         # Alert on pass option (left side)
         alert_on_pass_var = tk.BooleanVar(value=True)
         alert_on_pass_checkbox = ttk.Checkbutton(config_frame, text="Alert on pass", 
                                                  variable=alert_on_pass_var)
-        alert_on_pass_checkbox.grid(row=5, column=0, sticky=tk.W, padx=5, pady=5)
+        alert_on_pass_checkbox.grid(row=3, column=0, sticky=tk.W, padx=5, pady=5)
         
         # Strict domain list option (right side)
         strict_domain_var = tk.BooleanVar(value=False)
         strict_domain_checkbox = ttk.Checkbutton(config_frame, text="Strict domain list", 
                                                  variable=strict_domain_var)
-        strict_domain_checkbox.grid(row=5, column=1, sticky=tk.W, padx=5, pady=5)
+        strict_domain_checkbox.grid(row=3, column=1, sticky=tk.W, padx=5, pady=5)
         
         # Create tooltips for checkboxes
         create_tooltip(alert_on_pass_checkbox, 
@@ -190,20 +179,20 @@ class DomainImporter:
         create_tooltip(strict_domain_checkbox, 
                       "Matches only exact domain (no subdomains)\nusing startswith/endswith keywords")
         
-        # Rule count preview frame (now at row 6, right after checkboxes)
+        # Rule count preview frame
         preview_frame = ttk.Frame(config_frame)
-        preview_frame.grid(row=6, column=0, columnspan=3, sticky=tk.W+tk.E, padx=5, pady=5)
+        preview_frame.grid(row=4, column=0, columnspan=3, sticky=tk.W+tk.E, padx=5, pady=5)
         
         # Rule count labels
         standard_count_label = ttk.Label(preview_frame, text="", font=("TkDefaultFont", 8))
         standard_count_label.pack(anchor=tk.W)
         
-        pcre_count_label = ttk.Label(preview_frame, text="", font=("TkDefaultFont", 8), foreground="green")
-        pcre_count_label.pack(anchor=tk.W)
+        consolidation_count_label = ttk.Label(preview_frame, text="", font=("TkDefaultFont", 8), foreground="green")
+        consolidation_count_label.pack(anchor=tk.W)
         
         # Info label
         info_label = ttk.Label(config_frame, text="", font=("TkDefaultFont", 8))
-        info_label.grid(row=7, column=0, columnspan=3, sticky=tk.W, padx=5, pady=5)
+        info_label.grid(row=5, column=0, columnspan=3, sticky=tk.W, padx=5, pady=5)
         
         # Insertion position feedback
         position_frame = ttk.LabelFrame(dialog, text="Insertion Position")
@@ -217,7 +206,6 @@ class DomainImporter:
             """Update the rule count preview based on current settings"""
             try:
                 action = action_var.get()
-                use_pcre = pcre_var.get()
                 alert_on_pass = alert_on_pass_var.get()
                 strict_domain = strict_domain_var.get()
                 
@@ -237,17 +225,11 @@ class DomainImporter:
                     else:
                         message_var.set("Domain rule for {domain}")
                 
-                # Update checkbox state based on action and PCRE
+                # Update checkbox state based on action
                 if action == "pass":
                     alert_on_pass_checkbox.config(state="normal")
                 else:
                     alert_on_pass_checkbox.config(state="disabled")
-                
-                # Disable strict domain when PCRE is enabled
-                if use_pcre:
-                    strict_domain_checkbox.config(state="disabled")
-                else:
-                    strict_domain_checkbox.config(state="normal")
                 
                 # Update info text based on action and alert setting
                 if action == "pass":
@@ -265,34 +247,8 @@ class DomainImporter:
                 # Calculate standard rule count (without consolidation)
                 standard_total = len(domains) * rules_per_domain
                 
-                # Check if consolidation or PCRE optimization will be applied
-                if use_pcre:
-                    # PCRE optimization mode
-                    standard_count_label.config(text=f"Standard approach: {standard_total} rules ({len(domains)} domains × {rules_per_domain} rules each)")
-                    
-                    # Analyze domains for PCRE optimization
-                    pcre_analysis = self.analyze_domains_for_pcre(domains)
-                    optimized_domain_groups = pcre_analysis['optimized_groups']
-                    individual_domains = pcre_analysis['individual_domains']
-                    
-                    # Calculate optimized rule count
-                    pcre_group_rules = len(optimized_domain_groups) * rules_per_domain
-                    individual_rules = len(individual_domains) * rules_per_domain
-                    pcre_total = pcre_group_rules + individual_rules
-                    
-                    # Show optimization results
-                    if pcre_total < standard_total:
-                        savings = standard_total - pcre_total
-                        pcre_count_label.config(
-                            text=f"PCRE optimized: {pcre_total} rules ({len(optimized_domain_groups)} PCRE groups + {len(individual_domains)} individual) - Saves {savings} rules!",
-                            foreground="green"
-                        )
-                    else:
-                        pcre_count_label.config(
-                            text=f"PCRE analysis: No optimization possible with current domains (would still create {pcre_total} rules)",
-                            foreground="orange"
-                        )
-                elif not strict_domain:
+                # Check if consolidation will be applied
+                if not strict_domain:
                     # Domain consolidation mode (strict mode disabled)
                     consolidation = self.consolidate_domains(domains)
                     consolidated_count = len(consolidation['consolidated_groups'])
@@ -323,24 +279,23 @@ class DomainImporter:
                         elif len(consolidation['consolidated_groups']) > 3:
                             preview_text += f"\n\n({consolidated_count} consolidation groups - first 3 shown in comment after import)"
                         
-                        pcre_count_label.config(text=preview_text, foreground="green")
+                        consolidation_count_label.config(text=preview_text, foreground="green")
                     else:
                         # No consolidation possible
                         standard_count_label.config(text=f"With consolidation: {standard_total} rules ({len(domains)} domains × {rules_per_domain} rules each)")
-                        pcre_count_label.config(text="No consolidation possible - all domains are unique", foreground="gray")
+                        consolidation_count_label.config(text="No consolidation possible - all domains are unique", foreground="gray")
                 else:
                     # Strict mode enabled - no consolidation
                     standard_count_label.config(text=f"Strict mode (no consolidation): {standard_total} rules ({len(domains)} domains × {rules_per_domain} rules each)")
-                    pcre_count_label.config(text="")
+                    consolidation_count_label.config(text="")
                     
             except Exception as e:
                 # Fallback for any errors during preview calculation
                 standard_count_label.config(text=f"Rule count: {len(domains)} domains")
-                pcre_count_label.config(text="")
+                consolidation_count_label.config(text="")
         
         # Bind events to update preview
         action_combo.bind('<<ComboboxSelected>>', lambda e: update_rule_count_preview())
-        pcre_checkbox.config(command=update_rule_count_preview)
         alert_on_pass_checkbox.config(command=update_rule_count_preview)
         strict_domain_checkbox.config(command=update_rule_count_preview)
         
@@ -356,9 +311,8 @@ class DomainImporter:
                 start_sid = int(sid_var.get())
                 action = action_var.get()
                 message_template = message_var.get()
-                use_pcre = pcre_var.get()
                 alert_on_pass = alert_on_pass_var.get()
-                strict_domain = strict_domain_var.get() and not use_pcre  # Disable strict if PCRE is enabled
+                strict_domain = strict_domain_var.get()
                 
                 # Close the import dialog first
                 dialog.destroy()
@@ -393,13 +347,9 @@ class DomainImporter:
                 # Force dialog to display
                 progress_dialog.update()
                 
-                # Generate rules for each domain (with optional PCRE optimization)
-                if use_pcre:
-                    new_rules = self.generate_domain_rules_with_pcre(domains, action, start_sid, message_template, alert_on_pass, 
-                                                                     progress_bar, progress_text, progress_dialog)
-                else:
-                    new_rules = self.generate_domain_rules(domains, action, start_sid, message_template, alert_on_pass, strict_domain,
-                                                           progress_bar, progress_text, progress_dialog)
+                # Generate rules for each domain with consolidation
+                new_rules = self.generate_domain_rules(domains, action, start_sid, message_template, alert_on_pass, strict_domain,
+                                                       progress_bar, progress_text, progress_dialog)
                 
                 # Close progress dialog
                 progress_dialog.destroy()
@@ -473,8 +423,9 @@ class DomainImporter:
     def consolidate_domains(self, domains: List[str]) -> Dict:
         """Consolidate domains to their most specific common parent
         
-        Analyzes a list of domains and groups them by their longest common suffix.
-        Only consolidates when 2 or more domains share a common parent.
+        Analyzes a list of domains and groups them by finding the most specific parent
+        that covers the maximum number of related domains. Uses a scoring system to
+        prioritize more specific parents over less specific ones.
         
         Args:
             domains: List of domain names to analyze
@@ -485,12 +436,12 @@ class DomainImporter:
             - 'individual_domains': List of domains that don't have siblings
             
         Example:
-            Input: ['windows.microsoft.com', 'office.microsoft.com', 'google.com']
+            Input: ['one.two.server.com', 'three.server.com', 'server.com', 'four.server.com']
             Output: {
                 'consolidated_groups': [
-                    {'parent': 'microsoft.com', 'children': ['windows.microsoft.com', 'office.microsoft.com']}
+                    {'parent': 'server.com', 'children': ['one.two.server.com', 'three.server.com', 'server.com', 'four.server.com']}
                 ],
-                'individual_domains': ['google.com']
+                'individual_domains': []
             }
         """
         if not domains:
@@ -501,48 +452,79 @@ class DomainImporter:
         
         for domain in domains:
             parts = domain.lower().split('.')
+            # Consider all possible parents including the domain itself
+            # Start from i=0 to include the domain as its own parent (for cases like server.appstate.edu in input)
             # Only consider parents with 2+ parts (skip TLDs like .com, .org)
-            for i in range(1, len(parts) - 1):  # -1 to skip TLD-only parents
+            for i in range(0, len(parts) - 1):  # -1 to skip TLD-only parents, 0 to include domain itself
                 parent = '.'.join(parts[i:])
+                # Skip if parent would be just a TLD
+                if len(parent.split('.')) < 2:
+                    continue
                 if parent not in parent_to_all_children:
                     parent_to_all_children[parent] = set()
                 parent_to_all_children[parent].add(domain)
         
-        # Find the LEAST specific (shortest) parent that covers 2+ domains
-        # This ensures we consolidate to microsoft.com rather than prod.do.dsp.mp.microsoft.com
+        # For each set of children, find the MOST specific parent that covers them all
+        # Group parents by the exact set of children they cover
+        children_set_to_parents = {}
+        for parent, children in parent_to_all_children.items():
+            # Skip if fewer than 2 children
+            if len(children) < 2:
+                continue
+            
+            # If parent is in its own children set AND it's in the input domains,
+            # this means the parent domain itself is in the input list
+            # We should include it in consolidation (e.g., server.appstate.edu with its subdomains)
+            # Don't skip this case - it's valid for consolidation
+            
+            # Create a frozenset for use as dictionary key
+            children_key = frozenset(children)
+            
+            if children_key not in children_set_to_parents:
+                children_set_to_parents[children_key] = []
+            children_set_to_parents[children_key].append(parent)
+        
+        # Filter out subset groups - only keep maximal (largest) groups
+        # Sort children sets by size (largest first) to process supersets before subsets
+        sorted_children_sets = sorted(children_set_to_parents.items(), 
+                                      key=lambda x: len(x[0]), 
+                                      reverse=True)
+        
+        maximal_groups = {}
+        for children_set, parent_list in sorted_children_sets:
+            # Check if this set is a subset of any larger set we've already kept
+            is_subset = False
+            for kept_set in maximal_groups.keys():
+                if children_set < kept_set:  # children_set is a proper subset of kept_set
+                    is_subset = True
+                    break
+            
+            if not is_subset:
+                maximal_groups[children_set] = parent_list
+        
+        # For each maximal group, pick the MOST specific (longest) parent
         consolidated_groups = []
         processed_domains = set()
         
-        # Sort by number of parts (ascending) - LEAST specific first
-        sorted_parents = sorted(parent_to_all_children.keys(),
-                               key=lambda x: len(x.split('.')),
-                               reverse=False)
-        
-        for parent in sorted_parents:
-            all_children = parent_to_all_children[parent]
-            # Get unprocessed children
-            available_children = [c for c in all_children if c not in processed_domains]
+        for children_set, parent_list in maximal_groups.items():
+            # Get the most specific parent (the one with most parts)
+            most_specific_parent = max(parent_list, key=lambda x: len(x.split('.')))
             
-            # Need at least 2 domains to consolidate
-            if len(available_children) >= 2:
-                # Don't consolidate if the parent itself is in the child list
-                # In that case, wait for a less specific parent
-                if parent in available_children:
-                    continue
-                
-                # Check if any children are also in the input domain list
-                # If so, include the parent domain too
-                children_in_input = [c for c in available_children if c in domains]
-                if parent in domains:
-                    children_in_input.append(parent)
-                
-                # Only consolidate if we have 2+ domains to group
-                if len(children_in_input) >= 2:
-                    consolidated_groups.append({
-                        'parent': parent,
-                        'children': sorted(children_in_input)
-                    })
-                    processed_domains.update(children_in_input)
+            # Get children that are in the original input and not yet processed
+            # Use set to avoid duplicates, then convert to sorted list
+            children_in_input = set(c for c in children_set if c in domains and c not in processed_domains)
+            
+            # If the parent itself is in the input, add it too
+            if most_specific_parent in domains and most_specific_parent not in processed_domains:
+                children_in_input.add(most_specific_parent)
+            
+            # Only consolidate if we have 2+ domains to group
+            if len(children_in_input) >= 2:
+                consolidated_groups.append({
+                    'parent': most_specific_parent,
+                    'children': sorted(list(children_in_input))
+                })
+                processed_domains.update(children_in_input)
         
         # Collect individual domains
         individual_domains = [d for d in domains if d not in processed_domains]
@@ -835,277 +817,6 @@ class DomainImporter:
             progress_bar['value'] = 100
             progress_text.config(text=f"100% (Complete)")
             progress_dialog.update()
-        
-        return rules
-    
-    def analyze_domains_for_pcre(self, domains):
-        """Analyze domains for PCRE optimization opportunities
-        
-        Returns a dictionary with:
-        - optimized_groups: List of domain groups that can be optimized with PCRE
-        - individual_domains: List of domains that don't fit into groups
-        """
-        domain_groups = {}
-        tld_groups = {}
-        individual_domains = []
-        
-        # First pass: Group domains by root domain (subdomains of same domain)
-        for domain in domains:
-            domain_parts = domain.lower().split('.')
-            if len(domain_parts) >= 2:
-                root_domain = '.'.join(domain_parts[-2:])  # Get last two parts (domain.tld)
-                
-                if root_domain not in domain_groups:
-                    domain_groups[root_domain] = []
-                domain_groups[root_domain].append(domain)
-            else:
-                individual_domains.append(domain)
-        
-        # Second pass: Group domains by domain name with different TLDs
-        domain_name_groups = {}
-        remaining_domains = []
-        
-        for root_domain, group_domains in domain_groups.items():
-            if len(group_domains) > 1:
-                # Multiple subdomains - already optimizable, keep as is
-                remaining_domains.extend(group_domains)
-            else:
-                # Single domain - check for TLD variations
-                domain_parts = root_domain.split('.')
-                if len(domain_parts) == 2:
-                    domain_name = domain_parts[0]  # e.g., "microsoft" from "microsoft.com"
-                    tld = domain_parts[1]  # e.g., "com" from "microsoft.com"
-                    
-                    if domain_name not in domain_name_groups:
-                        domain_name_groups[domain_name] = {}
-                        domain_name_groups[domain_name]['domains'] = []
-                        domain_name_groups[domain_name]['tlds'] = []
-                    
-                    domain_name_groups[domain_name]['domains'].extend(group_domains)
-                    domain_name_groups[domain_name]['tlds'].append(tld)
-                else:
-                    remaining_domains.extend(group_domains)
-        
-        optimized_groups = []
-        
-        # Process subdomain groups (existing logic)
-        for root_domain, group_domains in domain_groups.items():
-            if len(group_domains) > 1:
-                optimized_groups.append({
-                    'pattern': f'.*\\.{re.escape(root_domain)}',
-                    'domains': group_domains,
-                    'description': f"Subdomain group for *.{root_domain} ({len(group_domains)} domains)",
-                    'type': 'subdomain'
-                })
-        
-        # Process TLD variation groups (new logic)
-        for domain_name, group_info in domain_name_groups.items():
-            if len(group_info['tlds']) > 1:
-                # Multiple TLDs for same domain name - can optimize with PCRE
-                tlds = sorted(set(group_info['tlds']))  # Remove duplicates and sort
-                tld_pattern = '|'.join(re.escape(tld) for tld in tlds)
-                pattern = f'{re.escape(domain_name)}\\.({tld_pattern})'
-                
-                optimized_groups.append({
-                    'pattern': pattern,
-                    'domains': group_info['domains'],
-                    'description': f"TLD group for {domain_name}.({','.join(tlds)}) ({len(group_info['domains'])} domains)",
-                    'type': 'tld_variation'
-                })
-            else:
-                # Single TLD - no optimization benefit
-                individual_domains.extend(group_info['domains'])
-        
-        return {
-            'optimized_groups': optimized_groups,
-            'individual_domains': individual_domains
-        }
-    
-    def generate_domain_rules_with_pcre(self, domains, action, start_sid, message_template, alert_on_pass=True, progress_bar=None, progress_text=None, progress_dialog=None):
-        """Generate domain rules with PCRE optimization
-        
-        This method analyzes the domain list and creates PCRE-based rules where beneficial,
-        falling back to individual domain rules where PCRE doesn't provide optimization.
-        
-        Each PCRE group still requires the same rule structure:
-        - Pass action: 2 rules per group (Pass TLS + Pass HTTP, with optional alert keyword)
-        - Other actions: 2 rules per group (TLS rule + HTTP rule)
-        """
-        # Analyze domains for PCRE opportunities
-        pcre_analysis = self.analyze_domains_for_pcre(domains)
-        optimized_groups = pcre_analysis['optimized_groups']
-        individual_domains = pcre_analysis['individual_domains']
-        
-        rules = []
-        current_sid = start_sid
-        total_items = len(optimized_groups) + len(individual_domains)
-        current_item = 0
-        
-        # Generate PCRE rules for optimized groups
-        for group in optimized_groups:
-            # Update progress bar if provided
-            if progress_bar is not None and progress_text is not None and progress_dialog is not None:
-                progress = (current_item / total_items) * 100
-                progress_bar['value'] = progress
-                progress_text.config(text=f"{int(progress)}% (Processing PCRE groups)")
-                progress_dialog.update()
-            
-            current_item += 1
-            pattern = group['pattern']
-            group_domains = group['domains']
-            group_description = group['description']
-            
-            # Add comment describing the PCRE group
-            comment_rule = SuricataRule()
-            comment_rule.is_comment = True
-            comment_rule.comment_text = f"# PCRE optimized {group_description}: {', '.join(group_domains)}"
-            rules.append(comment_rule)
-            
-            # Generate PCRE rules for this group
-            pcre_rules = self.generate_pcre_group_rules(pattern, group_domains, action, current_sid, message_template, alert_on_pass)
-            rules.extend(pcre_rules)
-            
-            # Update SID counter (2 rules for all actions)
-            rules_per_group = 2
-            current_sid += rules_per_group
-        
-        # Generate individual rules for domains that don't benefit from PCRE
-        if individual_domains:
-            if optimized_groups:
-                # Add separator comment if we have both PCRE groups and individual domains
-                separator_rule = SuricataRule()
-                separator_rule.is_comment = True
-                separator_rule.comment_text = f"# Individual domain rules (no PCRE optimization available)"
-                rules.append(separator_rule)
-            
-            individual_rules = self.generate_domain_rules(individual_domains, action, current_sid, message_template, alert_on_pass)
-            rules.extend(individual_rules)
-        
-        return rules
-    
-    def generate_pcre_group_rules(self, pattern, group_domains, action, start_sid, message_template, alert_on_pass=True):
-        """Generate PCRE-based rules for a group of domains
-        
-        Args:
-            pattern: PCRE pattern to match (e.g., '.*\\.google\\.com')
-            group_domains: List of domains this pattern covers
-            action: Rule action (pass, drop, reject, alert)
-            start_sid: Starting SID for this group
-            message_template: Message template
-            alert_on_pass: Whether to add alert keyword to pass rules
-            
-        Returns:
-            List of SuricataRule objects using PCRE matching
-        """
-        rules = []
-        current_sid = start_sid
-        
-        # Create descriptive group name for messages
-        if len(group_domains) > 1:
-            # Extract root domain from pattern for cleaner messages
-            # Convert pattern like '.*\\.google\\.com' back to 'google.com'
-            root_domain = pattern.replace('.*\\.', '').replace('\\', '')
-            group_name = f"*.{root_domain}"
-            domain_list = ', '.join(group_domains)
-        else:
-            group_name = group_domains[0]
-            domain_list = group_domains[0]
-        
-        if action == "pass":
-            # Pass action with optional alert keyword to log and allow traffic
-            
-            # Pass TLS rule with PCRE and optional alert keyword
-            if alert_on_pass:
-                pass_tls_message = f"Alert and pass TLS traffic to domain group {group_name}"
-                pass_tls_content = f'flow:to_server; tls.sni; pcre:"/{pattern}/i"; alert'
-            else:
-                pass_tls_message = f"Pass TLS traffic to domain group {group_name}"
-                pass_tls_content = f'flow:to_server; tls.sni; pcre:"/{pattern}/i"'
-            
-            pass_tls_rule = SuricataRule(
-                action="pass",
-                protocol="tls",
-                src_net="$HOME_NET",
-                src_port="any",
-                dst_net="any",
-                dst_port="any",
-                message=pass_tls_message,
-                content=pass_tls_content,
-                sid=current_sid
-            )
-            rules.append(pass_tls_rule)
-            current_sid += 1
-            
-            # Pass HTTP rule with PCRE and optional alert keyword
-            if alert_on_pass:
-                pass_http_message = f"Alert and pass HTTP traffic to domain group {group_name}"
-                pass_http_content = f'flow:to_server; http.host; pcre:"/{pattern}/i"; alert'
-            else:
-                pass_http_message = f"Pass HTTP traffic to domain group {group_name}"
-                pass_http_content = f'flow:to_server; http.host; pcre:"/{pattern}/i"'
-            
-            pass_http_rule = SuricataRule(
-                action="pass",
-                protocol="http",
-                src_net="$HOME_NET",
-                src_port="any",
-                dst_net="any",
-                dst_port="any",
-                message=pass_http_message,
-                content=pass_http_content,
-                sid=current_sid
-            )
-            rules.append(pass_http_rule)
-            current_sid += 1
-            
-        else:
-            # Generate PCRE rules for TLS and HTTP (drop/reject/alert)
-            
-            # TLS rule with PCRE
-            if action == "drop":
-                tls_message = f"Domain drop rule for {group_name}"
-            elif action == "reject":
-                tls_message = f"Domain reject rule for {group_name}"
-            else:
-                tls_message = message_template.replace("{domain}", group_name)
-            
-            tls_content = f'flow:to_server; tls.sni; pcre:"/{pattern}/i"'
-            tls_rule = SuricataRule(
-                action=action,
-                protocol="tls",
-                src_net="$HOME_NET",
-                src_port="any",
-                dst_net="any",
-                dst_port="any",
-                message=tls_message,
-                content=tls_content,
-                sid=current_sid
-            )
-            rules.append(tls_rule)
-            current_sid += 1
-            
-            # HTTP rule with PCRE
-            if action == "drop":
-                http_message = f"Domain drop rule for {group_name}"
-            elif action == "reject":
-                http_message = f"Domain reject rule for {group_name}"
-            else:
-                http_message = message_template.replace("{domain}", group_name)
-            
-            http_content = f'flow:to_server; http.host; pcre:"/{pattern}/i"'
-            http_rule = SuricataRule(
-                action=action,
-                protocol="http",
-                src_net="$HOME_NET",
-                src_port="any",
-                dst_net="any",
-                dst_port="any",
-                message=http_message,
-                content=http_content,
-                sid=current_sid
-            )
-            rules.append(http_rule)
-            current_sid += 1
         
         return rules
     

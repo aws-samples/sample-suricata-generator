@@ -79,6 +79,8 @@ class UIManager:
         # Tools menu - rule conflict detection, SID management, flow testing, and change tracking
         tools_menu = tk.Menu(menubar, tearoff=0)
         menubar.add_cascade(label="Tools", menu=tools_menu)
+        tools_menu.add_command(label="Advanced Editor", command=self.parent.show_advanced_editor, accelerator="Ctrl+E")
+        tools_menu.add_separator()
         tools_menu.add_command(label="Review Rules", command=self.parent.review_rules)
         tools_menu.add_command(label="SID Management", command=self.show_sid_management)
         tools_menu.add_command(label="Test Flow", command=self.show_test_flow_dialog)
@@ -98,6 +100,7 @@ class UIManager:
         self.parent.root.bind('<Control-o>', lambda e: self.parent.open_file())
         self.parent.root.bind('<Control-s>', lambda e: self.parent.save_file())
         self.parent.root.bind('<Control-z>', lambda e: self.parent.undo_last_change())
+        self.parent.root.bind('<Control-e>', lambda e: self.parent.show_advanced_editor())
         self.parent.root.bind('<Delete>', self.on_delete_key)
         self.parent.root.bind('<Control-c>', lambda e: self.handle_ctrl_c())
         self.parent.root.bind('<Control-a>', lambda e: self.select_all_rules())
@@ -956,6 +959,9 @@ class UIManager:
                 ("Ctrl+O", "Open file"),
                 ("Ctrl+N", "New file"),
             ]),
+            ("Tools", [
+                ("Ctrl+E", "Open Advanced Editor"),
+            ]),
             ("Editing & Selection", [
                 ("Ctrl+Z", "Undo last change"),
                 ("Ctrl+C", "Copy selected rules"),
@@ -1491,6 +1497,60 @@ class UIManager:
                         self.parent.history_text.insert(tk.END, f"Undo operation performed ({rules_changed} rules affected: {rules_before} → {rules_after})\n")
                     else:
                         self.parent.history_text.insert(tk.END, f"Undo operation performed (rules restored: {rules_before} → {rules_after})\n")
+                elif action == 'advanced_editor_rules_added':
+                    count = details.get('count', '?')
+                    rules_before = details.get('rules_before', '?')
+                    rules_after = details.get('rules_after', '?')
+                    self.parent.history_text.insert(tk.END, f"[Advanced Editor] Added {count} rules ({rules_before} → {rules_after})\n")
+                elif action == 'advanced_editor_rules_deleted':
+                    count = details.get('count', '?')
+                    rules_before = details.get('rules_before', '?')
+                    rules_after = details.get('rules_after', '?')
+                    self.parent.history_text.insert(tk.END, f"[Advanced Editor] Deleted {count} rules ({rules_before} → {rules_after})\n")
+                elif action == 'advanced_editor_rules_modified':
+                    count = details.get('count', '?')
+                    rules_before = details.get('rules_before', '?')
+                    rules_after = details.get('rules_after', '?')
+                    self.parent.history_text.insert(tk.END, f"[Advanced Editor] Modified {count} rules ({rules_before} → {rules_after})\n")
+                elif action == 'advanced_editor_bulk_changes':
+                    rules_before = details.get('rules_before', '?')
+                    rules_after = details.get('rules_after', '?')
+                    rules_added = details.get('rules_added', 0)
+                    rules_deleted = details.get('rules_deleted', 0)
+                    rules_modified = details.get('rules_modified', 0)
+                    net_change = details.get('net_change', 0)
+                    
+                    self.parent.history_text.insert(tk.END, f"[Advanced Editor] Bulk changes applied:\n")
+                    self.parent.history_text.insert(tk.END, f"  - Rules: {rules_before} → {rules_after} (net change: {net_change:+d})\n")
+                    
+                    if rules_added > 0:
+                        self.parent.history_text.insert(tk.END, f"  - Added: {rules_added} rules\n")
+                    if rules_deleted > 0:
+                        self.parent.history_text.insert(tk.END, f"  - Deleted: {rules_deleted} rules\n")
+                    if rules_modified > 0:
+                        self.parent.history_text.insert(tk.END, f"  - Modified: {rules_modified} rules\n")
+                    
+                    # Show SID range changes
+                    original_sid_range = details.get('original_sid_range')
+                    new_sid_range = details.get('new_sid_range')
+                    if original_sid_range and new_sid_range:
+                        self.parent.history_text.insert(tk.END, f"  - SID range: {original_sid_range} → {new_sid_range}\n")
+                    
+                    # Show action distribution changes if significant
+                    action_changes = details.get('action_changes')
+                    if action_changes:
+                        before_actions = action_changes.get('before', {})
+                        after_actions = action_changes.get('after', {})
+                        
+                        # Check if action distribution changed
+                        if before_actions != after_actions:
+                            self.parent.history_text.insert(tk.END, f"  - Action distribution changed:\n")
+                            all_actions = set(list(before_actions.keys()) + list(after_actions.keys()))
+                            for action_type in sorted(all_actions):
+                                before_count = before_actions.get(action_type, 0)
+                                after_count = after_actions.get(action_type, 0)
+                                if before_count != after_count:
+                                    self.parent.history_text.insert(tk.END, f"    • {action_type}: {before_count} → {after_count}\n")
                 else:
                     self.parent.history_text.insert(tk.END, f"{action}\n")
         
@@ -1734,6 +1794,60 @@ class UIManager:
                                 self.parent.history_text.insert(tk.END, f"Undo operation performed ({rules_changed} rules affected: {rules_before} → {rules_after})\n")
                             else:
                                 self.parent.history_text.insert(tk.END, f"Undo operation performed (rules restored: {rules_before} → {rules_after})\n")
+                        elif action == 'advanced_editor_rules_added':
+                            count = details.get('count', '?')
+                            rules_before = details.get('rules_before', '?')
+                            rules_after = details.get('rules_after', '?')
+                            self.parent.history_text.insert(tk.END, f"[Advanced Editor] Added {count} rules ({rules_before} → {rules_after})\n")
+                        elif action == 'advanced_editor_rules_deleted':
+                            count = details.get('count', '?')
+                            rules_before = details.get('rules_before', '?')
+                            rules_after = details.get('rules_after', '?')
+                            self.parent.history_text.insert(tk.END, f"[Advanced Editor] Deleted {count} rules ({rules_before} → {rules_after})\n")
+                        elif action == 'advanced_editor_rules_modified':
+                            count = details.get('count', '?')
+                            rules_before = details.get('rules_before', '?')
+                            rules_after = details.get('rules_after', '?')
+                            self.parent.history_text.insert(tk.END, f"[Advanced Editor] Modified {count} rules ({rules_before} → {rules_after})\n")
+                        elif action == 'advanced_editor_bulk_changes':
+                            rules_before = details.get('rules_before', '?')
+                            rules_after = details.get('rules_after', '?')
+                            rules_added = details.get('rules_added', 0)
+                            rules_deleted = details.get('rules_deleted', 0)
+                            rules_modified = details.get('rules_modified', 0)
+                            net_change = details.get('net_change', 0)
+                            
+                            self.parent.history_text.insert(tk.END, f"[Advanced Editor] Bulk changes applied:\n")
+                            self.parent.history_text.insert(tk.END, f"  - Rules: {rules_before} → {rules_after} (net change: {net_change:+d})\n")
+                            
+                            if rules_added > 0:
+                                self.parent.history_text.insert(tk.END, f"  - Added: {rules_added} rules\n")
+                            if rules_deleted > 0:
+                                self.parent.history_text.insert(tk.END, f"  - Deleted: {rules_deleted} rules\n")
+                            if rules_modified > 0:
+                                self.parent.history_text.insert(tk.END, f"  - Modified: {rules_modified} rules\n")
+                            
+                            # Show SID range changes
+                            original_sid_range = details.get('original_sid_range')
+                            new_sid_range = details.get('new_sid_range')
+                            if original_sid_range and new_sid_range:
+                                self.parent.history_text.insert(tk.END, f"  - SID range: {original_sid_range} → {new_sid_range}\n")
+                            
+                            # Show action distribution changes if significant
+                            action_changes = details.get('action_changes')
+                            if action_changes:
+                                before_actions = action_changes.get('before', {})
+                                after_actions = action_changes.get('after', {})
+                                
+                                # Check if action distribution changed
+                                if before_actions != after_actions:
+                                    self.parent.history_text.insert(tk.END, f"  - Action distribution changed:\n")
+                                    all_actions = set(list(before_actions.keys()) + list(after_actions.keys()))
+                                    for action_type in sorted(all_actions):
+                                        before_count = before_actions.get(action_type, 0)
+                                        after_count = after_actions.get(action_type, 0)
+                                        if before_count != after_count:
+                                            self.parent.history_text.insert(tk.END, f"    • {action_type}: {before_count} → {after_count}\n")
                         else:
                             self.parent.history_text.insert(tk.END, f"{action}\n")
                     

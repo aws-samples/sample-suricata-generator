@@ -9,7 +9,7 @@ class SuricataConstants:
     """Core Suricata rule constants"""
     
     # SID validation
-    SID_MIN = 100
+    SID_MIN = 1
     SID_MAX = 999999999
     
     # File size limits (10MB for rule files, 1MB for domain lists)  

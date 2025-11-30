@@ -6,13 +6,13 @@ The rule analyzer and flow tester have their own separate version numbers.
 """
 
 # Main program version - update this single location for version changes
-MAIN_VERSION = "1.19.1"
+MAIN_VERSION = "1.19.3"
 
 # Rule analyzer version (managed separately)
-ANALYZER_VERSION = "1.8.2"
+ANALYZER_VERSION = "1.9.1"
 
 # Flow tester version (managed separately)
-FLOW_TESTER_VERSION = "1.0.2"
+FLOW_TESTER_VERSION = "1.0.3"
 
 
 def get_main_version() -> str:

@@ -56,13 +56,13 @@ class SuricataRule:
         ]
         
         options = []
+        if self.message:
+            # Use proper double quotes as required by Suricata
+            options.append(f'msg:"{self.message}"')
         if self.content:
             # Strip trailing semicolon from content to prevent double semicolons
             content_cleaned = self.content.rstrip(';')
             options.append(content_cleaned)
-        if self.message:
-            # Use proper double quotes as required by Suricata
-            options.append(f'msg:"{self.message}"')
         options.append(f"sid:{self.sid}")
         options.append(f"rev:{self.rev}")
         
@@ -82,8 +82,35 @@ class SuricataRule:
         
         # Enhanced parsing to handle bracketed network specifications
         # First, extract the options part if it exists
-        options_match = re.search(r'\(([^)]*)\)$', rule_str)
-        options_str = options_match.group(1) if options_match else ""
+        # Find the last opening paren that's not inside quotes, then match to the end
+        # This handles nested parentheses in msg fields like msg:"text (with parens)"
+        options_str = ""
+        options_match = None
+        
+        # Find the position of the last opening paren at the end of the rule
+        # We need to track whether we're inside quotes to avoid matching parens in quoted strings
+        in_quotes = False
+        last_open_paren = -1
+        
+        for i, char in enumerate(rule_str):
+            if char == '"' and (i == 0 or rule_str[i-1] != '\\'):
+                in_quotes = not in_quotes
+            elif char == '(' and not in_quotes:
+                last_open_paren = i
+        
+        if last_open_paren != -1 and rule_str.endswith(')'):
+            # Extract everything between the last opening paren and the final closing paren
+            options_str = rule_str[last_open_paren + 1:-1]
+            # Create a mock match object for compatibility with existing code
+            class MockMatch:
+                def __init__(self, start_pos, opts):
+                    self._start = start_pos
+                    self._opts = opts
+                def start(self):
+                    return self._start
+                def group(self, num):
+                    return self._opts if num == 1 else None
+            options_match = MockMatch(last_open_paren, options_str)
         
         # Remove options part from rule string for field parsing
         if options_match:

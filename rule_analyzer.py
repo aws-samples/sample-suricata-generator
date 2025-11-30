@@ -22,24 +22,55 @@ class RuleAnalyzer:
         """Initialize the rule analyzer"""
         pass
     
-    def analyze_rule_conflicts(self, rules: List[SuricataRule], variables: Dict[str, str]) -> Dict[str, List[Dict]]:
+    def analyze_rule_conflicts(self, rules: List[SuricataRule], variables: Dict[str, str], progress_bar=None, progress_text=None, progress_dialog=None, cancel_requested=None) -> Dict[str, List[Dict]]:
         """Analyze rules for conflicts and shadowing issues with bidirectional analysis
         
         Args:
             rules: List of SuricataRule objects to analyze
             variables: Dictionary of network variable definitions for analysis
+            progress_bar: Optional progress bar widget to update
+            progress_text: Optional progress text label to update
+            progress_dialog: Optional progress dialog to update
+            cancel_requested: Optional list with boolean flag for cancellation
             
         Returns:
             Dictionary with conflict categories: {'critical': [], 'warning': [], 'info': [], 'protocol_layering': [], 'sticky_buffer_order': [], 'udp_flow_established': [], 'protocol_keyword_mismatch': []}
         """
-        conflicts = {'critical': [], 'warning': [], 'info': [], 'protocol_layering': [], 'sticky_buffer_order': [], 'udp_flow_established': [], 'protocol_keyword_mismatch': []}
+        conflicts = {'critical': [], 'warning': [], 'info': [], 'protocol_layering': [], 'sticky_buffer_order': [], 'udp_flow_established': [], 'protocol_keyword_mismatch': [], 'asymmetric_flow': []}
         
         # Filter out comments and blank lines for analysis
         actual_rules = [r for r in rules if not getattr(r, 'is_comment', False) and not getattr(r, 'is_blank', False)]
         
+        # Calculate total operations for progress tracking
+        # Main conflict detection: n*(n-1)/2 pairs
+        total_pairs = len(actual_rules) * (len(actual_rules) - 1) // 2
+        # Additional checks: sticky buffer, UDP flow, protocol mismatch, etc. (count as 5% of total)
+        total_operations = total_pairs + max(1, int(total_pairs * 0.05))
+        current_operation = 0
+        
+        # Track progress updates to reduce GUI refresh frequency
+        last_progress_update = -1
+        update_interval = max(1, total_pairs // 100)  # Update roughly every 1% of total pairs
+        
         # Check each pair of rules for conflicts in both directions
         for i in range(len(actual_rules)):
+            # Check for cancellation request
+            if cancel_requested is not None and cancel_requested[0]:
+                return conflicts  # Return partial results and exit early
+            
             for j in range(i + 1, len(actual_rules)):
+                current_operation += 1
+                
+                # Update progress bar if provided - but only periodically to reduce overhead
+                if progress_bar is not None and progress_text is not None and progress_dialog is not None:
+                    # Update at intervals or when reaching a new rule (i changes)
+                    if current_operation % update_interval == 0 or current_operation == total_operations:
+                        progress = (current_operation / total_operations) * 100
+                        progress_bar['value'] = progress
+                        progress_text.config(text=f"{int(progress)}% (Analyzing rule {i+1}/{len(actual_rules)})")
+                        progress_dialog.update()
+                        last_progress_update = current_operation
+                
                 rule_a = actual_rules[i]
                 rule_b = actual_rules[j]
                 line_a = rules.index(rule_a) + 1
@@ -50,10 +81,12 @@ class RuleAnalyzer:
                 if conflict:
                     conflicts[conflict['severity']].append(conflict)
                 
-                # Reverse check: Does rule B make rule A unreachable?
-                reverse_conflict = self.check_reverse_shadowing(rule_a, rule_b, line_a, line_b, variables)
-                if reverse_conflict:
-                    conflicts[reverse_conflict['severity']].append(reverse_conflict)
+                # NOTE: check_reverse_shadowing() is DISABLED for strict order mode
+                # In strict order (file order), only earlier rules can shadow later rules
+                # Later rules cannot make earlier rules "unreachable" - they process after
+                # This function was designed for Suricata's internal rule type processing order
+                # where different rule types process in a different order than file position
+                # For AWS Network Firewall strict order mode, we only need forward shadowing checks
                 
                 # Protocol layering check: Only check forward direction for intra-type conflicts
                 # For inter-type conflicts, check both directions since protocol layering affects processing regardless of rule order
@@ -98,6 +131,10 @@ class RuleAnalyzer:
         packet_flow_conflicts = self.check_packet_drop_flow_pass_conflict(rules)
         conflicts['packet_drop_flow_pass'] = packet_flow_conflicts
         
+        # Check for asymmetric flow policies (one direction allowed, other blocked)
+        asymmetric_flow_issues = self.check_asymmetric_flow_policies(rules, variables)
+        conflicts['asymmetric_flow'] = asymmetric_flow_issues
+        
         return conflicts
     
     def check_rule_conflict(self, upper_rule: SuricataRule, lower_rule: SuricataRule, 
@@ -118,9 +155,27 @@ class RuleAnalyzer:
         if not self.rules_overlap(upper_rule, lower_rule, variables):
             return None
         
-        # Apply filters to eliminate false positives
-        if self.has_flowbits_dependency(upper_rule) or self.has_flowbits_dependency(lower_rule):
+        # Refined flowbits filtering to catch broad shadowing
+        upper_has_flowbits = self.has_flowbits_dependency(upper_rule)
+        lower_has_flowbits = self.has_flowbits_dependency(lower_rule)
+        
+        # Skip if BOTH rules have flowbits dependencies (they may be part of conditional logic)
+        if upper_has_flowbits and lower_has_flowbits:
             return None
+        
+        # Skip if only UPPER rule has flowbits (upper rule might be conditional)
+        if upper_has_flowbits and not lower_has_flowbits:
+            return None
+        
+        # IMPORTANT: Do NOT skip if only LOWER rule has flowbits AND upper rule is significantly broader
+        # Example: Broad "drop tcp any any" will shadow "reject tls ... flowbits:set,blocked"
+        # The flowbits in the lower rule are irrelevant because traffic never reaches it
+        if not upper_has_flowbits and lower_has_flowbits:
+            # Check if upper rule is significantly broader
+            if not self.is_significantly_broader(upper_rule, lower_rule):
+                # Upper rule is not significantly broader, so flowbits logic might be intentional
+                return None
+            # Otherwise, continue with conflict detection - this is likely shadowing
         
         if self.is_intentional_layered_pattern(upper_rule, lower_rule):
             return None
@@ -565,7 +620,22 @@ class RuleAnalyzer:
         content1 = (rule1.content or '').lower()
         content2 = (rule2.content or '').lower()
         
-        # If rule1 has no content restrictions, it's broader
+        # FIRST: Check if rules have mutually exclusive flow states
+        # This must come BEFORE other checks since it's a fundamental incompatibility
+        if self.flow_states_are_mutually_exclusive(rule1, rule2):
+            return False
+        
+        # Check if rule1 has only flow keywords (no actual content matching)
+        has_only_flow_keywords1 = self.has_only_flow_keywords(content1)
+        has_only_flow_keywords2 = self.has_only_flow_keywords(content2)
+        
+        # If rule1 has only flow keywords and rule2 has app-layer content, rule1 is broader
+        # Example: "flow:to_server" (line 87) is broader than "ssl_state:...; ja4.hash; content:...; flowbits:..."
+        if has_only_flow_keywords1 and not has_only_flow_keywords2:
+            # Rule1 has no content restrictions beyond flow state, so it's broader
+            return True
+        
+        # If rule1 has no content restrictions at all, it's broader
         if not content1 and content2:
             return True
         
@@ -578,8 +648,9 @@ class RuleAnalyzer:
             return True
         
         # Apply filters for non-conflicts
-        if 'noalert' in content1 or 'noalert' in content2:
-            return False
+        # NOTE: noalert check is intentionally removed here
+        # Even if a rule has noalert, it may be setting flowbits or performing other actions
+        # that shouldn't be shadowed by broader rules
         if self.has_negated_content(content1) or self.has_negated_content(content2):
             return False
         if self.uses_different_detection_mechanisms(content1, content2):
@@ -597,20 +668,49 @@ class RuleAnalyzer:
             domain2 = self.extract_endswith_domain(content2)
             
             if domain1 and domain2:
-                # If domain2 ends with domain1, then domain1 pattern is broader
-                # e.g., "amazon.com" is broader than "aws.amazon.com" because
-                # any SNI ending with "aws.amazon.com" also ends with "amazon.com"
-                if domain2.endswith(domain1) and domain1 != domain2:
-                    return True
-                # If domain1 ends with domain2, then domain2 pattern is broader
-                elif domain1.endswith(domain2) and domain1 != domain2:
-                    return False
+                # Check if BOTH rules use exact domain matching (startswith + endswith)
+                # This means they only match the exact domain, not subdomains
+                exact_match1 = self.has_exact_domain_match(content1)
+                exact_match2 = self.has_exact_domain_match(content2)
+                
+                if exact_match1 and exact_match2:
+                    # Both use exact matching - only equal if domains are exactly the same
+                    return domain1 == domain2
+                
+                # At least one uses wildcard matching (dotprefix + endswith, or just endswith)
+                # Check if domains match at domain boundaries (not just string suffix)
+                # For dotprefix + endswith patterns:
+                # - ".microsoft.com" matches "microsoft.com", "www.microsoft.com", etc.
+                # - ".microsoft.com" does NOT match "c.s-microsoft.com" (ends with "-microsoft.com", not ".microsoft.com")
+                
                 # If domains are equal, patterns are equal
-                elif domain1 == domain2:
+                if domain1 == domain2:
                     return True
-                # If neither ends with the other, patterns don't shadow
-                else:
+                
+                # If rule1 uses exact match but rule2 doesn't, rule1 can't be broader
+                if exact_match1 and not exact_match2:
                     return False
+                
+                # If rule2 uses exact match but rule1 doesn't, check if rule1's wildcard would match rule2
+                if not exact_match1 and exact_match2:
+                    # rule1 is wildcard, rule2 is exact
+                    # Check if rule2's exact domain would match rule1's wildcard pattern
+                    return domain2.endswith('.' + domain1) or domain2 == domain1
+                
+                # Both use wildcards - check domain boundary matching
+                # Check if domain2 ends with domain1 at a domain boundary
+                # e.g., "aws.amazon.com" ends with ".amazon.com" (broader pattern matches)
+                if domain2.endswith('.' + domain1):
+                    return True
+                
+                # Check if domain1 ends with domain2 at a domain boundary
+                # e.g., "amazon.com" ends with ".com" but that's not what we're checking
+                # If domain1 ends with domain2, then domain2 is broader
+                if domain1.endswith('.' + domain2):
+                    return False
+                
+                # If neither ends with the other at a domain boundary, patterns don't shadow
+                return False
         
         # For complete shadowing with content, we need very specific analysis
         return content1 == content2
@@ -625,13 +725,16 @@ class RuleAnalyzer:
             return True
         
         # Check for mutually exclusive flow states
-        if ('not_established' in flow1 and any(state in flow2 for state in ['established', 'to_server', 'to_client'])) or \
-           ('not_established' in flow2 and any(state in flow1 for state in ['established', 'to_server', 'to_client'])):
+        # not_established (handshake) is mutually exclusive with established state
+        if ('not_established' in flow1 and 'established' in flow2) or \
+           ('established' in flow1 and 'not_established' in flow2):
             return False
         
-        # to_server vs to_client (different directions)
-        if ('to_server' in flow1 and 'to_client' in flow2) or \
-           ('to_client' in flow1 and 'to_server' in flow2):
+        # to_server vs to_client (opposite directions within the same flow)
+        if ('to_server' in flow1 and 'to_client' in flow2 and 
+            'not_established' not in flow1 and 'not_established' not in flow2) or \
+           ('to_client' in flow1 and 'to_server' in flow2 and 
+            'not_established' not in flow1 and 'not_established' not in flow2):
             return False
         
         return True
@@ -649,8 +752,30 @@ class RuleAnalyzer:
         flow2 = self.extract_flow_keywords(content2)
         
         # Rule targeting not_established (handshake) vs rule requiring application layer parsing
+        # This is the PRIMARY check for handshake vs app-layer exclusivity
         if ('not_established' in flow1 and self.requires_established_connection(rule2)) or \
            ('not_established' in flow2 and self.requires_established_connection(rule1)):
+            return True
+        
+        # Additional check: not_established with to_server/to_client vs app-layer protocols
+        # Even if we can't determine from keywords alone, app-layer protocols inherently need established connections
+        protocol1 = rule1.protocol.lower()
+        protocol2 = rule2.protocol.lower()
+        
+        app_layer_protocols = ['http', 'tls', 'https', 'dns', 'ftp', 'smtp', 'ssh', 'smb', 'dcerpc']
+        
+        # If one rule has not_established and the other is an app-layer protocol, they're mutually exclusive
+        if 'not_established' in flow1 and protocol2 in app_layer_protocols:
+            return True
+        if 'not_established' in flow2 and protocol1 in app_layer_protocols:
+            return True
+        
+        # Additional check: not_established vs flowbits:isnotset
+        # Rules with flowbits:isnotset are typically checking state from established connections
+        # They're meant to run AFTER the handshake and AFTER other rules have had a chance to set flowbits
+        # Therefore, they don't conflict with not_established handshake rules
+        if ('not_established' in flow1 and 'flowbits:isnotset' in content2) or \
+           ('not_established' in flow2 and 'flowbits:isnotset' in content1):
             return True
         
         return False
@@ -786,6 +911,11 @@ class RuleAnalyzer:
         return ('content:' in content and 'endswith' in content and 
                 ('tls.sni' in content or 'http.host' in content))
     
+    def has_exact_domain_match(self, content: str) -> bool:
+        """Check if content uses startswith + endswith which means exact domain match only"""
+        return ('content:' in content and 'startswith' in content and 'endswith' in content and
+                ('tls.sni' in content or 'http.host' in content))
+    
     def extract_endswith_domain(self, content: str) -> Optional[str]:
         """Extract domain from content that uses endswith pattern"""
         if not self.has_endswith_pattern(content):
@@ -903,6 +1033,17 @@ class RuleAnalyzer:
         if not rule1.content and rule2.content:
             return True
         
+        # Flow-only keywords vs app-layer content matching
+        # Example: "flow:to_server" (line 87) is significantly broader than
+        # "ssl_state:...; ja4.hash; content:...; flowbits:..." (lines 93-96)
+        content1 = (rule1.content or '').lower()
+        content2 = (rule2.content or '').lower()
+        
+        if self.has_only_flow_keywords(content1) and not self.has_only_flow_keywords(content2):
+            # Rule1 has only flow constraints, rule2 has actual content matching
+            # This makes rule1 significantly broader
+            return True
+        
         return False
     
     def check_protocol_layering_conflict(self, upper_rule: SuricataRule, lower_rule: SuricataRule,
@@ -942,12 +1083,15 @@ class RuleAnalyzer:
         return self.check_traditional_protocol_layering(upper_rule, lower_rule, upper_line, lower_line, variables)
     
     def get_suricata_rule_type(self, rule: SuricataRule) -> str:
-        """Determine Suricata rule type based on keywords for AWS Network Firewall"""
+        """Determine Suricata rule type based on keywords per official Suricata documentation
+        
+        Per https://docs.suricata.io/en/latest/rules/rule-types.html
+        """
         content = (rule.content or '').lower()
         protocol = rule.protocol.lower()
         
         # FIRST: Check for application layer sticky buffers - these take precedence
-        # Even with flow:established, if a rule uses app-layer sticky buffers, it's APP_TX
+        # Rules with app-layer sticky buffers are APP_TX (application transaction rules)
         app_layer_buffers = [
             'http.accept', 'http.accept_enc', 'http.accept_lang', 'http.connection',
             'http.content_len', 'http.content_type', 'http.cookie', 'http.header',
@@ -972,21 +1116,30 @@ class RuleAnalyzer:
         if any(buffer in content for buffer in app_layer_buffers):
             return 'SIG_TYPE_APPLAYER'
         
-        # Application layer protocols (http, tls, etc.) are SIG_TYPE_APPLAYER
+        # SECOND: Check for application layer protocols in the protocol field
+        # These are SIG_TYPE_APPLAYER unless modified by variable-like keywords
         if protocol in ['dcerpc', 'dhcp', 'dns', 'ftp', 'http', 'http2', 'https', 'ikev2', 'imap', 'krb5', 'msn', 'ntp', 'quic', 'smb', 'smtp', 'ssh', 'tftp', 'tls']:
+            # Check if variable-like keywords force packet-level classification
+            # Per documentation: flow:established or flow:not_established force packet type
+            if 'flow:established' in content or 'flow:not_established' in content or 'not_established' in content:
+                return 'SIG_TYPE_PKT'
             return 'SIG_TYPE_APPLAYER'
         
-        # Rules with app-layer-protocol keywords are always SIG_TYPE_APPLAYER
+        # THIRD: Check for Protocol Detection (app-layer-protocol keyword)
+        # Per documentation: Since Suricata 7, this is classified as PDONLY, not APPLAYER
+        # However, for AWS Network Firewall analysis, we treat it as APPLAYER for conflict detection
+        # TODO: Consider adding SIG_TYPE_PDONLY if more granular classification is needed
         if 'app-layer-protocol:' in content:
             return 'SIG_TYPE_APPLAYER'
         
-        # SECOND: Check for variable-like keywords that force packet-level classification
+        # FOURTH: Check for variable-like keywords that force packet-level classification
         # Per https://docs.suricata.io/en/latest/rules/rule-types.html#variable-like-keywords-sig-type
-        # Rules with flow:established or flow:not_established become packet rules (if not app-layer)
+        
+        # Rules with flow:established or flow:not_established become packet rules
         if 'flow:established' in content or 'flow:not_established' in content or 'not_established' in content:
             return 'SIG_TYPE_PKT'
         
-        # Rules with flowbits isset/isnotset (but NOT set/unset/toggle), flowint isset/notset, or iprep become packet rules
+        # Rules with flowbits isset/isnotset (but NOT set/unset/toggle) become packet rules
         # Note: flowbits:set does NOT change rule type per documentation
         if any(keyword in content for keyword in ['flowbits:isset', 'flowbits:isnotset', 'iprep:']):
             return 'SIG_TYPE_PKT'
@@ -997,15 +1150,14 @@ class RuleAnalyzer:
             if any(op in content for op in ['isset', 'notset']):
                 return 'SIG_TYPE_PKT'
         
-        # Low-level protocol rules (tcp, ip) with flow keywords get elevated to application layer processing
-        if protocol in ['tcp', 'ip'] and 'flow:' in content:
-            return 'SIG_TYPE_APPLAYER'
-        
-        # Other rules with flow keywords are SIG_TYPE_PKT
+        # FIFTH: Check for flow keywords
+        # Per documentation Note 3: IP-only or like-ip-only rules with flow keywords become PKT rules
+        # regardless of the flow option (to_server, to_client, etc.)
         if 'flow:' in content:
+            # Any flow keyword makes this a packet rule (if not already classified above)
             return 'SIG_TYPE_PKT'
         
-        # Rules with no special keywords are SIG_TYPE_IPONLY
+        # FINALLY: Rules with no special keywords are SIG_TYPE_IPONLY
         return 'SIG_TYPE_IPONLY'
     
     def check_rule_type_conflict(self, upper_rule: SuricataRule, lower_rule: SuricataRule,
@@ -1571,6 +1723,45 @@ class RuleAnalyzer:
         
         # If neither has content, check other factors like network/port specificity
         return True
+    
+    def has_only_flow_keywords(self, content: str) -> bool:
+        """Check if content has ONLY flow-related keywords and no actual content matching
+        
+        This helps identify rules that are broader because they lack app-layer content restrictions.
+        Example: "flow:to_server" has no content matching, making it broader than rules with
+        ssl_state, http.host, tls.sni, etc.
+        
+        NOTE: flowbits are NOT considered "flow-only" - they represent conditional logic/state
+        and should be treated as a form of content restriction.
+        """
+        if not content:
+            return False
+        
+        # List of flow state keywords that don't constitute content matching
+        # NOTE: flowbits, flowint, xbits are EXCLUDED - they represent state/conditions
+        flow_state_keywords = ['flow:']
+        
+        # List of actual content matching keywords (including state/condition keywords)
+        content_matching_keywords = [
+            'content:', 'pcre:', 'http.', 'tls.', 'dns.', 'ssh.', 'ja3.', 'ja4.',
+            'ssl_state:', 'file.', 'smb.', 'krb5.', 'dcerpc.', 'ftp.',
+            'app-layer-protocol:', 'geoip:', 'byte_test:', 'byte_extract:',
+            'isdataat:', 'depth:', 'offset:', 'distance:', 'within:',
+            'flowbits:', 'flowint:', 'xbits:', 'hostbits:'  # State/condition keywords
+        ]
+        
+        # Check if content has any actual content matching or state keywords
+        has_content_matching = any(keyword in content for keyword in content_matching_keywords)
+        
+        # If it has content matching keywords, it's not "flow only"
+        if has_content_matching:
+            return False
+        
+        # Check if it has basic flow state keywords (like flow:to_server, flow:established)
+        has_flow = any(keyword in content for keyword in flow_state_keywords)
+        
+        # Return True only if it has flow state keywords but no content matching
+        return has_flow
     
     def has_flow_keywords(self, rule: SuricataRule) -> bool:
         """Check if rule has any flow keywords that would mitigate protocol layering issues"""
@@ -2382,6 +2573,18 @@ class RuleAnalyzer:
                 if is_packet_drop and is_flow_pass:
                     # Check if they could match same traffic
                     if self.rules_could_match_same_traffic(rule1, rule2, {}):
+                        # Additional filter: Skip if rules use different detection mechanisms
+                        # (e.g., one uses geoip and the other uses domain matching)
+                        rule1_content = (rule1.content or '').lower()
+                        rule2_content = (rule2.content or '').lower()
+                        
+                        if self.uses_different_detection_mechanisms(rule1_content, rule2_content):
+                            continue
+                        
+                        # Skip if one has geographic specificity and they use different mechanisms
+                        if self.has_geographic_specificity(rule1_content, rule2_content):
+                            continue
+                        
                         issue = {
                             'line1': line1,
                             'line2': line2,
@@ -2396,6 +2599,213 @@ class RuleAnalyzer:
                         issues.append(issue)
         
         return issues
+    
+    def check_asymmetric_flow_policies(self, rules: List[SuricataRule], variables: Dict[str, str]) -> List[Dict]:
+        """Check for asymmetric flow policies that allow one direction but block the other
+        
+        Detects when rules allow traffic in one direction (to_server) but block the
+        return traffic (to_client), or vice versa. This creates broken bidirectional communication.
+        
+        Severity levels:
+        - CRITICAL: Packet-level asymmetry (SIG_TYPE_PKT) - breaks connection establishment
+        - WARNING: Application-level asymmetry (SIG_TYPE_APPLAYER) - handshake works but app-layer fails
+        
+        Args:
+            rules: List of SuricataRule objects to analyze
+            variables: Dictionary of network variable definitions
+            
+        Returns:
+            List of dictionaries describing asymmetric flow policy issues
+        """
+        issues = []
+        
+        # Filter out comments and blank lines
+        actual_rules = [r for r in rules if not getattr(r, 'is_comment', False) and not getattr(r, 'is_blank', False)]
+        
+        # Check each pair of rules for asymmetric flow policies
+        for i in range(len(actual_rules)):
+            for j in range(i + 1, len(actual_rules)):
+                rule_a = actual_rules[i]
+                rule_b = actual_rules[j]
+                line_a = rules.index(rule_a) + 1
+                line_b = rules.index(rule_b) + 1
+                
+                # Check if these rules create an asymmetric flow policy
+                asymmetric_issue = self.check_asymmetric_flow_pair(
+                    rule_a, rule_b, line_a, line_b, variables
+                )
+                if asymmetric_issue:
+                    issues.append(asymmetric_issue)
+        
+        return issues
+    
+    def check_asymmetric_flow_pair(self, rule1: SuricataRule, rule2: SuricataRule,
+                                   line1: int, line2: int, variables: Dict[str, str]) -> Optional[Dict]:
+        """Check if two rules create an asymmetric flow policy
+        
+        Args:
+            rule1: First rule
+            rule2: Second rule
+            line1: Line number of first rule
+            line2: Line number of second rule
+            variables: Dictionary of network variable definitions
+            
+        Returns:
+            Issue dictionary if asymmetric policy exists, None otherwise
+        """
+        # Extract flow directions
+        content1 = (rule1.content or '').lower()
+        content2 = (rule2.content or '').lower()
+        
+        flow1 = self.extract_flow_keywords(content1)
+        flow2 = self.extract_flow_keywords(content2)
+        
+        # Check if one has to_server and the other has to_client
+        has_to_server_1 = 'to_server' in flow1
+        has_to_client_1 = 'to_client' in flow1
+        has_to_server_2 = 'to_server' in flow2
+        has_to_client_2 = 'to_client' in flow2
+        
+        # Must have opposite flow directions
+        opposite_directions = (
+            (has_to_server_1 and has_to_client_2) or
+            (has_to_client_1 and has_to_server_2)
+        )
+        
+        if not opposite_directions:
+            return None
+        
+        # Skip if either rule targets handshake traffic (not_established)
+        # Handshake rules are unidirectional by nature
+        if 'not_established' in flow1 or 'not_established' in flow2:
+            return None
+        
+        # Check if rules target the same connection (networks and ports must overlap)
+        if not self.rules_target_same_connection(rule1, rule2, variables):
+            return None
+        
+        # Check for conflicting actions (one allows, one blocks)
+        action1 = rule1.action.lower()
+        action2 = rule2.action.lower()
+        
+        allow_actions = {'pass', 'alert'}  # alert doesn't block, so effectively allows
+        block_actions = {'drop', 'reject'}
+        
+        action1_allows = action1 in allow_actions
+        action2_allows = action2 in allow_actions
+        action1_blocks = action1 in block_actions
+        action2_blocks = action2 in block_actions
+        
+        # Check for asymmetric policy: one direction allows, other blocks
+        if not ((action1_allows and action2_blocks) or (action1_blocks and action2_allows)):
+            return None
+        
+        # Determine which rule is which direction
+        if has_to_server_1:
+            to_server_rule, to_server_line = rule1, line1
+            to_server_action = action1
+            to_client_rule, to_client_line = rule2, line2
+            to_client_action = action2
+        else:
+            to_server_rule, to_server_line = rule2, line2
+            to_server_action = action2
+            to_client_rule, to_client_line = rule1, line1
+            to_client_action = action1
+        
+        # Determine rule types to set appropriate severity
+        type1 = self.get_suricata_rule_type(rule1)
+        type2 = self.get_suricata_rule_type(rule2)
+        
+        # CRITICAL if both are application-level (SIG_TYPE_APPLAYER) - the blocking rule may be ignored/ineffective
+        # WARNING if both are packet-level (SIG_TYPE_PKT) - rules work as configured but create poor policy
+        if type1 == 'SIG_TYPE_APPLAYER' and type2 == 'SIG_TYPE_APPLAYER':
+            severity = 'critical'
+            severity_text = "CRITICAL - Application-level asymmetry"
+            impact_text = "The blocking rule may be ignored or ineffective at the application layer, potentially creating a security bypass."
+        elif type1 == 'SIG_TYPE_PKT' and type2 == 'SIG_TYPE_PKT':
+            severity = 'warning'
+            severity_text = "WARNING - Packet-level asymmetry"
+            impact_text = "Rules behave as configured, but create an asymmetric policy that will disrupt bidirectional communication."
+        else:
+            # Mixed types - be conservative and use warning
+            severity = 'warning'
+            severity_text = "WARNING - Mixed-level asymmetry"
+            impact_text = "Connection behavior may be unpredictable."
+        
+        # Build issue description
+        if to_server_action in allow_actions and to_client_action in block_actions:
+            issue = (f"{severity_text}: Asymmetric flow policy detected. "
+                    f"Client→Server traffic is {to_server_action.upper()} (line {to_server_line}), "
+                    f"but Server→Client response is {to_client_action.upper()} (line {to_client_line}). "
+                    f"{impact_text}")
+            suggestion = (f"Either block both directions or allow both directions. "
+                         f"Bidirectional communication requires traffic flow in both directions.")
+        else:
+            issue = (f"{severity_text}: Asymmetric flow policy detected. "
+                    f"Server→Client traffic is {to_client_action.upper()} (line {to_client_line}), "
+                    f"but Client→Server traffic is {to_server_action.upper()} (line {to_server_line}). "
+                    f"{impact_text}")
+            suggestion = (f"Either block both directions or allow both directions. "
+                         f"Bidirectional communication requires traffic flow in both directions.")
+        
+        return {
+            'line1': min(line1, line2),
+            'line2': max(line1, line2),
+            'rule1': rule1,
+            'rule2': rule2,
+            'to_server_line': to_server_line,
+            'to_client_line': to_client_line,
+            'to_server_action': to_server_action.upper(),
+            'to_client_action': to_client_action.upper(),
+            'rule_type1': type1,
+            'rule_type2': type2,
+            'issue': issue,
+            'suggestion': suggestion,
+            'severity': severity
+        }
+    
+    def rules_target_same_connection(self, rule1: SuricataRule, rule2: SuricataRule,
+                                     variables: Dict[str, str]) -> bool:
+        """Check if two rules with opposite flow directions target the same connection
+        
+        For opposite flow directions (to_server vs to_client), we need to check if
+        the rules match the same connection by comparing networks and ports in both
+        directions.
+        
+        Args:
+            rule1: First rule (e.g., with to_server)
+            rule2: Second rule (e.g., with to_client)
+            variables: Dictionary of network variable definitions
+            
+        Returns:
+            True if rules target the same connection
+        """
+        # Protocol must be compatible
+        if not self.protocols_could_match_same_traffic(rule1, rule2):
+            return False
+        
+        # For opposite flow directions, we need to check if:
+        # rule1's src→dst matches rule2's dst→src (and vice versa)
+        
+        # Check forward direction: rule1's src/dst vs rule2's dst/src
+        forward_match = (
+            self.networks_overlap_loose(rule1.src_net, rule2.dst_net, variables) and
+            self.networks_overlap_loose(rule1.dst_net, rule2.src_net, variables) and
+            self.ports_overlap_loose(rule1.src_port, rule2.dst_port) and
+            self.ports_overlap_loose(rule1.dst_port, rule2.src_port)
+        )
+        
+        # For bidirectional rules (<>), also check reverse
+        if rule1.direction == '<>' or rule2.direction == '<>':
+            reverse_match = (
+                self.networks_overlap_loose(rule1.src_net, rule2.src_net, variables) and
+                self.networks_overlap_loose(rule1.dst_net, rule2.dst_net, variables) and
+                self.ports_overlap_loose(rule1.src_port, rule2.src_port) and
+                self.ports_overlap_loose(rule1.dst_port, rule2.dst_port)
+            )
+            return forward_match or reverse_match
+        
+        return forward_match
     
     def generate_analysis_report(self, conflicts: Dict[str, List[Dict]],
                                total_rules: int, current_file: str = None, 
@@ -2536,9 +2946,38 @@ class RuleAnalyzer:
                 report += f"   Issue: {issue['issue']}\n"
                 report += f"   Suggestion: {issue['suggestion']}\n\n"
         
+        # Asymmetric flow policy issues (both CRITICAL and WARNING severities)
+        if conflicts.get('asymmetric_flow'):
+            # Count severities
+            critical_count = sum(1 for issue in conflicts['asymmetric_flow'] if issue['severity'] == 'critical')
+            warning_count = sum(1 for issue in conflicts['asymmetric_flow'] if issue['severity'] == 'warning')
+            
+            if critical_count > 0:
+                report += f"🚨 ASYMMETRIC FLOW POLICIES - CRITICAL ({critical_count})\n"
+                report += f"-" * 30 + "\n"
+                for i, issue in enumerate([iss for iss in conflicts['asymmetric_flow'] if iss['severity'] == 'critical'], 1):
+                    report += f"{i}. Line {issue['line1']} vs Line {issue['line2']}\n"
+                    report += f"   Issue: {issue['issue']}\n"
+                    report += f"   To Server (Line {issue['to_server_line']}): {issue['to_server_action']}\n"
+                    report += f"   To Client (Line {issue['to_client_line']}): {issue['to_client_action']}\n"
+                    report += f"   Rule Types: {issue['rule_type1']}, {issue['rule_type2']}\n"
+                    report += f"   Action: {issue['suggestion']}\n\n"
+            
+            if warning_count > 0:
+                report += f"⚠️ ASYMMETRIC FLOW POLICIES - WARNING ({warning_count})\n"
+                report += f"-" * 30 + "\n"
+                for i, issue in enumerate([iss for iss in conflicts['asymmetric_flow'] if iss['severity'] == 'warning'], 1):
+                    report += f"{i}. Line {issue['line1']} vs Line {issue['line2']}\n"
+                    report += f"   Issue: {issue['issue']}\n"
+                    report += f"   To Server (Line {issue['to_server_line']}): {issue['to_server_action']}\n"
+                    report += f"   To Client (Line {issue['to_client_line']}): {issue['to_client_action']}\n"
+                    report += f"   Rule Types: {issue['rule_type1']}, {issue['rule_type2']}\n"
+                    report += f"   Action: {issue['suggestion']}\n\n"
+        
         report += "\nRECOMMENDATIONS:\n"
-        report += "- Address protocol layering conflicts first (add flow constraints)\n"
-        report += "- Address critical issues next (security bypasses)\n"
+        report += "- Address asymmetric flow policies (both directions must be consistent)\n"
+        report += "- Address protocol layering conflicts (add flow constraints)\n"
+        report += "- Address critical shadowing issues (security bypasses)\n"
         report += "- Fix UDP flow:established warnings to block initial UDP packets\n"
         report += "- Fix sticky buffer ordering to ensure content keywords have proper context\n"
         report += "- Use Move Up/Down buttons to reorder rules\n"
@@ -2730,6 +3169,35 @@ class RuleAnalyzer:
                     html += f'<strong>Issue:</strong> {issue["issue"]}<br>'
                     html += f'<strong>Suggestion:</strong> {issue["suggestion"]}<br>'
                     html += '</div>'
+            
+            # Asymmetric flow policy issues (both CRITICAL and WARNING severities)
+            if conflicts.get('asymmetric_flow'):
+                critical_count = sum(1 for issue in conflicts['asymmetric_flow'] if issue['severity'] == 'critical')
+                warning_count = sum(1 for issue in conflicts['asymmetric_flow'] if issue['severity'] == 'warning')
+                
+                if critical_count > 0:
+                    html += f'<h2 class="critical">🚨 ASYMMETRIC FLOW POLICIES - CRITICAL ({critical_count})</h2>'
+                    for i, issue in enumerate([iss for iss in conflicts['asymmetric_flow'] if iss['severity'] == 'critical'], 1):
+                        html += f'<div class="conflict conflict-critical">'
+                        html += f'<strong>{i}. Line {issue["line1"]} vs Line {issue["line2"]}</strong><br>'
+                        html += f'<strong>Issue:</strong> {issue["issue"]}<br>'
+                        html += f'<strong>To Server (Line {issue["to_server_line"]}):</strong> {issue["to_server_action"]}<br>'
+                        html += f'<strong>To Client (Line {issue["to_client_line"]}):</strong> {issue["to_client_action"]}<br>'
+                        html += f'<strong>Rule Types:</strong> {issue["rule_type1"]}, {issue["rule_type2"]}<br>'
+                        html += f'<strong>Action:</strong> {issue["suggestion"]}<br>'
+                        html += '</div>'
+                
+                if warning_count > 0:
+                    html += f'<h2 class="warning">⚠️ ASYMMETRIC FLOW POLICIES - WARNING ({warning_count})</h2>'
+                    for i, issue in enumerate([iss for iss in conflicts['asymmetric_flow'] if iss['severity'] == 'warning'], 1):
+                        html += f'<div class="conflict conflict-warning">'
+                        html += f'<strong>{i}. Line {issue["line1"]} vs Line {issue["line2"]}</strong><br>'
+                        html += f'<strong>Issue:</strong> {issue["issue"]}<br>'
+                        html += f'<strong>To Server (Line {issue["to_server_line"]}):</strong> {issue["to_server_action"]}<br>'
+                        html += f'<strong>To Client (Line {issue["to_client_line"]}):</strong> {issue["to_client_action"]}<br>'
+                        html += f'<strong>Rule Types:</strong> {issue["rule_type1"]}, {issue["rule_type2"]}<br>'
+                        html += f'<strong>Action:</strong> {issue["suggestion"]}<br>'
+                        html += '</div>'
         
         html += '''
     <div class="recommendations">

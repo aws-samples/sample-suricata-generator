@@ -433,11 +433,13 @@ class FlowTester:
             'SIG_TYPE_APPLAYER': 'FLOW'     # SIG_PROP_FLOW_ACTION_FLOW
         }
         
-        # Track actions at different scopes
+        # Track actions at different scopes with line numbers for proper deconfliction
         packet_scope_action = None
         packet_scope_rule = None
+        packet_scope_line = None
         flow_scope_action = None
         flow_scope_rule = None
+        flow_scope_line = None
         
         # Collect all rules in LINE ORDER (not type order)
         all_rules = []
@@ -489,20 +491,30 @@ class FlowTester:
                             if packet_scope_action is None:
                                 packet_scope_action = rule.action.lower()
                                 packet_scope_rule = match_info
+                                packet_scope_line = rule_info['line']
                         else:  # scope == 'FLOW'
                             # Flow-scope action: only set if not already set
                             # (first match wins within flow scope)
                             if flow_scope_action is None:
                                 flow_scope_action = rule.action.lower()
                                 flow_scope_rule = match_info
+                                flow_scope_line = rule_info['line']
         
-        # Determine final action using Suricata 8.0+ deconfliction logic
+        # Determine final action using Suricata 8.0+ deconfliction logic with line order
         # Per bug fix: https://redmine.openinfosecfoundation.org/issues/7653
         # If packet-scope DROP/REJECT matches, flow-scope PASS is skipped
+        # HOWEVER: Line order matters - the rule that appears first in the file takes precedence
         if packet_scope_action in ['drop', 'reject'] and flow_scope_action == 'pass':
-            # Packet-scope DROP/REJECT blocks flow-scope PASS (Suricata 8.0+ behavior)
-            final_action = packet_scope_action
-            final_rule = packet_scope_rule
+            # Both packet DROP/REJECT and flow PASS matched
+            # Check which came first in the file (lower line number wins)
+            if packet_scope_line < flow_scope_line:
+                # Packet-scope DROP/REJECT came first, blocks flow-scope PASS (Suricata 8.0+ behavior)
+                final_action = packet_scope_action
+                final_rule = packet_scope_rule
+            else:
+                # Flow-scope PASS came first in file, it wins despite packet DROP/REJECT
+                final_action = flow_scope_action
+                final_rule = flow_scope_rule
         elif flow_scope_action is not None:
             # Flow-level action wins (normal case)
             final_action = flow_scope_action

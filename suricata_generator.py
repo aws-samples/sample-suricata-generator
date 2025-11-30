@@ -194,7 +194,14 @@ class SuricataRuleGenerator:
         
         # Handle port variables starting with $ (only $ variables allowed for ports)
         if port_spec.startswith('$'):
-            return True  # $VARIABLE is valid for ports
+            # Check for double prefix ($$) which is invalid
+            if port_spec.startswith('$$'):
+                return False
+            # Valid variable format: $ followed by alphanumeric/underscore characters
+            if len(port_spec) > 1 and port_spec[1:].replace('_', '').isalnum():
+                return True
+            else:
+                return False
         
         # Reject @ variables for ports (AWS Network Firewall requirement)
         if port_spec.startswith('@'):
@@ -251,7 +258,13 @@ class SuricataRuleGenerator:
                 
                 # Check if negated spec is a variable (only $ allowed)
                 if spec.startswith('$'):
-                    continue  # !$VARIABLE is valid
+                    # Validate variable format
+                    if spec.startswith('$$'):
+                        return False  # Double $$ prefix invalid
+                    if len(spec) > 1 and spec[1:].replace('_', '').isalnum():
+                        continue  # !$VARIABLE is valid
+                    else:
+                        return False  # Invalid variable format
                 if spec.startswith('@'):
                     return False  # !@VARIABLE not allowed for ports
             
@@ -261,7 +274,13 @@ class SuricataRuleGenerator:
             
             # Handle variables (only $ allowed)
             if spec.startswith('$'):
-                continue
+                # Validate variable format
+                if spec.startswith('$$'):
+                    return False  # Double $$ prefix invalid
+                if len(spec) > 1 and spec[1:].replace('_', '').isalnum():
+                    continue  # $VARIABLE is valid
+                else:
+                    return False  # Invalid variable format
             if spec.startswith('@'):
                 return False  # @ variables not allowed for ports
             
@@ -640,10 +659,10 @@ class SuricataRuleGenerator:
                 else:
                     # Fallback: reconstruct options if original not available
                     options_parts = []
-                    if rule.content:
-                        options_parts.append(rule.content)
                     if rule.message:
                         options_parts.append(f'msg:"{rule.message}"')
+                    if rule.content:
+                        options_parts.append(rule.content)
                     options_parts.append(f'sid:{rule.sid}')
                     options_parts.append(f'rev:{rule.rev}')
                     options_str = f"({'; '.join(options_parts)};)" if options_parts else ""
@@ -764,13 +783,10 @@ class SuricataRuleGenerator:
         if value.lower() == 'any':
             return True
         
-        # Allow simple IP Set variables starting with $
-        if value.startswith('$') and not value.startswith('$[') and '[' not in value:
-            return True
-        
-        # Allow simple Reference Set variables starting with @ (AWS Network Firewall)
-        if value.startswith('@') and not value.startswith('@[') and '[' not in value:
-            return True
+        # Validate simple variables using the helper that checks for proper format
+        if (value.startswith('$') or value.startswith('@')) and not value.startswith(('$[', '@[')) and '[' not in value:
+            # Use the validation helper to ensure proper variable format (no $$, @@, etc.)
+            return self._validate_single_network_item(value, field_name, show_error=True)
         
         # Check if it's a bracketed group expression
         if value.startswith('[') and value.endswith(']'):
@@ -836,13 +852,30 @@ class SuricataRuleGenerator:
         """Validate a single network item (CIDR, IP, or variable)"""
         value = value.strip()
         
-        # Allow variables
-        if value.startswith('$') or value.startswith('@'):
-            return True
-        
         # Allow 'any'
         if value.lower() == 'any':
             return True
+        
+        # Validate variables - must start with exactly one $ or @ followed by valid characters
+        if value.startswith('$') or value.startswith('@'):
+            # Check for double prefix ($$, @@) which is invalid
+            if value.startswith('$$') or value.startswith('@@'):
+                if show_error:
+                    messagebox.showerror("Network Validation Error", 
+                        f"Invalid variable in {field_name}: '{value}'\n\n" +
+                        "Variables must start with exactly one $ or @ character (e.g., $HOME_NET, @REFERENCE_SET)")
+                return False
+            
+            # Valid variable format: $ or @ followed by alphanumeric/underscore characters
+            # Pattern: ^[$@][A-Za-z0-9_]+$
+            if len(value) > 1 and value[1:].replace('_', '').isalnum():
+                return True
+            else:
+                if show_error:
+                    messagebox.showerror("Network Validation Error", 
+                        f"Invalid variable format in {field_name}: '{value}'\n\n" +
+                        "Variables must be alphanumeric with underscores (e.g., $HOME_NET, @MY_SET_1)")
+                return False
         
         # Check if it's a valid CIDR or IP
         try:
@@ -1436,7 +1469,56 @@ class SuricataRuleGenerator:
                     # If rule doesn't have rev keyword, set default rev=1
                     if not re.search(r'rev:\d+', corrected_line):
                         parsed_rule.rev = 1
-                    rules.append(parsed_rule)
+                    
+                    # Normalize keyword ordering immediately (WYSIWYG behavior)
+                    # Reconstruct original_options with msg first for consistent display
+                    options_parts = []
+                    if parsed_rule.message:
+                        options_parts.append(f'msg:"{parsed_rule.message}"')
+                    if parsed_rule.content:
+                        content_cleaned = parsed_rule.content.rstrip(';')
+                        options_parts.append(content_cleaned)
+                    options_parts.append(f'sid:{parsed_rule.sid}')
+                    options_parts.append(f'rev:{parsed_rule.rev}')
+                    parsed_rule.original_options = '; '.join(options_parts)
+                    
+                    # Validate the parsed rule has valid syntax
+                    validation_errors = []
+                    
+                    # Validate action
+                    if parsed_rule.action.lower() not in SuricataConstants.SUPPORTED_ACTIONS:
+                        validation_errors.append(f"invalid action '{parsed_rule.action}'")
+                    
+                    # Validate protocol
+                    if parsed_rule.protocol.lower() not in SuricataConstants.SUPPORTED_PROTOCOLS:
+                        validation_errors.append(f"invalid protocol '{parsed_rule.protocol}'")
+                    
+                    # Validate source network (silent validation for paste)
+                    if not self._validate_single_network_item(parsed_rule.src_net, "Source Network", show_error=False):
+                        validation_errors.append(f"invalid source network '{parsed_rule.src_net}'")
+                    
+                    # Validate destination network (silent validation for paste)
+                    if not self._validate_single_network_item(parsed_rule.dst_net, "Dest Network", show_error=False):
+                        validation_errors.append(f"invalid destination network '{parsed_rule.dst_net}'")
+                    
+                    # Validate source port (suppress messagebox errors during validation)
+                    if not self.validate_port_list(parsed_rule.src_port):
+                        validation_errors.append(f"invalid source port '{parsed_rule.src_port}'")
+                    
+                    # Validate destination port (suppress messagebox errors during validation)
+                    if not self.validate_port_list(parsed_rule.dst_port):
+                        validation_errors.append(f"invalid destination port '{parsed_rule.dst_port}'")
+                    
+                    # If there are validation errors, comment out the rule
+                    if validation_errors:
+                        error_rule = SuricataRule()
+                        error_rule.is_comment = True
+                        error_summary = ', '.join(validation_errors)
+                        error_rule.comment_text = f"# [VALIDATION ERROR: {error_summary}] {corrected_line}"
+                        rules.append(error_rule)
+                    else:
+                        # Valid rule - add it
+                        rules.append(parsed_rule)
                 else:
                     # Malformed rule - insert as comment with error note
                     error_rule = SuricataRule()
@@ -2084,12 +2166,12 @@ class SuricataRuleGenerator:
                     
                     # Create updated rule - reconstruct original_options from editor fields for message-only changes too
                     options_parts = []
+                    if self.message_var.get():
+                        options_parts.append(f'msg:"{self.message_var.get()}"')
                     if self.content_var.get():
                         # Strip trailing semicolon from content to prevent double semicolons
                         content_cleaned = self.content_var.get().rstrip(';')
                         options_parts.append(content_cleaned)
-                    if self.message_var.get():
-                        options_parts.append(f'msg:"{self.message_var.get()}"')
                     options_parts.append(f'sid:{sid}')
                     options_parts.append(f'rev:{new_rev}')
                     new_original_options = '; '.join(options_parts)
@@ -2129,12 +2211,12 @@ class SuricataRuleGenerator:
                 
                 # Create updated rule - reconstruct original_options from editor fields
                 options_parts = []
+                if self.message_var.get():
+                    options_parts.append(f'msg:"{self.message_var.get()}"')
                 if self.content_var.get():
                     # Strip trailing semicolon from content to prevent double semicolons
                     content_cleaned = self.content_var.get().rstrip(';')
                     options_parts.append(content_cleaned)
-                if self.message_var.get():
-                    options_parts.append(f'msg:"{self.message_var.get()}"')
                 options_parts.append(f'sid:{sid}')
                 options_parts.append(f'rev:{new_rev}')
                 new_original_options = '; '.join(options_parts)
@@ -2350,12 +2432,12 @@ class SuricataRuleGenerator:
             
             # Create new rule from editor fields
             options_parts = []
+            if self.message_var.get():
+                options_parts.append(f'msg:"{self.message_var.get()}"')
             if self.content_var.get():
                 # Strip trailing semicolon from content to prevent double semicolons
                 content_cleaned = self.content_var.get().rstrip(';')
                 options_parts.append(content_cleaned)
-            if self.message_var.get():
-                options_parts.append(f'msg:"{self.message_var.get()}"')
             options_parts.append(f'sid:{sid}')
             options_parts.append(f'rev:1')
             original_options = '; '.join(options_parts)
@@ -3629,11 +3711,63 @@ class SuricataRuleGenerator:
                 return  # User cancelled
             variables.update(additional_vars)
         
-        # Perform analysis using the rule analyzer
-        conflicts = self.rule_analyzer.analyze_rule_conflicts(self.rules, variables)
+        # Filter actual rules for progress calculation
+        actual_rules = [r for r in self.rules if not getattr(r, 'is_comment', False) and not getattr(r, 'is_blank', False)]
         
-        # Show results
-        self.show_analysis_report(conflicts)
+        # Create progress dialog
+        progress_dialog = tk.Toplevel(self.root)
+        progress_dialog.title("Analyzing Rules")
+        progress_dialog.geometry("400x170")
+        progress_dialog.transient(self.root)
+        progress_dialog.grab_set()
+        progress_dialog.resizable(False, False)
+        
+        # Center the progress dialog
+        progress_dialog.geometry("+%d+%d" % (self.root.winfo_rootx() + 200, self.root.winfo_rooty() + 200))
+        
+        # Progress frame
+        progress_frame = ttk.Frame(progress_dialog)
+        progress_frame.pack(fill=tk.BOTH, expand=True, padx=20, pady=20)
+        
+        # Status label
+        status_label = ttk.Label(progress_frame, text=f"Analyzing {len(actual_rules)} rules for conflicts...")
+        status_label.pack(pady=(0, 10))
+        
+        # Progress bar
+        progress_bar = ttk.Progressbar(progress_frame, mode='determinate', length=350)
+        progress_bar.pack(pady=(0, 10))
+        
+        # Progress text label
+        progress_text = ttk.Label(progress_frame, text="0%")
+        progress_text.pack(pady=(0, 10))
+        
+        # Cancel button
+        cancel_requested = [False]  # Use list to allow modification in nested function
+        
+        def on_cancel():
+            cancel_requested[0] = True
+            progress_dialog.destroy()
+        
+        cancel_button = ttk.Button(progress_frame, text="Cancel", command=on_cancel)
+        cancel_button.pack()
+        
+        # Force dialog to display
+        progress_dialog.update()
+        
+        # Perform analysis using the rule analyzer with progress updates
+        conflicts = self.rule_analyzer.analyze_rule_conflicts(self.rules, variables, progress_bar, progress_text, progress_dialog, cancel_requested)
+        
+        # Close progress dialog if still open
+        try:
+            progress_dialog.destroy()
+        except:
+            pass  # Dialog may already be closed by cancel button
+        
+        # Only show results if analysis wasn't cancelled
+        if not cancel_requested[0]:
+            self.show_analysis_report(conflicts)
+        else:
+            messagebox.showinfo("Analysis Cancelled", "Rule analysis was cancelled by user.")
     
     def get_variable_definitions(self, undefined_vars=None):
         """Get CIDR definitions for undefined variables"""

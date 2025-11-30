@@ -1,5 +1,198 @@
 # Release Notes
 
+## Version 1.19.3 - November 27, 2025
+
+### Flow Tester Bug Fix (v1.0.3) - Line Order Deconfliction
+- **Fixed Incorrect Rule Precedence in Flow Testing**: Corrected critical bug where flow tester was not considering line order when applying Suricata deconfliction logic
+  - **Root Cause**: Deconfliction logic (packet-scope DROP/REJECT vs flow-scope PASS) was applied without considering which rule appeared first in the file
+  - **Impact**: Later rules could incorrectly override earlier rules, causing flow tester to show traffic as blocked when it should be allowed
+  - **Real-World Example**: 
+    - Line 3: `pass http ... (http.host; content:"example.com"; endswith; sid:102;)` - Flow scope PASS
+    - Line 5: `drop ip ... (flow:established,to_server; sid:104;)` - Packet scope DROP
+    - **Before Fix**: Packet DROP won (incorrect) → Traffic shown as BLOCKED
+    - **After Fix**: Line 3 came first → Flow PASS wins (correct) → Traffic shown as ALLOWED
+  - **Solution**: Enhanced deconfliction logic to track line numbers and give precedence to whichever action rule appeared first in the file
+- **Proper Suricata Behavior**: Flow tester now correctly implements line-order-aware deconfliction
+  - **Deconfliction Rule**: When both packet-scope DROP/REJECT and flow-scope PASS match, the rule that appears first in the file (lower line number) takes precedence
+  - **Scenario 1**: Packet DROP first (line 1) → Flow PASS later (line 2) → DROP wins (Suricata deconfliction)
+  - **Scenario 2**: Flow PASS first (line 3) → Packet DROP later (line 5) → PASS wins (file order priority)
+  - **AWS Network Firewall Compatibility**: Behavior matches strict order processing used by AWS Network Firewall
+
+### Technical Implementation
+- **Line Number Tracking**: Modified `_test_flow_phase()` method to track line numbers for both packet-scope and flow-scope actions
+- **Enhanced Deconfliction**: Updated deconfliction logic to compare line numbers before applying packet/flow scope precedence rules
+- **Preserved Logic**: All existing action scope and rule type classification logic remains unchanged
+- **Bug Reference**: Per Suricata bug #7653 (https://redmine.openinfosecfoundation.org/issues/7653) fixed
+
+### User Impact
+- **Accurate Test Results**: Flow tester now correctly predicts traffic behavior based on actual rule order in file
+- **Eliminates False Negatives**: Rules that should allow traffic no longer incorrectly show as blocked
+- **Better Rule Development**: Users can trust flow tester results when ordering rules for desired behavior
+
+---
+
+## Version 1.19.3 - November 26, 2025
+
+### Rules Analysis Engine Bug Fix Release (v1.9.1)
+- **Comprehensive Rule Analysis Corrections**: Fixed multiple critical bugs and false positives in rule conflict detection to better align with official Suricata documentation
+  - **Documentation Alignment**: Corrected rule type classification to match Suricata's documented behavior at https://docs.suricata.io/en/latest/rules/rule-types.html
+    - Fixed incorrect "elevation" logic for TCP/IP rules with flow keywords
+    - Any `flow:` keyword now correctly forces packet-level classification (SIG_TYPE_PKT) for IP-only rules
+    - `flow:established`/`flow:not_established` correctly force packet-level classification for app-layer protocols
+  - **Handshake vs Application Layer False Positives Eliminated**: Rules with `flow:not_established` (TCP handshakes) no longer falsely conflict with HTTP/TLS rules
+    - Enhanced mutual exclusivity detection recognizes handshake packets never reach app-layer parsing
+    - `not_established` + `flowbits:isnotset` correctly identified as mutually exclusive
+  - **Broad Shadowing Detection Improved**: Flow-only rules now correctly detected as shadowing specific rules with flowbits/content
+    - Added `has_only_flow_keywords()` method to identify rules lacking app-layer restrictions
+    - Flowbits now properly treated as content restrictions (not "flow-only")
+    - Example: `drop tcp ... (flow:to_server;)` now correctly detected as shadowing `reject tls ... (ssl_state; ja4.hash; flowbits:set;)`
+  - **Reverse Shadowing False Positives Eliminated**: Disabled reverse shadowing checks for strict order mode
+    - Later rules can no longer falsely flag earlier rules as "unreachable"
+    - Correct for AWS Network Firewall strict order mode (file order processing)
+  - **noalert Rule Detection Restored**: Rules with `noalert` keyword now properly analyzed
+    - Previously skipped entirely, even when setting important flowbits
+    - Now correctly detected as WARNING when shadowed (missing flowbit tracking)
+
+### Technical Implementation
+- **Six Major Corrections**: Rule type classification, geographic filtering, flow state exclusivity, flowbits handling, reverse shadowing, and noalert processing
+- **New Helper Method**: Added `has_only_flow_keywords()` to distinguish flow-only from content-matching rules
+- **Enhanced Exclusivity Detection**: Multiple improvements to `flow_states_are_mutually_exclusive()` and `is_content_equal_or_broader()`
+- **Filter Logic Refinements**: Reordered and refined all content matching filters for correct precedence
+- **Comprehensive Testing**: Validated against both best_practices.suricata and non_best_practices.suricata test files
+
+### User Impact
+- **Fewer False Positives**: Eliminates incorrect warnings for geoip rules, handshake rules, and reverse shadowing scenarios
+- **More Accurate Detections**: Now catches broad flow-only rules shadowing specific rules that were previously missed
+- **Better Severity Classification**: Clear distinction between CRITICAL (security policy violations), WARNING (missing logs), and INFO (optimizations)
+- **AWS Network Firewall Optimized**: All corrections maintain full compatibility with strict order mode
+---
+
+## Version 1.19.3 - November 25, 2025
+
+### Enhancement: Message Keyword Ordering
+- **msg Keyword Now Appears First**: Modified rule generation to place the `msg` keyword first within rule parentheses (when defined)
+  - **New Keyword Order**: msg → content keywords → sid → rev
+  - **Before**: `pass tcp any any -> any any (flow: to_server; msg:"Test"; sid:100; rev:1)`
+  - **After**: `pass tcp any any -> any any (msg:"Test"; flow: to_server; sid:100; rev:1)`
+  - **Consistency**: Aligns with common Suricata rule formatting conventions
+  - **All Rule Paths**: Applied to new rules, edited rules, imported rules, and all rule generation functions
+
+### Critical Bug Fix: Nested Parentheses in Message Fields
+- **Fixed Rule Parsing Failure**: Resolved critical bug preventing AWS best practices template rules from loading
+  - **Root Cause**: Parser regex `r'\(([^)]*)\)$'` stopped at first `)` character, even when inside quoted msg fields
+  - **Impact**: Rules with parentheses in msg fields (e.g., `msg:"text (with parens)"`) failed to parse and were dropped during import
+  - **Real-World Example**: AWS template rules like `msg:"HTTP direct to IP via http host header (common malware download technique)"` were being dropped
+  - **Solution**: Implemented quote-aware parser that tracks when inside quotes and only matches the last opening `(` outside of quotes
+  - **Technical Fix**: Replaced simple regex with intelligent character-by-character parsing that respects quote boundaries
+
+### Technical Implementation
+- **Modified Files**:
+  - `suricata_rule.py`: Updated `to_string()` method to reorder keywords with msg first
+  - `suricata_rule.py`: Fixed `from_string()` parser to handle nested parentheses in quoted strings
+  - `suricata_generator.py`: Updated 4 locations where `original_options` is reconstructed to match new ordering
+- **Parsing Enhancement**: Quote-aware parser prevents false matches on parentheses inside quoted strings
+- **Backward Compatibility**: Parser still handles rules in any keyword order when loading from files
+
+### User Impact
+- **Improved Rule Quality**: msg-first ordering matches common Suricata conventions
+- **AWS Template Loading**: AWS best practices template now loads completely without dropping rules
+- **No Data Loss**: All rules with parentheses in msg fields now parse correctly
+- **Seamless Operation**: Changes are transparent to users - rules just work correctly now
+
+---
+
+## Version 1.19.2 - November 25, 2025
+
+### Rules Analysis Engine Enhancement (v1.9.0)
+- **Domain Matching Bug Fixes**: Corrected two critical bugs in domain shadowing detection that caused false positive conflict warnings
+  - **Bug Fix 1 - Domain Boundary Detection**: Fixed analyzer incorrectly flagging unrelated domains as conflicting
+    - **Root Cause**: Domain comparison using simple string `endswith()` without checking domain boundaries
+    - **Impact**: Domains like `c.s-example.com` incorrectly detected as subdomain of `example.com` (ends with string "example.com" but not domain ".example.com")
+    - **Real-World Example**: Rules for `example.com` flagged as conflicting with rules for `c.s-example.com` (false positive)
+    - **Solution**: Enhanced domain comparison to check for proper domain boundaries using dot separator
+    - **Technical Fix**: Changed from `domain2.endswith(domain1)` to `domain2.endswith('.' + domain1)` in `is_content_equal_or_broader()`
+  - **Bug Fix 2 - Exact vs Wildcard Domain Matching**: Fixed analyzer not distinguishing between exact domain matches and wildcard patterns
+    - **Root Cause**: Analyzer treated all domain rules identically regardless of `startswith` vs `dotprefix` modifiers
+    - **Impact**: Exact domain rules (e.g., `docs.aws.amazon.com` with `startswith;endswith`) incorrectly flagged as conflicting with other exact domains (e.g., `contentrecs-api.docs.aws.amazon.com`)
+    - **Pattern Recognition**: 
+      - **Exact Match**: `startswith;endswith` = matches ONLY that specific domain
+      - **Wildcard Match**: `dotprefix;endswith` or just `endswith` = matches domain and all subdomains
+    - **Solution**: Added `has_exact_domain_match()` method to detect exact matching patterns and compare appropriately
+    - **Technical Fix**: Enhanced domain comparison logic to handle four scenarios (both exact, both wildcard, mixed exact/wildcard, mismatched)
+- **Progress Bar for Large Rule Sets**: Added visual progress indicator when analyzing rules to provide user feedback during long operations
+  - **Modal Progress Dialog**: Displays during analysis with title "Analyzing Rules"
+  - **Real-Time Updates**: Shows percentage complete and current rule being analyzed (e.g., "45% (Analyzing rule 23/100)")
+  - **Performance Optimized**: Updates approximately every 1% of total comparisons (not every single comparison)
+    - 100 rules: ~50 updates instead of 4,950 = 99% fewer GUI refreshes
+    - 500 rules: ~1,247 updates instead of 124,750 = 99% fewer GUI refreshes
+  - **Fast Analysis**: Optimized update frequency provides smooth visual feedback without slowing down analysis
+  - **Consistent Design**: Progress bar styling matches existing progress indicators (domain import, SID renumbering)
+  - **Automatic Cleanup**: Dialog closes automatically when analysis completes
+
+### Technical Implementation
+- **Domain Boundary Fix**: Modified domain comparison in `is_content_equal_or_broader()` to use `'.' + domain` for proper subdomain matching
+- **Exact Match Detection**: Added `has_exact_domain_match()` method to identify `startswith;endswith` patterns
+- **Enhanced Logic**: Updated domain comparison to handle mixed exact/wildcard scenarios correctly
+- **Progress Bar Integration**: Added optional progress parameters to `analyze_rule_conflicts()` method
+- **Smart Updates**: Calculates total operations and updates UI at strategic intervals (every 1% of pairs)
+- **UI Code Update**: Modified `review_rules()` in main application to create progress dialog and pass parameters to analyzer
+
+### User Impact
+- **Accurate Analysis**: Eliminates false positive warnings that confused users about legitimate rule configurations
+- **Clearer Results**: Analysis reports now correctly identify only actual conflicts, not unrelated domain rules
+- **Better Experience**: Large rule sets (500+ rules) now provide visual progress feedback during analysis
+- **Time Savings**: Users no longer need to manually verify false positive warnings about domain conflicts
+- **Professional Quality**: Progress bar matches expectations from modern applications
+
+---
+
+## Version 1.19.2 - November 24, 2025
+
+### Bug Fix: Paste Validation for Invalid Rule Syntax
+- **Enhanced Clipboard Paste Validation**: Fixed critical bug where rules with invalid syntax were being pasted without being commented out
+  - **Root Cause**: The `parse_clipboard_text()` method only validated structural parsing (7 tokens + direction) but didn't check semantic validity of parsed fields
+  - **Impact**: Invalid rules could be pasted directly into the rule set, potentially causing AWS Network Firewall deployment failures
+  - **Invalid Patterns Previously Allowed**:
+    - Misspelled actions (e.g., "pasz" instead of "pass")
+    - Invalid protocols (e.g., "tcpp" instead of "tcp")
+    - Malformed network addresses (e.g., invalid CIDR blocks)
+    - Invalid port specifications (e.g., ports > 65535)
+    - Malformed variable syntax (e.g., "$$var" instead of "$var")
+  - **Solution**: Enhanced paste validation to verify all rule components against Suricata/AWS requirements
+- **Comprehensive Validation Added**: Now validates all critical rule fields during paste operations
+  - **Actions**: Must be pass, alert, drop, or reject
+  - **Protocols**: Must be one of 21 supported protocols (tcp, udp, http, tls, dns, etc.)
+  - **Network Addresses**: Must be valid CIDR, IP addresses, proper variables, or 'any'
+  - **Port Specifications**: Must be valid port numbers (1-65535), ranges, or proper variables
+  - **Variable Syntax**: Enhanced validation for $-prefixed and @-prefixed variables
+    - Rejects double prefix ($$, @@)
+    - Validates alphanumeric/underscore format
+    - Applies to network fields, port fields, and bracketed expressions
+- **Smart Error Handling**: Invalid rules automatically commented out with descriptive error messages
+  - **Example**: `# [VALIDATION ERROR: invalid action 'pasz', invalid destination network '$$var'] pasz tcp any any -> $$var 80 (...)`
+  - **Preserves Original**: Original rule text kept in comment for manual correction
+  - **Multiple Errors**: All validation errors listed in single comprehensive message
+- **Silent Validation**: No intrusive error dialogs during paste - invalid rules silently commented with inline explanations
+
+### Technical Implementation
+- **Enhanced Methods** (suricata_generator.py):
+  - `parse_clipboard_text()`: Added comprehensive validation for actions, protocols, networks, and ports
+  - `_validate_single_network_item()`: Enhanced to detect $$/@@  prefixes and validate variable format
+  - `validate_port_list()`: Enhanced to validate variable format and reject $$ prefix
+  - `_validate_bracketed_port_content()`: Enhanced to validate variables inside port brackets
+  - `validate_network_field()`: Updated to use proper variable validation helper
+- **Validation Flow**: Structural parsing → semantic validation → comment out if invalid → insert into rule table
+- **Consistent Behavior**: Same validation logic used throughout application (paste, edit, insert operations)
+
+### User Impact
+- **Prevents Invalid Rules**: Catches syntax errors before they can cause deployment issues
+- **Improved Quality**: Rules pasted from external sources automatically validated against Suricata/AWS requirements
+- **Clear Feedback**: Descriptive error messages help users understand exactly what's wrong
+- **Time Savings**: Eliminates need to manually find and fix invalid rules after pasting
+- **Production Safety**: Prevents invalid rules from being saved to files and exported to AWS
+
+---
+
 ## Version 1.19.1 - November 22, 2025
 
 ### Bug Fix: Domain Consolidation Algorithm

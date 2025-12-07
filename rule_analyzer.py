@@ -36,7 +36,7 @@ class RuleAnalyzer:
         Returns:
             Dictionary with conflict categories: {'critical': [], 'warning': [], 'info': [], 'protocol_layering': [], 'sticky_buffer_order': [], 'udp_flow_established': [], 'protocol_keyword_mismatch': []}
         """
-        conflicts = {'critical': [], 'warning': [], 'info': [], 'protocol_layering': [], 'sticky_buffer_order': [], 'udp_flow_established': [], 'protocol_keyword_mismatch': [], 'asymmetric_flow': []}
+        conflicts = {'critical': [], 'warning': [], 'info': [], 'protocol_layering': [], 'sticky_buffer_order': [], 'udp_flow_established': [], 'protocol_keyword_mismatch': [], 'asymmetric_flow': [], 'reject_ip_protocol': []}
         
         # Filter out comments and blank lines for analysis
         actual_rules = [r for r in rules if not getattr(r, 'is_comment', False) and not getattr(r, 'is_blank', False)]
@@ -134,6 +134,10 @@ class RuleAnalyzer:
         # Check for asymmetric flow policies (one direction allowed, other blocked)
         asymmetric_flow_issues = self.check_asymmetric_flow_policies(rules, variables)
         conflicts['asymmetric_flow'] = asymmetric_flow_issues
+        
+        # Check for reject actions on IP protocol rules (AWS Network Firewall restriction)
+        reject_ip_issues = self.check_reject_on_ip_protocol(rules)
+        conflicts['reject_ip_protocol'] = reject_ip_issues
         
         return conflicts
     
@@ -2657,6 +2661,13 @@ class RuleAnalyzer:
         content1 = (rule1.content or '').lower()
         content2 = (rule2.content or '').lower()
         
+        # Skip alert rules entirely - they only log/observe traffic and don't make
+        # allow/block decisions, so they cannot create asymmetric flow policies
+        if rule1.action.lower() == 'alert':
+            return None
+        if rule2.action.lower() == 'alert':
+            return None
+        
         flow1 = self.extract_flow_keywords(content1)
         flow2 = self.extract_flow_keywords(content2)
         
@@ -2806,6 +2817,40 @@ class RuleAnalyzer:
             return forward_match or reverse_match
         
         return forward_match
+    
+    def check_reject_on_ip_protocol(self, rules: List[SuricataRule]) -> List[Dict]:
+        """Check for reject actions on IP protocol rules (AWS Network Firewall restriction)
+        
+        AWS Network Firewall does not allow reject actions on IP protocol rules.
+        IP protocol rules must use drop, pass, or alert actions instead.
+        
+        Args:
+            rules: List of SuricataRule objects to analyze
+            
+        Returns:
+            List of dictionaries describing reject on IP protocol issues
+        """
+        issues = []
+        
+        # Filter out comments and blank lines
+        actual_rules = [r for r in rules if not getattr(r, 'is_comment', False) and not getattr(r, 'is_blank', False)]
+        
+        for rule in actual_rules:
+            # Get line number in original rules list
+            line_num = rules.index(rule) + 1
+            
+            # Check if rule uses IP protocol with reject action
+            if rule.protocol.lower() == 'ip' and rule.action.lower() == 'reject':
+                issue = {
+                    'line': line_num,
+                    'rule': rule,
+                    'issue': f"AWS Network Firewall does not allow REJECT action on IP protocol rules. This rule will be rejected as invalid syntax.",
+                    'suggestion': "Change action from 'reject' to 'drop' for IP protocol rules",
+                    'severity': 'critical'
+                }
+                issues.append(issue)
+        
+        return issues
     
     def generate_analysis_report(self, conflicts: Dict[str, List[Dict]],
                                total_rules: int, current_file: str = None, 
@@ -2973,6 +3018,16 @@ class RuleAnalyzer:
                     report += f"   To Client (Line {issue['to_client_line']}): {issue['to_client_action']}\n"
                     report += f"   Rule Types: {issue['rule_type1']}, {issue['rule_type2']}\n"
                     report += f"   Action: {issue['suggestion']}\n\n"
+        
+        # Reject on IP protocol issues (AWS Network Firewall restriction)
+        if conflicts.get('reject_ip_protocol'):
+            report += f"🚨 REJECT ON IP PROTOCOL - CRITICAL ({len(conflicts['reject_ip_protocol'])})\n"
+            report += f"-" * 30 + "\n"
+            for i, issue in enumerate(conflicts['reject_ip_protocol'], 1):
+                report += f"{i}. Line {issue['line']}\n"
+                report += f"   Issue: {issue['issue']}\n"
+                report += f"   Rule: {issue['rule'].to_string()[:80]}...\n"
+                report += f"   Suggestion: {issue['suggestion']}\n\n"
         
         report += "\nRECOMMENDATIONS:\n"
         report += "- Address asymmetric flow policies (both directions must be consistent)\n"
@@ -3198,6 +3253,17 @@ class RuleAnalyzer:
                         html += f'<strong>Rule Types:</strong> {issue["rule_type1"]}, {issue["rule_type2"]}<br>'
                         html += f'<strong>Action:</strong> {issue["suggestion"]}<br>'
                         html += '</div>'
+            
+            # Reject on IP protocol issues (AWS Network Firewall restriction)
+            if conflicts.get('reject_ip_protocol'):
+                html += f'<h2 class="critical">🚨 REJECT ON IP PROTOCOL - CRITICAL ({len(conflicts["reject_ip_protocol"])})</h2>'
+                for i, issue in enumerate(conflicts['reject_ip_protocol'], 1):
+                    html += f'<div class="conflict conflict-critical">'
+                    html += f'<strong>{i}. Line {issue["line"]}</strong><br>'
+                    html += f'<strong>Issue:</strong> {issue["issue"]}<br>'
+                    html += f'<strong>Suggestion:</strong> {issue["suggestion"]}<br>'
+                    html += f'<div class="rule-text">Rule: {issue["rule"].to_string()[:100]}...</div>'
+                    html += '</div>'
         
         html += '''
     <div class="recommendations">

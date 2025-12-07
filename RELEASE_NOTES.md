@@ -1,5 +1,61 @@
 # Release Notes
 
+## Version 1.19.4 - December 1, 2025
+
+### Rules Analysis Engine Bug Fix (v1.9.3) - Asymmetric Flow Policy False Positives
+- **Fixed False Positives with Alert Rules**: Corrected bug where alert rules were incorrectly triggering ASYMMETRIC FLOW POLICIES warnings
+  - **Root Cause**: Analyzer was treating alert rules as "allowing" traffic when checking for asymmetric flow policies
+  - **Impact**: Alert rules (which only log/observe traffic) were incorrectly flagged as creating asymmetric flow policies when paired with blocking rules
+  - **Real-World Example**: 
+    - Line 12: `alert tls ... (ja3.hash; content:!"xxx"; noalert; flow:to_server; ...)` - Only logs, doesn't affect traffic
+    - Line 16: `reject http ... (msg:"HTTP direct to IP"; http.host; flow:to_server; ...)` - Actual blocking rule
+    - **Before Fix**: Flagged as CRITICAL asymmetric flow policy (false positive)
+    - **After Fix**: Correctly skipped - alert rules don't make allow/block decisions
+  - **Solution**: Added early filter in `check_asymmetric_flow_pair()` to skip ALL alert rules
+  - **Rule Purpose Distinction**: Alert rules only log/observe traffic - they never block or allow. Only pass/drop/reject rules affect traffic flow decisions
+- **Enhanced Detection Accuracy**: Asymmetric flow check now only analyzes rules that actually make allow/block decisions
+  - **Still Checked**: Pass rules, drop rules, reject rules
+  - **Now Skipped**: All alert rules (with or without noalert)
+- **User Impact**: Eliminates confusing false positive warnings about alert rules, focusing analysis on actual security policy conflicts between pass/drop/reject rules
+
+---
+
+## Version 1.19.4 - December 1, 2025
+
+### Rules Analysis Engine Enhancement (v1.9.2) - AWS Network Firewall Syntax Validation
+- **Reject on IP Protocol Detection**: New critical validation check identifies rules that use REJECT action with IP protocol, which is not supported by AWS Network Firewall
+  - **AWS Restriction**: AWS Network Firewall does not allow reject actions on IP protocol rules; such rules must use drop, pass, or alert instead
+  - **Real-World Example**: Rule `reject ip any any -> any any (msg:"default drop"; sid:111;)` will be rejected by AWS as invalid syntax
+  - **Automatic Detection**: Analyzer now scans all rules and flags IP protocol + reject action combinations as CRITICAL issues
+  - **Report Integration**: New dedicated section "🚨 REJECT ON IP PROTOCOL - CRITICAL" in both text and HTML analysis reports
+  - **Clear Guidance**: Each detected issue includes specific line number, full rule text, and actionable suggestion to change action to 'drop'
+  - **Pre-Deployment Safety**: Catches this configuration error before attempting to deploy to AWS Network Firewall
+
+### File Save Validation Enhancement
+- **Save-Time Validation**: Added pre-save validation check to prevent saving files with reject on IP protocol rules
+  - **Blocking Validation**: File save operation will fail with clear error message if invalid rules are detected
+  - **Error Message Format**: "AWS Network Firewall does not allow REJECT action on IP protocol rules. Invalid rules found at line(s): [numbers]. Change action to 'drop' instead."
+  - **Specific Line Numbers**: Error message lists all line numbers with invalid rules for quick identification and correction
+  - **Consistent Pattern**: Validation follows same pattern as existing duplicate SID check (runs immediately after SID validation, before variable validation)
+  - **User Safety**: Prevents accidentally saving and deploying invalid configurations to AWS
+
+### Technical Implementation
+- **Rule Analyzer**: Added `check_reject_on_ip_protocol()` method to scan rules for IP protocol + reject action combination
+- **Conflict Categories**: Added 'reject_ip_protocol' category to conflicts dictionary for proper tracking and display
+- **Report Generation**: Enhanced both `generate_analysis_report()` and `generate_html_report()` with reject on IP protocol section
+- **File Manager**: Added validation check in `save_rules_to_file()` method that raises ValueError if invalid rules detected
+- **Integration Points**: Validation triggered in two locations for comprehensive coverage:
+  1. Rule analyzer - Non-blocking advisory check during rule analysis
+  2. File save - Blocking check preventing invalid configuration from being saved
+
+### User Impact
+- **Deployment Safety**: Prevents invalid rules from being deployed to AWS Network Firewall
+- **Clear Feedback**: Users receive immediate, specific guidance on which rules need to be corrected
+- **Two-Phase Detection**: Advisory check in analyzer + mandatory check on save provides flexibility while ensuring safety
+- **Time Savings**: Catches configuration errors before attempting AWS deployment, avoiding deployment failures
+
+---
+
 ## Version 1.19.3 - November 27, 2025
 
 ### Flow Tester Bug Fix (v1.0.3) - Line Order Deconfliction

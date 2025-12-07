@@ -8,7 +8,7 @@ This application provides an intuitive graphical interface for generating Surica
 
 ## Screenshot
 
-![Suricata Rule Generator Interface](screenshot.png)
+![Suricata Rule Generator Interface](images\screenshot.png)
 
 *The main interface showing the color-coded rules table, tabbed editor with Rule Editor and Rule Variables tabs, and comprehensive rule management controls.*
 
@@ -516,6 +516,8 @@ Launch the program to see a blank canvas with the tabbed editor at the bottom. T
 
 ### 📝 Creating Rules
 
+![Blank rule](images\blank_rule.png)
+
 #### Individual Rules
 1. Click in the empty area below existing rules to create a placeholder
 2. Fill in the rule editor fields:
@@ -591,6 +593,8 @@ Rules are color-coded in the table by action type:
 
 ### ⌨️ Keyboard Shortcuts
 
+![Keyboard Shortcuts](images\shortcuts.png)
+
 > 💡 **Pro tip:** Learn these shortcuts to work more efficiently!
 
 - **Ctrl+Z**: Undo last change
@@ -612,6 +616,9 @@ Rules are color-coded in the table by action type:
 ## Advanced Usage
 
 ### 📦 Bulk Domain Import
+
+![Bulk Domain Import](images\bulk_domain_import.png)
+
 1. Go to **File > Import Domain List**
 2. Select a .txt file containing one domain per line
 3. Configure the import settings:
@@ -639,6 +646,8 @@ Rules are color-coded in the table by action type:
 ### 📥 Import Stateful Rule Group *(New in v1.18.7)*
 
 Import existing AWS Network Firewall stateful rule groups directly from AWS for editing and enhancement:
+
+![Import rule group](images\import_rule_group.png)
 
 #### Generating the JSON File
 
@@ -703,6 +712,8 @@ For complete AWS CLI documentation, see: [AWS CLI describe-rule-group reference]
 
 ### 🔢 SID Management
 
+![SID Management](images\sid.png)
+
 > 💡 **Managing lots of rules?** Use SID Management to bulk renumber rules and avoid conflicts.
 
 - **Tools > SID Management**: Open bulk SID renumbering dialog
@@ -735,6 +746,8 @@ For complete AWS CLI documentation, see: [AWS CLI describe-rule-group reference]
 
 > 📝 **Need an audit trail?** Enable Change Tracking to log all operations with timestamps and detailed history.
 
+![Change Tracking](images\history.png)
+
 - **Tools > Enable Change Tracking**: Toggle comprehensive change tracking on/off
 - **Change History Tab**: View detailed audit trail of all operations
 - **Automatic Headers**: Files include creation and modification timestamps when tracking enabled
@@ -746,6 +759,8 @@ For complete AWS CLI documentation, see: [AWS CLI describe-rule-group reference]
 ### 💻 Advanced Editor *(New in v1.19.0)*
 
 The Advanced Editor provides a powerful IDE-style text interface for users who prefer direct rule editing:
+
+![Advanced Editor](images\advanced_editor.png)
 
 #### Accessing the Advanced Editor
 - **Tools > Advanced Editor** (Ctrl+E)
@@ -779,6 +794,9 @@ The Advanced Editor provides a powerful IDE-style text interface for users who p
 - **Go to Line**: Ctrl+G for quick navigation
 
 #### Find and Replace
+
+![Find and Replace](images\replace.png)
+
 - **Unified Dialog**: Ctrl+F opens comprehensive Find and Replace dialog
 - **Field-Specific**: Search in specific fields (message, content, networks, ports, SID, protocol, or all)
 - **Action Filtering**: Include/exclude pass, drop, reject, alert rules and comments
@@ -932,6 +950,9 @@ Rules are saved in standard text format (.suricata extension) with:
 ---
 
 ## Rule Conflict Analysis
+
+![Rule Analysis](images\analysis.png)
+
 
 > 🔍 **Analyze your rules** to detect shadowing and potential conflicts before deployment.
 

@@ -93,6 +93,18 @@ class FileManager:
         if duplicate_sids:
             raise ValueError(f"Duplicate SIDs found: {', '.join(map(str, duplicate_sids))}")
         
+        # Check for reject actions on IP protocol rules (AWS Network Firewall restriction)
+        invalid_ip_rules = []
+        for i, rule in enumerate(rules):
+            if not getattr(rule, 'is_comment', False) and not getattr(rule, 'is_blank', False):
+                if rule.protocol.lower() == 'ip' and rule.action.lower() == 'reject':
+                    line_num = i + 1
+                    invalid_ip_rules.append(line_num)
+        
+        if invalid_ip_rules:
+            lines_str = ', '.join(map(str, invalid_ip_rules))
+            raise ValueError(f"AWS Network Firewall does not allow REJECT action on IP protocol rules. Invalid rules found at line(s): {lines_str}. Change action to 'drop' instead.")
+        
         # Variable validation
         used_vars = self.scan_rules_for_variables(rules)
         undefined_vars = [var for var in used_vars if var not in variables or not variables[var].strip()]

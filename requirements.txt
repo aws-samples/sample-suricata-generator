@@ -1,0 +1,22 @@
+# Suricata Rule Generator - Python Requirements
+#
+# Core application uses only Python standard library modules:
+# - tkinter (usually included with Python)
+# - re, os, json, ipaddress, typing, urllib
+#
+# Optional dependencies for enhanced features:
+
+# Advanced Editor with Code Folding (optional)
+# Required for Tools > Advanced Editor (Ctrl+E) to use wxPython/Scintilla-based editor
+# If not installed, Advanced Editor will prompt user with installation instructions
+# The main application works fine without this - only needed for Advanced Editor
+wxPython>=4.2.0
+
+# Installation:
+# pip install -r requirements.txt
+#
+# Or install wxPython separately:
+# pip install wxPython
+#
+# Note: wxPython is only required if you want to use the Advanced Editor feature.
+# The main tkinter-based application works without it.

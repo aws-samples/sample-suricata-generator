@@ -1,61 +1,106 @@
-import tkinter as tk
-from tkinter import ttk, messagebox, simpledialog
-import json
+#!/usr/bin/env python3
+"""
+Advanced Editor for Suricata Rule Generator
+Uses wxPython/Scintilla for professional code editing with native code folding
+
+Launched as subprocess from main tkinter application.
+Usage: python advanced_editor.py <input_json> <output_json>
+"""
+
+import sys
 import os
+import json
 import re
-from typing import List, Dict, Optional, Tuple
-from suricata_rule import SuricataRule
-from constants import SuricataConstants
+
+# Try to import wxPython
+try:
+    import wx
+    import wx.stc as stc
+    HAS_WXPYTHON = True
+except ImportError:
+    HAS_WXPYTHON = False
+    print("ERROR: wxPython not installed. Cannot launch advanced editor.")
+    print("Install with: pip install wxPython")
+
+# Import constants and rule analyzer (reuse from main app)
+try:
+    from constants import SuricataConstants
+    from rule_analyzer import RuleAnalyzer
+    from suricata_rule import SuricataRule
+    HAS_RULE_ANALYZER = True
+except ImportError:
+    # Minimal fallback
+    class SuricataConstants:
+        SUPPORTED_ACTIONS = ['pass', 'alert', 'drop', 'reject']
+        SUPPORTED_PROTOCOLS = ['tcp', 'udp', 'icmp', 'ip', 'http', 'tls', 'dns', 
+                              'dhcp', 'ftp', 'smb', 'ssh', 'smtp']
+        SID_MIN = 1
+        SID_MAX = 999999999
+    HAS_RULE_ANALYZER = False
 
 
-class AdvancedEditor:
-    """Advanced text-based editor for Suricata rules with Advanced IDE-like features"""
+def main():
+    """Entry point for standalone subprocess launch"""
+    if len(sys.argv) < 3:
+        print("Usage: python advanced_editor.py <input_json> <output_json>")
+        sys.exit(1)
     
-    def __init__(self, parent, rules, variables, main_app=None):
-        """Initialize the Advanced Editor
+    input_file = sys.argv[1]
+    output_file = sys.argv[2]
+    
+    if not HAS_WXPYTHON:
+        print("ERROR: wxPython not installed. Cannot launch advanced editor.")
+        print("Install with: pip install wxPython")
+        sys.exit(2)
+    
+    # Load input data
+    try:
+        with open(input_file, 'r', encoding='utf-8') as f:
+            editor_data = json.load(f)
+    except Exception as e:
+        print(f"ERROR loading input file: {e}")
+        sys.exit(3)
+    
+    # Launch wxPython application
+    app = wx.App()
+    editor = AdvancedEditorWx(None, editor_data, output_file)
+    result = editor.ShowModal()
+    
+    # Exit with appropriate code
+    if result == wx.ID_OK:
+        sys.exit(0)  # Success
+    else:
+        sys.exit(1)  # Cancelled
+
+
+class AdvancedEditorWx(wx.Dialog):
+    """Advanced Editor using wxPython/Scintilla with code folding"""
+    
+    def __init__(self, parent, editor_data, output_file):
+        super().__init__(
+            parent,
+            title="Advanced Editor - Suricata Rule Generator",
+            size=(1000, 700),
+            style=wx.DEFAULT_DIALOG_STYLE | wx.RESIZE_BORDER | wx.MAXIMIZE_BOX
+        )
         
-        Args:
-            parent: Parent window (main application root)
-            rules: List of SuricataRule objects
-            variables: Dictionary of variables
-            main_app: Reference to main SuricataRuleGenerator instance (for validation methods)
-        """
-        self.parent = parent
-        self.main_app = main_app  # Store reference to main app for validation methods
-        self.rules = rules.copy()  # Work on a copy
-        self.variables = variables.copy()
-        self.original_rules = rules.copy()  # Keep original for cancel
-        self.original_variables = variables.copy()
-        self.result = None  # Will contain rules if OK clicked
+        # Store data
+        self.editor_data = editor_data
+        self.rules = editor_data['rules']
+        self.variables = editor_data['variables']
+        self.output_file = output_file
         self.modified = False
         self.keywords_data = None
         
-        # Create modal dialog
-        self.dialog = tk.Toplevel(parent)
-        self.dialog.title("Advanced Editor")
-        self.dialog.geometry("1000x700")
-        self.dialog.transient(parent)
-        self.dialog.grab_set()
-        self.dialog.resizable(True, True)
-        
-        # Center the dialog
-        self.dialog.update_idletasks()
-        x = parent.winfo_rootx() + (parent.winfo_width() - 1000) // 2
-        y = parent.winfo_rooty() + (parent.winfo_height() - 700) // 2
-        self.dialog.geometry(f"+{x}+{y}")
-        
-        # Track undo/redo
-        self.undo_stack = []
-        self.redo_stack = []
-        
-        # Dark mode state
+        # UI state
         self.dark_mode = False
         
         # Search state
+        self.search_active = False
         self.search_term = ""
+        self.replace_term = ""
         self.search_results = []  # List of (line_num, start_col, end_col, matched_text)
         self.current_search_index = -1
-        self.search_active = False
         self.search_field = "all"
         
         # Search configuration
@@ -73,582 +118,571 @@ class AdvancedEditor:
             'regex': False
         }
         
-        # Auto-complete state
-        self.autocomplete_window = None
-        self.autocomplete_delay_id = None
-        self.autocomplete_suppressed = False  # Flag to suppress autocomplete after Escape
+        # Validation storage for tooltips
+        self.validation_errors = {}  # {line_num: [(start_col, end_col, msg)]}
+        self.validation_warnings = {}
         
-        # Real-time validation state
-        self.validation_delay_id = None
-        
-        # Tooltip state
-        self.tooltip_window = None
-        self.tooltip_delay_id = None
-        self.last_tooltip_pos = None
+        # Initialize timers (used for debounced updates)
+        self.validation_timer = None
+        self.fold_timer = None
+        self.coloring_timer = None
         
         # Load content keywords
         self.load_content_keywords()
         
-        # Setup UI
+        # Build UI
         self.setup_ui()
         
-        # Convert rules to text and populate editor
+        # Populate with rules
         self.populate_editor()
         
-        # Mark as unmodified initially
-        self.modified = False
-        self.update_status_bar()
+        # Center on screen
+        self.Centre()
         
-        # Handle window close
-        self.dialog.protocol("WM_DELETE_WINDOW", self.on_window_close)
+        # Focus editor
+        self.editor.SetFocus()
+    
+    def setup_ui(self):
+        """Create the UI layout"""
+        # Main panel
+        panel = wx.Panel(self)
+        main_sizer = wx.BoxSizer(wx.VERTICAL)
         
-        # Wait for dialog to close
-        self.dialog.wait_window()
+        # Create Scintilla editor
+        self.editor = stc.StyledTextCtrl(panel)
+        
+        # Configure editor basics
+        self.setup_editor_config()
+        self.setup_margins()
+        self.setup_folding()
+        self.setup_indicators()
+        self.setup_events()
+        
+        main_sizer.Add(self.editor, 1, wx.EXPAND | wx.ALL, 5)
+        
+        # Status bar
+        self.status_bar = self.create_status_bar(panel)
+        main_sizer.Add(self.status_bar, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 5)
+        
+        # Button bar
+        button_sizer = self.create_button_bar(panel)
+        main_sizer.Add(button_sizer, 0, wx.EXPAND | wx.ALL, 5)
+        
+        panel.SetSizer(main_sizer)
+    
+    def setup_editor_config(self):
+        """Configure basic editor properties"""
+        # Font
+        if wx.Platform == '__WXMSW__':
+            face = 'Consolas'
+        elif wx.Platform == '__WXMAC__':
+            face = 'Monaco'
+        else:
+            face = 'Monospace'
+        
+        font = wx.Font(10, wx.FONTFAMILY_TELETYPE, wx.FONTSTYLE_NORMAL,
+                      wx.FONTWEIGHT_NORMAL, faceName=face)
+        self.editor.StyleSetFont(stc.STC_STYLE_DEFAULT, font)
+        
+        # Tab settings
+        self.editor.SetTabWidth(4)
+        self.editor.SetUseTabs(False)  # Use spaces
+        
+        # Undo
+        self.editor.SetUndoCollection(True)
+        self.editor.EmptyUndoBuffer()
+        
+        # Line wrapping (off)
+        self.editor.SetWrapMode(stc.STC_WRAP_NONE)
+        
+        # Caret (cursor) settings
+        self.editor.SetCaretLineVisible(True)
+        self.editor.SetCaretLineBackground(wx.Colour(232, 232, 255))
+        
+        # Selection colors
+        self.editor.SetSelBackground(True, wx.Colour(0, 120, 215))
+        self.editor.SetSelForeground(True, wx.WHITE)
+        
+        # Configure autocomplete
+        self.editor.AutoCompSetIgnoreCase(True)  # Case-insensitive matching
+        self.editor.AutoCompSetMaxHeight(15)  # Show up to 15 items
+        self.editor.AutoCompSetMaxWidth(0)  # Auto width
+        
+        # Configure bracket matching styles
+        self.editor.StyleSetForeground(stc.STC_STYLE_BRACELIGHT, wx.Colour(0, 150, 0))
+        self.editor.StyleSetBackground(stc.STC_STYLE_BRACELIGHT, wx.Colour(200, 255, 200))
+        self.editor.StyleSetBold(stc.STC_STYLE_BRACELIGHT, True)
+        self.editor.StyleSetForeground(stc.STC_STYLE_BRACEBAD, wx.RED)
+        self.editor.StyleSetBold(stc.STC_STYLE_BRACEBAD, True)
+        
+        # Enable zoom with Ctrl+MouseWheel
+        self.editor.SetZoom(0)  # Start at default zoom level
+        
+        # Clear Scintilla's default key commands for Ctrl+F, Ctrl+H, Ctrl+G
+        # This prevents Scintilla from consuming these keys before our handlers see them
+        self.editor.CmdKeyClear(ord('F'), stc.STC_KEYMOD_CTRL)
+        self.editor.CmdKeyClear(ord('H'), stc.STC_KEYMOD_CTRL)
+        self.editor.CmdKeyClear(ord('G'), stc.STC_KEYMOD_CTRL)
+    
+    def setup_margins(self):
+        """Setup line numbers and fold margins"""
+        # Line numbers margin (margin 0)
+        self.editor.SetMarginType(0, stc.STC_MARGIN_NUMBER)
+        self.editor.SetMarginWidth(0, 50)
+        
+        # Fold margin will be configured in setup_folding
+    
+    def setup_folding(self):
+        """Configure code folding - THE KEY NEW FEATURE"""
+        # Enable folding
+        self.editor.SetProperty("fold", "1")
+        
+        # Setup fold margin (margin 2)
+        self.editor.SetMarginType(2, stc.STC_MARGIN_SYMBOL)
+        self.editor.SetMarginMask(2, stc.STC_MASK_FOLDERS)
+        self.editor.SetMarginWidth(2, 16)
+        self.editor.SetMarginSensitive(2, True)
+        
+        # Define fold markers - box style (like Notepad++)
+        self.editor.MarkerDefine(stc.STC_MARKNUM_FOLDEROPEN, stc.STC_MARK_BOXMINUS)
+        self.editor.MarkerDefine(stc.STC_MARKNUM_FOLDER, stc.STC_MARK_BOXPLUS)
+        self.editor.MarkerDefine(stc.STC_MARKNUM_FOLDERSUB, stc.STC_MARK_VLINE)
+        self.editor.MarkerDefine(stc.STC_MARKNUM_FOLDERTAIL, stc.STC_MARK_LCORNER)
+        self.editor.MarkerDefine(stc.STC_MARKNUM_FOLDEREND, stc.STC_MARK_BOXPLUSCONNECTED)
+        self.editor.MarkerDefine(stc.STC_MARKNUM_FOLDEROPENMID, stc.STC_MARK_BOXMINUSCONNECTED)
+        self.editor.MarkerDefine(stc.STC_MARKNUM_FOLDERMIDTAIL, stc.STC_MARK_TCORNER)
+        
+        # Set fold margin colors
+        self.editor.SetFoldMarginColour(True, wx.Colour(240, 240, 240))
+        self.editor.SetFoldMarginHiColour(True, wx.WHITE)
+    
+    def setup_indicators(self):
+        """Setup validation indicators (error/warning underlines and backgrounds)"""
+        # Indicator 0: Error squiggle (red underline)
+        self.editor.IndicatorSetStyle(0, stc.STC_INDIC_SQUIGGLE)
+        self.editor.IndicatorSetForeground(0, wx.RED)
+        self.editor.IndicatorSetOutlineAlpha(0, 255)
+        self.editor.IndicatorSetUnder(0, True)
+        
+        # Indicator 1: Warning squiggle (orange underline)
+        self.editor.IndicatorSetStyle(1, stc.STC_INDIC_SQUIGGLE)
+        self.editor.IndicatorSetForeground(1, wx.Colour(255, 165, 0))
+        self.editor.IndicatorSetOutlineAlpha(1, 255)
+        self.editor.IndicatorSetUnder(1, True)
+        
+        # Indicator 2: Search highlights (yellow box)
+        self.editor.IndicatorSetStyle(2, stc.STC_INDIC_ROUNDBOX)
+        self.editor.IndicatorSetForeground(2, wx.Colour(255, 255, 0))
+        self.editor.IndicatorSetAlpha(2, 100)
+        
+        # Indicator 3: Error background (red highlight)
+        self.editor.IndicatorSetStyle(3, stc.STC_INDIC_ROUNDBOX)
+        self.editor.IndicatorSetForeground(3, wx.Colour(255, 200, 200))  # Light red
+        self.editor.IndicatorSetAlpha(3, 180)  # More opaque for visibility
+        self.editor.IndicatorSetUnder(3, True)
+        
+        # Indicator 4: Warning background (orange highlight)
+        self.editor.IndicatorSetStyle(4, stc.STC_INDIC_ROUNDBOX)
+        self.editor.IndicatorSetForeground(4, wx.Colour(255, 235, 200))  # Light orange
+        self.editor.IndicatorSetAlpha(4, 160)  # More opaque for visibility
+        self.editor.IndicatorSetUnder(4, True)
+        
+        # Indicators 5-8: SIG type text coloring (traffic light scheme for safety levels)
+        # Indicator 5: Generic/IPONLY (Crimson Red - DANGER: broad matching, risky)
+        self.editor.IndicatorSetStyle(5, stc.STC_INDIC_TEXTFORE)
+        self.editor.IndicatorSetForeground(5, wx.Colour(211, 47, 47))  # #D32F2F - Material Red 700
+        self.editor.IndicatorSetUnder(5, False)
+        
+        # Indicator 6: Specific Protocol/PKT (Amber - CAUTION: flow keywords but limited specificity)
+        self.editor.IndicatorSetStyle(6, stc.STC_INDIC_TEXTFORE)
+        self.editor.IndicatorSetForeground(6, wx.Colour(255, 160, 0))  # #FFA000 - Material Amber 700
+        self.editor.IndicatorSetUnder(6, False)
+        
+        # Indicator 7: Specific Network/Port/APPLAYER (Blue - GOOD: application layer protocols)
+        self.editor.IndicatorSetStyle(7, stc.STC_INDIC_TEXTFORE)
+        self.editor.IndicatorSetForeground(7, wx.Colour(25, 118, 210))  # #1976D2 - Material Blue 700
+        self.editor.IndicatorSetUnder(7, False)
+        
+        # Indicator 8: Specific Protocol + Network/Port/APP_TX (Forest Green - BEST: most specific and safe)
+        self.editor.IndicatorSetStyle(8, stc.STC_INDIC_TEXTFORE)
+        self.editor.IndicatorSetForeground(8, wx.Colour(46, 125, 50))  # #2E7D32 - Material Green 700
+        self.editor.IndicatorSetUnder(8, False)
+    
+    def setup_events(self):
+        """Bind all event handlers"""
+        # Text modification
+        self.editor.Bind(stc.EVT_STC_MODIFIED, self.on_text_modified)
+        
+        # Hover for tooltips
+        self.editor.SetMouseDwellTime(500)  # 500ms hover delay
+        self.editor.Bind(stc.EVT_STC_DWELLSTART, self.on_hover_start)
+        self.editor.Bind(stc.EVT_STC_DWELLEND, self.on_hover_end)
+        
+        # Character added (for auto-close and auto-complete trigger)
+        self.editor.Bind(stc.EVT_STC_CHARADDED, self.on_char_added)
+        
+        # Autocomplete selection (when user picks a suggestion)
+        self.editor.Bind(stc.EVT_STC_AUTOCOMP_SELECTION, self.on_autocomp_selected)
+        
+        # UI updates (cursor movement, etc.)
+        self.editor.Bind(stc.EVT_STC_UPDATEUI, self.on_update_ui)
+        
+        # Margin click (for folding)
+        self.editor.Bind(stc.EVT_STC_MARGINCLICK, self.on_margin_click)
+        
+        # Key down (for special handling)
+        self.editor.Bind(wx.EVT_KEY_DOWN, self.on_key_down)
+        
+        # Char hook - highest priority for capturing Ctrl+F before Scintilla
+        self.Bind(wx.EVT_CHAR_HOOK, self.on_char_hook)
+        
+        # Setup keyboard shortcuts
+        self.setup_accelerators()
+    
+    def setup_accelerators(self):
+        """Setup keyboard shortcuts"""
+        # Define custom IDs for our commands
+        self.ID_FIND = wx.NewIdRef()
+        self.ID_GOTO = wx.NewIdRef()
+        self.ID_COMMENT = wx.NewIdRef()
+        self.ID_SHORTCUTS = wx.NewIdRef()
+        
+        accel_tbl = wx.AcceleratorTable([
+            (wx.ACCEL_CTRL, ord('F'), self.ID_FIND),
+            (wx.ACCEL_CTRL, ord('G'), self.ID_GOTO),
+            (wx.ACCEL_CTRL, ord('/'), self.ID_COMMENT),
+            (wx.ACCEL_NORMAL, wx.WXK_F3, wx.WXK_F3),
+            (wx.ACCEL_NORMAL, wx.WXK_ESCAPE, wx.WXK_ESCAPE),
+        ])
+        self.SetAcceleratorTable(accel_tbl)
+        
+        # Bind handlers
+        self.Bind(wx.EVT_MENU, self.on_find, id=self.ID_FIND)
+        self.Bind(wx.EVT_MENU, self.on_goto_line, id=self.ID_GOTO)
+        self.Bind(wx.EVT_MENU, self.on_toggle_comment, id=self.ID_COMMENT)
     
     def load_content_keywords(self):
-        """Load content keywords from JSON file"""
+        """Load content keywords from JSON - REUSES existing file"""
         try:
+            # Look for content_keywords.json in same directory as this script
             keywords_file = os.path.join(os.path.dirname(__file__), 'content_keywords.json')
             if os.path.exists(keywords_file):
                 with open(keywords_file, 'r', encoding='utf-8') as f:
                     self.keywords_data = json.load(f)
             else:
-                # File doesn't exist - offer to create
-                response = messagebox.askyesnocancel(
-                    "Content Keywords File Issue",
-                    "The content_keywords.json file could not be found.\n\n"
-                    "Auto-complete will work with basic suggestions only:\n"
-                    "- Actions, protocols, networks, ports, directions\n"
-                    "- Content keywords will not have auto-complete suggestions\n\n"
-                    "Continue editing with limited auto-complete?",
-                    icon='warning'
-                )
-                if response is None:  # Cancel
-                    self.dialog.destroy()
-                    return
-                # Continue with basic functionality
                 self.keywords_data = None
         except json.JSONDecodeError:
-            response = messagebox.askyesnocancel(
-                "Content Keywords File Issue",
-                "The content_keywords.json file has invalid JSON format.\n\n"
-                "Auto-complete will work with basic suggestions only.\n\n"
-                "Continue editing with limited auto-complete?",
-                icon='warning'
-            )
-            if response is None:  # Cancel
-                self.dialog.destroy()
-                return
             self.keywords_data = None
-        except Exception as e:
-            response = messagebox.askyesnocancel(
-                "Content Keywords File Issue",
-                f"Error loading content_keywords.json: {str(e)}\n\n"
-                "Auto-complete will work with basic suggestions only.\n\n"
-                "Continue editing?",
-                icon='warning'
-            )
-            if response is None:  # Cancel
-                self.dialog.destroy()
-                return
+        except Exception:
             self.keywords_data = None
-    
-    def setup_ui(self):
-        """Setup the editor UI components"""
-        # Main frame
-        main_frame = ttk.Frame(self.dialog)
-        main_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
-        
-        # Editor frame (with line numbers and text widget)
-        editor_frame = ttk.Frame(main_frame)
-        editor_frame.pack(fill=tk.BOTH, expand=True)
-        
-        # Line numbers
-        self.line_numbers = tk.Text(editor_frame, width=5, padx=5, takefocus=0,
-                                    border=0, background='#F0F0F0', state='disabled',
-                                    wrap='none', font=('Consolas', 10))
-        self.line_numbers.pack(side=tk.LEFT, fill=tk.Y)
-        
-        # Text editor with scrollbars
-        text_scroll_frame = ttk.Frame(editor_frame)
-        text_scroll_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        
-        # Vertical scrollbar
-        self.v_scrollbar = ttk.Scrollbar(text_scroll_frame, orient=tk.VERTICAL)
-        self.v_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
-        
-        # Horizontal scrollbar
-        h_scrollbar = ttk.Scrollbar(text_scroll_frame, orient=tk.HORIZONTAL)
-        h_scrollbar.pack(side=tk.BOTTOM, fill=tk.X)
-        
-        # Text widget
-        self.text_widget = tk.Text(text_scroll_frame, wrap='none',
-                                   font=('Consolas', 10),
-                                   undo=True, maxundo=-1,
-                                   yscrollcommand=self.v_scrollbar.set,
-                                   xscrollcommand=h_scrollbar.set)
-        self.text_widget.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        
-        # Configure tags for validation underlines with background highlighting
-        self.text_widget.tag_config('error', underline=True, underlinefg='red', background='#FFE6E6')
-        self.text_widget.tag_config('warning', underline=True, underlinefg='orange', background='#FFF4E6')
-        
-        # Configure tags for search highlighting
-        self.text_widget.tag_config('search_current', background='#FFFF00')  # Yellow for current match
-        self.text_widget.tag_config('search_other', background='#E0E0E0')    # Light gray for other matches
-        self.text_widget.tag_raise('search_current')  # Ensure search highlights appear above other tags
-        
-        # Configure synchronized scrolling for line numbers and text
-        self.v_scrollbar.config(command=self.on_text_scroll)
-        h_scrollbar.config(command=self.text_widget.xview)
-        self.text_widget.config(yscrollcommand=self.on_text_yscroll)
-        
-        # Sync scrolling between line numbers and text
-        self.text_widget.bind('<KeyPress>', self.on_key_press)
-        self.text_widget.bind('<KeyRelease>', self.on_key_release)
-        self.text_widget.bind('<<Modified>>', self.on_text_modified)
-        self.text_widget.bind('<Button-1>', self.on_click)
-        self.text_widget.bind('<Button-3>', self.on_right_click)  # Right-click context menu
-        self.text_widget.bind('<Motion>', self.on_motion)
-        self.text_widget.bind('<Leave>', self.on_leave)
-        
-        # Keyboard shortcuts
-        self.text_widget.bind('<Control-x>', lambda e: self.cut_text())
-        self.text_widget.bind('<Control-c>', lambda e: self.copy_text())
-        self.text_widget.bind('<Control-v>', lambda e: self.paste_text())
-        self.text_widget.bind('<Control-a>', lambda e: self.select_all_text())
-        self.text_widget.bind('<Control-z>', lambda e: self.undo_action())
-        self.text_widget.bind('<Control-y>', lambda e: self.redo_action())
-        self.text_widget.bind('<Control-g>', lambda e: self.goto_line())
-        self.text_widget.bind('<Control-space>', lambda e: self.trigger_autocomplete())
-        self.text_widget.bind('<Escape>', lambda e: self.on_escape_key())
-        self.text_widget.bind('<Tab>', self.on_tab_key)
-        self.text_widget.bind('<BackSpace>', self.on_backspace_key)
-        
-        # Search shortcuts
-        self.text_widget.bind('<Control-f>', lambda e: self.show_find_replace_dialog())
-        self.text_widget.bind('<F3>', lambda e: self.find_next())
-        self.text_widget.bind('<Shift-F3>', lambda e: self.find_previous())
-        
-        # Comment toggle shortcut
-        self.text_widget.bind('<Control-slash>', lambda e: self.toggle_comment())
-        
-        # Cursor movement bindings to update status bar
-        for key in ['<Left>', '<Right>', '<Up>', '<Down>', '<Home>', '<End>', 
-                    '<Prior>', '<Next>',  # Page Up/Page Down
-                    '<Control-Home>', '<Control-End>']:
-            self.text_widget.bind(key, lambda e: self.text_widget.after_idle(self.update_status_bar), add='+')
-        
-        # Status bar
-        self.status_bar = ttk.Frame(main_frame)
-        self.status_bar.pack(fill=tk.X, pady=(5, 0))
-        
-        self.cursor_label = ttk.Label(self.status_bar, text="Ln 1, Col 1")
-        self.cursor_label.pack(side=tk.LEFT, padx=5)
-        
-        ttk.Separator(self.status_bar, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=5)
-        
-        self.lines_label = ttk.Label(self.status_bar, text="0 lines")
-        self.lines_label.pack(side=tk.LEFT, padx=5)
-        
-        ttk.Separator(self.status_bar, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=5)
-        
-        self.rule_label = ttk.Label(self.status_bar, text="Rule 0/0")
-        self.rule_label.pack(side=tk.LEFT, padx=5)
-        
-        ttk.Separator(self.status_bar, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=5)
-        
-        self.modified_label = ttk.Label(self.status_bar, text="(no changes)")
-        self.modified_label.pack(side=tk.LEFT, padx=5)
-        
-        ttk.Separator(self.status_bar, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=5)
-        
-        self.validation_label = ttk.Label(self.status_bar, text="✓ No errors", foreground="green")
-        self.validation_label.pack(side=tk.LEFT, padx=5)
-        
-        # Buttons
-        button_frame = ttk.Frame(main_frame)
-        button_frame.pack(fill=tk.X, pady=(5, 0))
-        
-        ttk.Button(button_frame, text="Shortcuts", command=self.show_keyboard_shortcuts).pack(side=tk.LEFT)
-        
-        # Dark mode checkbox
-        self.dark_mode_var = tk.BooleanVar(value=False)
-        dark_mode_check = ttk.Checkbutton(button_frame, text="Dark Mode", 
-                                         variable=self.dark_mode_var,
-                                         command=self.toggle_dark_mode)
-        dark_mode_check.pack(side=tk.LEFT, padx=(10, 0))
-        
-        ttk.Button(button_frame, text="Cancel", command=self.on_cancel).pack(side=tk.RIGHT, padx=(5, 0))
-        ttk.Button(button_frame, text="OK", command=self.on_ok).pack(side=tk.RIGHT)
     
     def populate_editor(self):
-        """Convert rules to text and populate the editor"""
+        """Convert rules to text and populate editor"""
         text_lines = []
         
         for rule in self.rules:
-            if getattr(rule, 'is_blank', False):
+            if rule.get('is_blank'):
                 text_lines.append('')
-            elif getattr(rule, 'is_comment', False):
-                text_lines.append(rule.comment_text)
+            elif rule.get('is_comment'):
+                text_lines.append(rule.get('comment_text', ''))
             else:
-                text_lines.append(rule.to_string())
+                text_lines.append(self._rule_to_string(rule))
         
-        # Insert text
-        self.text_widget.insert('1.0', '\n'.join(text_lines))
+        # Set text
+        self.editor.SetText('\n'.join(text_lines))
         
-        # Update line numbers
-        self.update_line_numbers()
+        # Calculate fold levels
+        self.calculate_fold_levels()
+        
+        # Don't apply initial SIG type coloring (disabled by default)
+        # User must check the checkbox to enable it
         
         # Position cursor at start
-        self.text_widget.mark_set('insert', '1.0')
-        self.text_widget.focus_set()
+        self.editor.GotoPos(0)
+        
+        # Clear modified flag
+        self.modified = False
+        
+        # Update status
+        self.update_status_bar()
     
-    def update_line_numbers(self):
-        """Update line numbers display"""
-        self.line_numbers.config(state='normal')
-        self.line_numbers.delete('1.0', 'end')
+    def calculate_fold_levels(self):
+        """
+        Calculate fold levels for code folding.
+        Groups are separated by blank lines and can contain:
+        - Comments only (2+ consecutive comments)
+        - Rules only (2+ consecutive rules)
+        - Comments followed by rules (all in one group starting at first comment)
         
-        line_count = int(self.text_widget.index('end-1c').split('.')[0])
-        line_numbers_text = '\n'.join(str(i) for i in range(1, line_count + 1))
+        When collapsed, only the first line (header) remains visible.
+        """
+        text = self.editor.GetText()
+        lines = text.split('\n')
         
-        self.line_numbers.insert('1.0', line_numbers_text)
-        self.line_numbers.config(state='disabled')
+        if not lines:
+            return
+        
+        fold_level = stc.STC_FOLDLEVELBASE
+        in_fold_group = False
+        
+        for line_num, line in enumerate(lines):
+            stripped = line.strip()
+            is_blank = not stripped
+            is_comment = stripped.startswith('#')
+            is_rule = stripped and not is_comment
+            
+            if is_blank:
+                # Blank line ends any fold group
+                self.editor.SetFoldLevel(line_num, fold_level)
+                in_fold_group = False
+            elif is_comment or is_rule:
+                if not in_fold_group:
+                    # Potential start of new fold group
+                    # Look ahead to see if there's another non-blank line
+                    has_next_content = False
+                    for next_line_num in range(line_num + 1, len(lines)):
+                        next_stripped = lines[next_line_num].strip()
+                        if next_stripped:
+                            has_next_content = True
+                            break
+                        if not next_stripped:
+                            # Hit a blank line, no more content in this group
+                            break
+                    
+                    if has_next_content:
+                        # This is the start of a foldable group
+                        in_fold_group = True
+                        self.editor.SetFoldLevel(line_num, fold_level | stc.STC_FOLDLEVELHEADERFLAG)
+                    else:
+                        # Single line with no following content - no fold
+                        self.editor.SetFoldLevel(line_num, fold_level)
+                else:
+                    # Continuation of fold group
+                    self.editor.SetFoldLevel(line_num, fold_level + 1)
+            else:
+                # Shouldn't reach here, but handle gracefully
+                self.editor.SetFoldLevel(line_num, fold_level)
+    
+    def _rule_to_string(self, rule_dict):
+        """Convert rule dict to Suricata rule string"""
+        if rule_dict.get('is_blank'):
+            return ''
+        elif rule_dict.get('is_comment'):
+            return rule_dict.get('comment_text', '')
+        else:
+            # Use original_options if available for exact formatting
+            if rule_dict.get('original_options'):
+                opts = rule_dict['original_options']
+                # Ensure it ends with semicolon
+                if not opts.endswith(';'):
+                    opts += ';'
+                return (f"{rule_dict['action']} {rule_dict['protocol']} "
+                       f"{rule_dict['src_net']} {rule_dict['src_port']} "
+                       f"{rule_dict['direction']} {rule_dict['dst_net']} "
+                       f"{rule_dict['dst_port']} ({opts})")
+            else:
+                # Fallback reconstruction
+                options = []
+                if rule_dict.get('message'):
+                    options.append(f'msg:"{rule_dict["message"]}"')
+                if rule_dict.get('content'):
+                    options.append(rule_dict['content'])
+                options.append(f"sid:{rule_dict.get('sid', 1)}")
+                options.append(f"rev:{rule_dict.get('rev', 1)}")
+                
+                return (f"{rule_dict['action']} {rule_dict['protocol']} "
+                       f"{rule_dict['src_net']} {rule_dict['src_port']} "
+                       f"{rule_dict['direction']} {rule_dict['dst_net']} "
+                       f"{rule_dict['dst_port']} ({'; '.join(options)};)")
+    
+    def create_status_bar(self, parent):
+        """Create status bar with line/col/rule count"""
+        status_panel = wx.Panel(parent)
+        status_sizer = wx.BoxSizer(wx.HORIZONTAL)
+        
+        # Cursor position label (fixed width)
+        self.cursor_label = wx.StaticText(status_panel, label="Ln 1, Col 1", size=(100, -1))
+        status_sizer.Add(self.cursor_label, 0, wx.ALL, 5)
+        
+        # Separator
+        status_sizer.Add(wx.StaticLine(status_panel, style=wx.LI_VERTICAL), 0, wx.EXPAND | wx.ALL, 5)
+        
+        # Lines label (fixed width)
+        self.lines_label = wx.StaticText(status_panel, label="0 lines", size=(80, -1))
+        status_sizer.Add(self.lines_label, 0, wx.ALL, 5)
+        
+        # Rule count label with moderate width (enough for longest SIG type + small buffer)
+        # Longest SIG types are around 50-60 chars: "Rule 999/999 | Specific Protocol + Specific Network/Port"
+        status_sizer.Add(wx.StaticLine(status_panel, style=wx.LI_VERTICAL), 0, wx.EXPAND | wx.ALL, 5)
+        self.rule_label = wx.StaticText(status_panel, label="Rules: 0", size=(400, -1))
+        status_sizer.Add(self.rule_label, 0, wx.ALL, 5)
+        
+        # Modified label (fixed width)
+        status_sizer.Add(wx.StaticLine(status_panel, style=wx.LI_VERTICAL), 0, wx.EXPAND | wx.ALL, 5)
+        self.modified_label = wx.StaticText(status_panel, label="(no changes)", size=(100, -1))
+        status_sizer.Add(self.modified_label, 0, wx.ALL, 5)
+        
+        # Validation label (fixed width)
+        status_sizer.Add(wx.StaticLine(status_panel, style=wx.LI_VERTICAL), 0, wx.EXPAND | wx.ALL, 5)
+        self.validation_label = wx.StaticText(status_panel, label="✓ No errors", size=(120, -1))
+        self.validation_label.SetForegroundColour(wx.Colour(0, 128, 0))
+        status_sizer.Add(self.validation_label, 0, wx.ALL, 5)
+        
+        status_panel.SetSizer(status_sizer)
+        return status_panel
+    
+    def create_button_bar(self, parent):
+        """Create button bar with OK/Cancel"""
+        button_sizer = wx.BoxSizer(wx.HORIZONTAL)
+        
+        # Shortcuts button
+        shortcuts_btn = wx.Button(parent, label="Shortcuts")
+        shortcuts_btn.Bind(wx.EVT_BUTTON, self.on_show_shortcuts)
+        button_sizer.Add(shortcuts_btn, 0, wx.ALL, 5)
+        
+        # Dark mode checkbox
+        self.dark_mode_cb = wx.CheckBox(parent, label="Dark Mode")
+        self.dark_mode_cb.Bind(wx.EVT_CHECKBOX, self.on_toggle_dark_mode)
+        button_sizer.Add(self.dark_mode_cb, 0, wx.ALL | wx.ALIGN_CENTER_VERTICAL, 5)
+        
+        # SIG type coloring checkbox
+        self.sig_coloring_cb = wx.CheckBox(parent, label="SIG Type Colors")
+        self.sig_coloring_cb.SetValue(False)  # Disabled by default
+        self.sig_coloring_cb.Bind(wx.EVT_CHECKBOX, self.on_toggle_sig_coloring)
+        button_sizer.Add(self.sig_coloring_cb, 0, wx.ALL | wx.ALIGN_CENTER_VERTICAL, 5)
+        
+        # Spacer
+        button_sizer.AddStretchSpacer()
+        
+        # Cancel button
+        cancel_btn = wx.Button(parent, wx.ID_CANCEL, "Cancel")
+        cancel_btn.Bind(wx.EVT_BUTTON, self.on_cancel)
+        button_sizer.Add(cancel_btn, 0, wx.ALL, 5)
+        
+        # OK button
+        ok_btn = wx.Button(parent, wx.ID_OK, "OK")
+        ok_btn.Bind(wx.EVT_BUTTON, self.on_ok)
+        button_sizer.Add(ok_btn, 0, wx.ALL, 5)
+        
+        return button_sizer
     
     def update_status_bar(self):
         """Update status bar information"""
         # Cursor position
-        cursor_pos = self.text_widget.index('insert')
-        line, col = cursor_pos.split('.')
-        self.cursor_label.config(text=f"Ln {line}, Col {int(col) + 1}")
+        pos = self.editor.GetCurrentPos()
+        line_num = self.editor.LineFromPosition(pos)
+        col = self.editor.GetColumn(pos)
+        self.cursor_label.SetLabel(f"Ln {line_num + 1}, Col {col + 1}")
         
         # Total lines
-        line_count = int(self.text_widget.index('end-1c').split('.')[0])
-        self.lines_label.config(text=f"{line_count} lines")
+        line_count = self.editor.GetLineCount()
+        self.lines_label.SetLabel(f"{line_count} lines")
         
-        # Current rule (count non-comment, non-blank lines up to cursor)
-        content = self.text_widget.get('1.0', cursor_pos)
-        lines = content.split('\n')
-        current_line = lines[-1] if lines else ''
+        # Get current line content for SIG type detection
+        current_line = self.editor.GetLine(line_num).rstrip()
         
-        # Count total rules
-        all_content = self.text_widget.get('1.0', 'end-1c')
-        all_lines = all_content.split('\n')
-        total_rules = sum(1 for l in all_lines if l.strip() and not l.strip().startswith('#'))
+        # Rule count and SIG type
+        text = self.editor.GetText()
+        lines = text.split('\n')
+        total_rules = sum(1 for l in lines if l.strip() and not l.strip().startswith('#'))
         
-        # Count rules up to cursor
-        rules_before = sum(1 for l in lines[:-1] if l.strip() and not l.strip().startswith('#'))
+        # SIG type colors for status bar (always colored) - traffic light scheme
+        sig_colors = {
+            'Generic': wx.Colour(211, 47, 47),  # Crimson Red - DANGER
+            'Specific Protocol': wx.Colour(255, 160, 0),  # Amber - CAUTION
+            'Specific Network/Port': wx.Colour(25, 118, 210),  # Blue - GOOD
+            'Specific Protocol + Specific Network/Port': wx.Colour(46, 125, 50)  # Forest Green - BEST
+        }
         
-        # Show search status if active (prioritize over rule position)
-        if self.search_active and self.search_results:
-            self.rule_label.config(text=f"Search: {self.current_search_index + 1}/{len(self.search_results)}")
-        elif current_line.strip() and not current_line.strip().startswith('#'):
+        # Calculate rule position and show SIG type if on a rule line
+        if current_line.strip() and not current_line.strip().startswith('#'):
+            # Count rules before this line
+            rules_before = sum(1 for l in lines[:line_num] if l.strip() and not l.strip().startswith('#'))
             current_rule_num = rules_before + 1
-            self.rule_label.config(text=f"Rule {current_rule_num}/{total_rules}")
-        elif current_line.strip().startswith('#'):
-            self.rule_label.config(text="Comment")
-        elif not current_line.strip():
-            self.rule_label.config(text="Blank")
+            
+            # Try to get SIG type for current line (show actual SIG type name)
+            sig_type_text = ""
+            if HAS_RULE_ANALYZER:
+                try:
+                    # Parse current line as rule
+                    rule = SuricataRule.from_string(current_line.strip())
+                    if rule:
+                        # Get detailed SIG type classification (actual name)
+                        rule_analyzer = RuleAnalyzer()
+                        sig_type = rule_analyzer.get_detailed_suricata_rule_type(rule)
+                        if sig_type:
+                            sig_type_text = f" | {sig_type}"
+                            # Map to color category for status bar coloring
+                            color_category = self._map_detailed_sig_type_to_color(sig_type)
+                            if color_category in sig_colors:
+                                self.rule_label.SetForegroundColour(sig_colors[color_category])
+                except:
+                    pass  # If classification fails, just show rule number
+            
+            # Reset color if no SIG type
+            if not sig_type_text:
+                self.rule_label.SetForegroundColour(wx.BLACK if not self.dark_mode else wx.Colour(212, 212, 212))
+            
+            self.rule_label.SetLabel(f"Rule {current_rule_num}/{total_rules}{sig_type_text}")
         else:
-            self.rule_label.config(text=f"Rule {rules_before}/{total_rules}")
+            # Reset color for non-rule lines
+            self.rule_label.SetForegroundColour(wx.BLACK if not self.dark_mode else wx.Colour(212, 212, 212))
+            
+            if current_line.strip().startswith('#'):
+                self.rule_label.SetLabel("Comment")
+            elif not current_line.strip():
+                self.rule_label.SetLabel("Blank")
+            else:
+                self.rule_label.SetLabel(f"Rules: {total_rules}")
         
         # Modified status
         if self.modified:
-            self.modified_label.config(text="Modified")
+            self.modified_label.SetLabel("Modified")
         else:
-            self.modified_label.config(text="(no changes)")
-    
-    def on_key_press(self, event):
-        """Handle key press events for auto-close brackets and quotes, and smart skipping"""
-        char = event.char
-        keysym = event.keysym
-        
-        # Clear autocomplete suppression on space, semicolon, or new line (new section/context)
-        if char in (' ', ';') or keysym == 'Return':
-            self.autocomplete_suppressed = False
-        
-        # Smart skipping: If typing a closing character that's already at cursor position, skip over it
-        if char in (')', ']', '"'):
-            cursor_pos = self.text_widget.index('insert')
-            next_char = self.text_widget.get(cursor_pos, f'{cursor_pos}+1c')
-            
-            if char == '"':
-                # For quotes, check if next two chars are ";
-                next_two_chars = self.text_widget.get(cursor_pos, f'{cursor_pos}+2c')
-                if next_two_chars == '";':
-                    # Skip over both the quote and semicolon
-                    self.text_widget.mark_set('insert', f'{cursor_pos}+2c')
-                    return 'break'
-            elif next_char == char:
-                # For ) and ], just skip over the matching character
-                self.text_widget.mark_set('insert', f'{cursor_pos}+1c')
-                return 'break'
-        
-        # Auto-close: Let the opening character be inserted normally,
-        # then insert the closing character after it
-        if char == '(':
-            # Insert the closing paren after the opening one is inserted
-            self.text_widget.after(1, lambda: self._insert_closing_char(')'))
-            return  # Don't break - allow ( to be inserted
-        elif char == '[':
-            self.text_widget.after(1, lambda: self._insert_closing_char(']'))
-            return
-        elif char == '"':
-            # Modified: Insert closing quote with semicolon
-            self.text_widget.after(1, lambda: self._insert_closing_char('";'))
-            return
-    
-    def _insert_closing_char(self, closing_char):
-        """Insert closing character and move cursor back"""
-        self.text_widget.insert('insert', closing_char)
-        # Move cursor back by the length of closing_char to position it correctly
-        # For ";", we want cursor between the quotes, so move back 2 characters
-        chars_to_move = len(closing_char)
-        self.text_widget.mark_set('insert', f'insert-{chars_to_move}c')
-    
-    def on_key_release(self, event):
-        """Handle key release for auto-complete"""
-        # Trigger auto-complete after brief delay
-        if self.autocomplete_delay_id:
-            self.text_widget.after_cancel(self.autocomplete_delay_id)
-        
-        # Don't trigger on special keys (except when navigating autocomplete)
-        if event.keysym in ('Shift_L', 'Shift_R', 'Control_L', 'Control_R', 
-                            'Alt_L', 'Alt_R', 'Home', 'End', 'Page_Up', 'Page_Down'):
-            return
-        
-        # Don't trigger autocomplete refresh on arrow keys when autocomplete is visible
-        # (arrow keys are used for navigation within the autocomplete list)
-        if self.autocomplete_window and event.keysym in ('Up', 'Down', 'Left', 'Right'):
-            return
-        
-        # Shorter delay for more responsive autocomplete (100ms instead of 300ms)
-        self.autocomplete_delay_id = self.text_widget.after(100, self.check_autocomplete)
-    
-    def on_tab_key(self, event):
-        """Handle Tab key - accept autocomplete, jump to next semicolon or closing paren in rule options, or insert 4 spaces"""
-        # If autocomplete is visible, accept the selection
-        if self.autocomplete_window and self.autocomplete_listbox:
-            self.accept_autocomplete_from_text()
-            return 'break'
-        
-        # Check if we're inside parentheses (rule options section)
-        cursor_pos = self.text_widget.index('insert')
-        line_num = int(cursor_pos.split('.')[0])
-        col_num = int(cursor_pos.split('.')[1])
-        
-        # Get the entire line content
-        line_content = self.text_widget.get(f'{line_num}.0', f'{line_num}.end')
-        
-        # Check if cursor is between opening and closing parentheses
-        text_before_cursor = line_content[:col_num]
-        text_after_cursor = line_content[col_num:]
-        
-        # Count parentheses to determine if we're inside a rule's options section
-        open_parens_before = text_before_cursor.count('(') - text_before_cursor.count(')')
-        
-        # If we're inside parentheses (more opening than closing before cursor)
-        # and there's a closing paren somewhere after the cursor
-        if open_parens_before > 0 and ')' in text_after_cursor:
-            # Find the next semicolon after the cursor position
-            semicolon_pos = text_after_cursor.find(';')
-            closing_paren_pos = text_after_cursor.find(')')
-            
-            if semicolon_pos != -1:
-                # Move cursor to position after the semicolon
-                new_col = col_num + semicolon_pos + 1
-                self.text_widget.mark_set('insert', f'{line_num}.{new_col}')
-                self.text_widget.see('insert')
-                return 'break'
-            elif closing_paren_pos != -1:
-                # No semicolon found, but there's a closing paren - jump past it
-                new_col = col_num + closing_paren_pos + 1
-                self.text_widget.mark_set('insert', f'{line_num}.{new_col}')
-                self.text_widget.see('insert')
-                return 'break'
-        
-        # Otherwise insert 4 spaces (default behavior)
-        self.text_widget.insert('insert', '    ')
-        return 'break'
-    
-    def on_backspace_key(self, event):
-        """Handle Backspace key - delete pair if cursor is between matching brackets/quotes"""
-        cursor_pos = self.text_widget.index('insert')
-        
-        # Get character before and after cursor
-        char_before = self.text_widget.get(f'{cursor_pos}-1c', cursor_pos)
-        char_after = self.text_widget.get(cursor_pos, f'{cursor_pos}+1c')
-        
-        # Check for matching pairs and delete both if found
-        # For quotes, check for "; pattern
-        if char_before == '"':
-            # Check if next two characters are ";
-            next_two_chars = self.text_widget.get(cursor_pos, f'{cursor_pos}+2c')
-            if next_two_chars == '";':
-                # Delete all three characters: opening quote, closing quote, and semicolon
-                self.text_widget.delete(f'{cursor_pos}-1c', f'{cursor_pos}+2c')
-                return 'break'
-        
-        # Check for () pair
-        if char_before == '(' and char_after == ')':
-            # Delete both characters
-            self.text_widget.delete(f'{cursor_pos}-1c', f'{cursor_pos}+1c')
-            return 'break'
-        
-        # Check for [] pair
-        if char_before == '[' and char_after == ']':
-            # Delete both characters
-            self.text_widget.delete(f'{cursor_pos}-1c', f'{cursor_pos}+1c')
-            return 'break'
-        
-        # Default behavior - let normal backspace work
-        return None
-    
-    def on_click(self, event):
-        """Handle left-click - show tooltip for errors/warnings"""
-        # Get the position under the click
-        x, y = event.x, event.y
-        index = self.text_widget.index(f"@{x},{y}")
-        
-        # Check if clicking on an error or warning
-        tags = self.text_widget.tag_names(index)
-        if 'error' in tags or 'warning' in tags:
-            # Show tooltip immediately for errors/warnings
-            self.show_tooltip_at_index(index)
-        else:
-            # Normal click - just update status bar
-            self.dismiss_tooltip()
-        
-        # Delay status bar update until after tkinter processes the click
-        # and updates the cursor position
-        self.text_widget.after_idle(self.update_status_bar)
-    
-    def on_right_click(self, event):
-        """Handle right-click to show context menu with clipboard and search options"""
-        # Dismiss any existing tooltip first
-        self.dismiss_tooltip()
-        
-        # Get the position under the click
-        x, y = event.x, event.y
-        index = self.text_widget.index(f"@{x},{y}")
-        
-        # Create context menu
-        context_menu = tk.Menu(self.dialog, tearoff=0)
-        
-        # Check if there's selected text
-        has_selection = False
-        try:
-            sel_start = self.text_widget.index(tk.SEL_FIRST)
-            sel_end = self.text_widget.index(tk.SEL_LAST)
-            has_selection = True
-        except tk.TclError:
-            has_selection = False
-        
-        # Cut option (only if there's a selection)
-        if has_selection:
-            context_menu.add_command(label="Cut", command=self.cut_text, accelerator="Ctrl+X")
-        
-        # Copy option (only if there's a selection)
-        if has_selection:
-            context_menu.add_command(label="Copy", command=self.copy_text, accelerator="Ctrl+C")
-        
-        # Paste option (check if clipboard has content)
-        try:
-            clipboard_content = self.dialog.clipboard_get()
-            if clipboard_content:
-                if has_selection:
-                    context_menu.add_separator()
-                context_menu.add_command(label="Paste", command=self.paste_text, accelerator="Ctrl+V")
-        except tk.TclError:
-            # No clipboard content
-            pass
-        
-        # Select All option
-        context_menu.add_separator()
-        context_menu.add_command(label="Select All", command=self.select_all_text, accelerator="Ctrl+A")
-        
-        # Search options
-        context_menu.add_separator()
-        context_menu.add_command(label="Find and Replace...", command=self.show_find_replace_dialog, accelerator="Ctrl+F")
-        
-        if self.search_active and self.search_results:
-            context_menu.add_command(label="Find Next", command=self.find_next, accelerator="F3")
-            context_menu.add_command(label="Find Previous", command=self.find_previous, accelerator="Shift+F3")
-        
-        # Comment toggle option
-        context_menu.add_separator()
-        context_menu.add_command(label="Toggle Comment", command=self.toggle_comment, accelerator="Ctrl+/")
-        
-        # Show error/warning tooltip if clicking on an error/warning
-        tags = self.text_widget.tag_names(index)
-        if 'error' in tags or 'warning' in tags:
-            context_menu.add_separator()
-            context_menu.add_command(label="Show Error Details", command=lambda: self.show_tooltip_at_index(index))
-        
-        # Show the menu at mouse position
-        try:
-            context_menu.tk_popup(event.x_root, event.y_root)
-        finally:
-            context_menu.grab_release()
-    
-    def on_motion(self, event):
-        """Handle mouse motion for hover tooltips"""
-        # Get the position under the mouse
-        x, y = event.x, event.y
-        index = self.text_widget.index(f"@{x},{y}")
-        
-        # Cancel any pending tooltip
-        if self.tooltip_delay_id:
-            self.text_widget.after_cancel(self.tooltip_delay_id)
-            self.tooltip_delay_id = None
-        
-        # Check if we're over the same position as before
-        if self.last_tooltip_pos == index:
-            return
-        
-        self.last_tooltip_pos = index
-        
-        # Dismiss existing tooltip
-        self.dismiss_tooltip()
-        
-        # Schedule tooltip to appear after a delay (500ms)
-        self.tooltip_delay_id = self.text_widget.after(500, lambda: self.show_tooltip_at_index(index))
-    
-    def on_leave(self, event):
-        """Handle mouse leaving the text widget"""
-        self.dismiss_tooltip()
-        if self.tooltip_delay_id:
-            self.text_widget.after_cancel(self.tooltip_delay_id)
-            self.tooltip_delay_id = None
-        self.last_tooltip_pos = None
+            self.modified_label.SetLabel("(no changes)")
     
     def on_text_modified(self, event):
-        """Handle text modification"""
-        if self.text_widget.edit_modified():
+        """Handle text changes"""
+        # Only mark as modified for actual content changes (not just undo/redo operations)
+        if event.GetModificationType() & (stc.STC_MOD_INSERTTEXT | stc.STC_MOD_DELETETEXT):
             self.modified = True
-            self.update_line_numbers()
             self.update_status_bar()
-            self.text_widget.edit_modified(False)
             
-            # Schedule real-time validation with delay
-            if self.validation_delay_id:
-                self.text_widget.after_cancel(self.validation_delay_id)
-            self.validation_delay_id = self.text_widget.after(500, self.perform_realtime_validation)
+            # Schedule validation with delay
+            if self.validation_timer:
+                self.validation_timer.Stop()
+            self.validation_timer = wx.CallLater(500, self.perform_realtime_validation)
+            
+            # Schedule fold level recalculation with delay
+            if self.fold_timer:
+                self.fold_timer.Stop()
+            self.fold_timer = wx.CallLater(500, self.calculate_fold_levels)
+            
+            # Schedule SIG type coloring with delay (if enabled)
+            if self.sig_coloring_cb.GetValue():
+                if self.coloring_timer:
+                    self.coloring_timer.Stop()
+                self.coloring_timer = wx.CallLater(500, self.apply_sig_type_coloring)
     
     def perform_realtime_validation(self):
-        """Perform real-time validation and show wavy underlines"""
-        # Clear all existing error/warning tags
-        self.text_widget.tag_remove('error', '1.0', 'end')
-        self.text_widget.tag_remove('warning', '1.0', 'end')
+        """Real-time validation with indicators"""
+        # Clear previous indicators (squiggles and backgrounds)
+        for indicator_id in [0, 1, 3, 4]:
+            self.editor.SetIndicatorCurrent(indicator_id)
+            self.editor.IndicatorClearRange(0, self.editor.GetLength())
         
-        # Get all content
-        content = self.text_widget.get('1.0', 'end-1c')
-        lines = content.split('\n')
+        # Clear validation storage
+        self.validation_errors = {}
+        self.validation_warnings = {}
+        
+        # Validate each line
+        text = self.editor.GetText()
+        lines = text.split('\n')
         
         total_errors = 0
         total_warnings = 0
         
-        for line_num, line in enumerate(lines, 1):
+        for line_num, line in enumerate(lines):
             line_stripped = line.strip()
             
             # Skip blank lines and comments
@@ -658,28 +692,46 @@ class AdvancedEditor:
             # Validate this line
             errors, warnings = self.validate_line(line, line_num)
             
-            total_errors += len(errors)
-            total_warnings += len(warnings)
+            if errors:
+                self.validation_errors[line_num] = errors
+                total_errors += len(errors)
+            if warnings:
+                self.validation_warnings[line_num] = warnings
+                total_warnings += len(warnings)
             
-            # Apply error underlines
-            for start_col, end_col, error_msg in errors:
-                start_idx = f'{line_num}.{start_col}'
-                end_idx = f'{line_num}.{end_col}'
-                self.text_widget.tag_add('error', start_idx, end_idx)
+            # Apply error indicators (red squiggle + background)
+            for start_col, end_col, msg in errors:
+                pos = self.editor.PositionFromLine(line_num) + start_col
+                length = end_col - start_col
+                # Apply squiggle underline
+                self.editor.SetIndicatorCurrent(0)
+                self.editor.IndicatorFillRange(pos, length)
+                # Apply background highlight
+                self.editor.SetIndicatorCurrent(3)
+                self.editor.IndicatorFillRange(pos, length)
             
-            # Apply warning underlines
-            for start_col, end_col, warning_msg in warnings:
-                start_idx = f'{line_num}.{start_col}'
-                end_idx = f'{line_num}.{end_col}'
-                self.text_widget.tag_add('warning', start_idx, end_idx)
+            # Apply warning indicators (orange squiggle + background)
+            for start_col, end_col, msg in warnings:
+                pos = self.editor.PositionFromLine(line_num) + start_col
+                length = end_col - start_col
+                # Apply squiggle underline
+                self.editor.SetIndicatorCurrent(1)
+                self.editor.IndicatorFillRange(pos, length)
+                # Apply background highlight
+                self.editor.SetIndicatorCurrent(4)
+                self.editor.IndicatorFillRange(pos, length)
         
         # Update validation status in status bar
         if total_errors > 0:
-            self.validation_label.config(text=f"✗ {total_errors} errors", foreground="red")
+            error_text = "error" if total_errors == 1 else "errors"
+            self.validation_label.SetLabel(f"✗ {total_errors} {error_text}")
+            self.validation_label.SetForegroundColour(wx.Colour(255, 0, 0))  # Red
         elif total_warnings > 0:
-            self.validation_label.config(text=f"⚠ {total_warnings} warnings", foreground="orange")
+            self.validation_label.SetLabel(f"⚠ {total_warnings} warnings")
+            self.validation_label.SetForegroundColour(wx.Colour(255, 165, 0))  # Orange
         else:
-            self.validation_label.config(text="✓ No errors", foreground="green")
+            self.validation_label.SetLabel("✓ No errors")
+            self.validation_label.SetForegroundColour(wx.Colour(0, 128, 0))  # Green
     
     def validate_line(self, line, line_num):
         """Validate a single line and return error/warning positions
@@ -694,11 +746,8 @@ class AdvancedEditor:
         if not line_stripped or line_stripped.startswith('#'):
             return errors, warnings
         
-        # Parse the line into tokens - handle brackets specially to avoid splitting on commas inside brackets
+        # Parse the line into tokens
         tokens = self._parse_rule_tokens(line_stripped)
-        
-        # Don't show errors for incomplete rules - only validate what's been typed
-        # This allows progressive typing without constant red underlines
         
         # Find positions of each token in the original line
         current_pos = 0
@@ -710,129 +759,206 @@ class AdvancedEditor:
                 token_positions.append((start, end, token))
                 current_pos = end
         
-        # Validate action (first word) - only if it's complete
+        # Validate action (first word)
         if len(token_positions) > 0:
             start, end, action = token_positions[0]
-            # Only validate if it looks like a complete word (not being typed)
-            # Check if there's a space after it or if it's followed by another token
             if len(token_positions) > 1 or (len(tokens) == 1 and end < len(line) and line[end:].strip()):
                 if action.lower() not in ['pass', 'alert', 'drop', 'reject']:
                     errors.append((start, end, f"Invalid action: {action}"))
         
-        # Validate protocol (second word) - only if action is valid and protocol is complete
+        # Validate protocol (second word)
         if len(token_positions) > 1:
             start, end, protocol = token_positions[1]
-            # Only validate if there's a space after it or another token follows
             if len(token_positions) > 2 or (len(tokens) == 2 and end < len(line) and line[end:].strip()):
                 if protocol.lower() not in [p.lower() for p in SuricataConstants.SUPPORTED_PROTOCOLS]:
                     errors.append((start, end, f"Invalid protocol: {protocol}"))
         
-        # Validate source network (3rd word) - only if we have that many tokens
+        # Validate source network
         if len(token_positions) > 2:
             start, end, src_net = token_positions[2]
-            # Only validate if it's complete (followed by another token or space)
             if len(token_positions) > 3 or (end < len(line) and line[end:].strip()):
                 if not self._validate_network_format_silent(src_net):
                     errors.append((start, end, f"Invalid network: {src_net}"))
         
-        # Validate direction (should be -> or <>) - only if we have that many tokens
+        # Validate direction
         if len(token_positions) > 4:
             start, end, direction = token_positions[4]
-            # Only validate if it's complete (followed by another token or space)
             if len(token_positions) > 5 or (end < len(line) and line[end:].strip()):
                 if direction not in ['->', '<>']:
                     errors.append((start, end, f"Invalid direction: {direction}"))
         
-        # Validate source port (4th token, index 3) - only if we have that many tokens
+        # Validate source port - always validate once we have it
         if len(token_positions) > 3:
             start, end, src_port = token_positions[3]
-            # Only validate if it's complete (followed by another token or space)
-            if len(token_positions) > 4 or (end < len(line) and line[end:].strip()):
-                # Don't validate if it looks like a network (has slash or starts with bracket containing dots)
-                if not ('/' in src_port or (src_port.startswith('[') and '.' in src_port)):
-                    if not self._validate_port_format(src_port):
-                        errors.append((start, end, f"Invalid port: {src_port}"))
+            # Skip validation if it's clearly a network (has CIDR notation)
+            if '/' in src_port:
+                pass  # This is a network, not a port
+            else:
+                # Validate port - always check once token exists
+                if not self._validate_port_format(src_port):
+                    errors.append((start, end, f"Invalid port: {src_port}"))
         
-        # Validate destination network (6th token, index 5) - only if we have that many tokens
+        # Validate destination network - always validate once we have it
         if len(token_positions) > 5:
             start, end, dst_net = token_positions[5]
-            # Only validate if it's complete (followed by another token or space)
-            if len(token_positions) > 6 or (end < len(line) and line[end:].strip()):
-                # Don't validate if it looks like a port (all digits or bracketed port range)
-                if not (dst_net.isdigit() or (dst_net.startswith('[') and ':' in dst_net)):
-                    if not self._validate_network_format_silent(dst_net):
-                        errors.append((start, end, f"Invalid network: {dst_net}"))
+            # Skip if it looks like a port (single number or bracketed port range)
+            if dst_net.isdigit() or (dst_net.startswith('[') and ':' in dst_net and not '.' in dst_net):
+                pass  # This is a port, not a network
+            else:
+                # Validate network - always check once token exists
+                if not self._validate_network_format_silent(dst_net):
+                    errors.append((start, end, f"Invalid network: {dst_net}"))
         
-        # Validate destination port (7th token, index 6) - only if we have that many tokens
+        # Validate destination port - always validate once we have it
         if len(token_positions) > 6:
             start, end, dest_port = token_positions[6]
-            # Only validate if it's complete (followed by another token or space)
-            if len(token_positions) > 7 or (end < len(line) and line[end:].strip()):
-                # Don't validate if it looks like a network (has slash or bracketed CIDRs)
-                if not ('/' in dest_port or (dest_port.startswith('[') and '.' in dest_port)):
-                    if not self._validate_port_format(dest_port):
-                        errors.append((start, end, f"Invalid port: {dest_port}"))
+            # Skip validation if it's clearly a network (has CIDR notation)
+            if '/' in dest_port:
+                pass  # This is a network, not a port
+            else:
+                # Validate port - always check once token exists
+                if not self._validate_port_format(dest_port):
+                    errors.append((start, end, f"Invalid port: {dest_port}"))
         
-        # Check for parentheses and validate content keywords
+        # Check for parentheses and validate SID
         if '(' in line and ')' in line:
             paren_start = line.find('(')
             paren_end = line.rfind(')')
             content_section = line[paren_start+1:paren_end]
             
-            # Check for SID (required) - only if parentheses are closed
-            if 'sid:' not in content_section.lower():
-                # Only show this error if the rule looks complete (has closing paren)
-                # Don't flag incomplete rules
-                pass  # Don't error on missing SID for incomplete rules
-            else:
-                # Validate SID format
+            # Validate SID format
+            if 'sid:' in content_section.lower():
                 sid_match = re.search(r'sid:\s*(\d+)', content_section, re.IGNORECASE)
                 if sid_match:
                     sid_value = int(sid_match.group(1))
                     if sid_value < SuricataConstants.SID_MIN or sid_value > SuricataConstants.SID_MAX:
-                        # Find position of sid value in original line
                         sid_start = line.find(sid_match.group(0), paren_start)
                         sid_end = sid_start + len(sid_match.group(0))
                         errors.append((sid_start, sid_end, f"SID must be between {SuricataConstants.SID_MIN}-{SuricataConstants.SID_MAX}"))
             
-            # Validate unknown keywords (warnings only) - only if content_keywords.json is loaded
-            if self.keywords_data:
-                # Split content section by semicolons to get individual keyword-value pairs
-                # Then extract the keyword name from each pair
-                known_keywords = [kw.get('name', '') for kw in self.keywords_data.get('keywords', [])]
+            # Check for missing semicolons and invalid keyword syntax
+            # Parse through content more carefully to detect:
+            # 1. Keywords missing semicolons (e.g., "to_client sid:100" - missing ; after to_client)
+            # 2. Keywords with colons but no values (e.g., "sid;")
+            
+            # First, check if content section ends with semicolon
+            content_stripped = content_section.strip()
+            if content_stripped and not content_stripped.endswith(';'):
+                # Content doesn't end with semicolon
+                error_pos = paren_end
+                errors.append((error_pos - 1, error_pos, 
+                             "Missing semicolon - all keywords must end with ';'"))
+            
+            # Look for keywords that appear to be missing semicolons in the middle
+            # Pattern: look for spaces followed by keyword names (indicating missing semicolon before)
+            # This catches: "value1, value2 keyword:" where semicolon is missing after value2
+            missing_semicolon_pattern = r'([a-zA-Z_]\w*)\s+(\w+(?:\.\w+)?):(?=\S)'
+            for match in re.finditer(missing_semicolon_pattern, content_section):
+                # match.group(1) is the value without semicolon
+                # match.group(2) is the next keyword
+                value_without_semicolon = match.group(1)
+                next_keyword = match.group(2)
                 
-                # Split by semicolon to get each statement
+                # Position of the value that's missing semicolon
+                value_pos = paren_start + 1 + match.start(1)
+                value_end = value_pos + len(value_without_semicolon)
+                
+                errors.append((value_end, value_end + 1,
+                             f"Missing semicolon after '{value_without_semicolon}'"))
+            
+            # Check for keywords with colon but no value (e.g., "sid;" or "sid:")
+            empty_keyword_pattern = r'(\w+(?:\.\w+)?):(?:\s*;|\s*$|\s*\))'
+            for match in re.finditer(empty_keyword_pattern, content_section):
+                keyword_name = match.group(1)
+                # Skip 'msg' keyword since it might have empty string
+                if keyword_name.lower() != 'msg':
+                    keyword_pos = paren_start + 1 + match.start()
+                    keyword_end = keyword_pos + len(keyword_name) + 1  # Include colon
+                    errors.append((keyword_pos, keyword_end,
+                                 f"Keyword '{keyword_name}' requires a value"))
+            
+            # Validate keywords and their values
+            if self.keywords_data:
+                known_keywords = [kw.get('name', '') for kw in self.keywords_data.get('keywords', [])]
                 statements = content_section.split(';')
                 current_pos = 0
                 
                 for statement in statements:
                     statement = statement.strip()
                     if not statement:
-                        current_pos += 1  # Account for semicolon
+                        current_pos += 1
                         continue
                     
-                    # Extract keyword name (part before colon, or entire statement if no colon)
+                    # Extract keyword name and value
                     if ':' in statement:
-                        # Keyword with value: "flow:to_client, stateless" -> keyword is "flow"
-                        keyword = statement.split(':')[0].strip()
+                        keyword = statement.split(':', 1)[0].strip()
+                        value_part = statement.split(':', 1)[1].strip() if len(statement.split(':', 1)) > 1 else ''
                     else:
-                        # Standalone keyword (no colon): "noalert" -> keyword is "noalert"
                         keyword = statement.strip()
+                        value_part = ''
                     
-                    # Check if this is a valid keyword
+                    # Check if valid keyword name
                     if keyword and keyword.lower() not in [k.lower() for k in known_keywords]:
-                        # Find position of this keyword in the original line
-                        # Need to find it after paren_start and at current_pos offset
                         search_start = paren_start + current_pos
                         keyword_pos = line.find(keyword, search_start)
                         if keyword_pos != -1:
                             warnings.append((keyword_pos, keyword_pos + len(keyword), 
                                            f"Unknown keyword: {keyword}"))
+                    # Validate keyword value if keyword has defined values
+                    elif keyword and value_part:
+                        # Find keyword definition
+                        keyword_def = next((kw for kw in self.keywords_data.get('keywords', []) 
+                                          if kw.get('name', '').lower() == keyword.lower()), None)
+                        
+                        if keyword_def and keyword_def.get('values'):
+                            # Get valid values for this keyword
+                            valid_values = [v.lower() for v in keyword_def.get('values', [])]
+                            
+                            # Check if syntax has comma-separated parameters (e.g., "geoip:<direction>,<country_code>")
+                            # In these cases, only validate the first part before the comma
+                            syntax = keyword_def.get('syntax', '')
+                            validate_first_part_only = False
+                            if ',' in syntax and '<' in syntax.split(',', 1)[1]:
+                                # Syntax has comma followed by a parameter (indicated by <...>)
+                                # Only validate the first part
+                                validate_first_part_only = True
+                            
+                            # Handle multi-value keywords (comma-separated or | separated)
+                            if keyword_def.get('multi_value'):
+                                # Split by comma or pipe
+                                if ',' in value_part:
+                                    user_values = [v.strip() for v in value_part.split(',')]
+                                elif '|' in value_part:
+                                    user_values = [v.strip() for v in value_part.split('|')]
+                                else:
+                                    user_values = [value_part]
+                            elif validate_first_part_only and ',' in value_part:
+                                # For keywords like "geoip:dst,RU" or "flowbits:set,blocked"
+                                # Only validate the first part (before comma)
+                                first_part = value_part.split(',', 1)[0].strip()
+                                user_values = [first_part]
+                            else:
+                                user_values = [value_part]
+                            
+                            # Check each value
+                            for user_value in user_values:
+                                # Handle negated values
+                                check_value = user_value
+                                if user_value.startswith('!'):
+                                    check_value = user_value[1:].strip()
+                                
+                                # Validate the value
+                                if check_value and check_value.lower() not in valid_values:
+                                    # Find position of invalid value in line
+                                    search_start = paren_start + current_pos
+                                    value_pos = line.find(user_value, search_start)
+                                    if value_pos != -1:
+                                        errors.append((value_pos, value_pos + len(user_value),
+                                                     f"Invalid value '{user_value}' for keyword '{keyword}'"))
                     
-                    # Update position (length of statement + semicolon)
                     current_pos += len(statement) + 1
         
-        # Check for undefined variables (only in network/port sections, not inside quoted strings)
+        # Check for undefined variables
         var_pattern = r'([\$@]\w+)'
         for match in re.finditer(var_pattern, line):
             var_name = match.group(1)
@@ -845,21 +971,12 @@ class AdvancedEditor:
                     in_quotes = not in_quotes
             
             if not in_quotes and var_name not in self.variables:
-                var_start = match.start()
-                var_end = match.end()
-                warnings.append((var_start, var_end, f"Undefined variable: {var_name}"))
+                warnings.append((match.start(), match.end(), f"Undefined variable: {var_name}"))
         
         return errors, warnings
     
     def _parse_rule_tokens(self, line_stripped):
-        """Parse rule into tokens, treating bracketed groups as single tokens
-        
-        Args:
-            line_stripped: Stripped line text
-            
-        Returns:
-            List of tokens
-        """
+        """Parse rule into tokens, treating bracketed groups as single tokens"""
         tokens = []
         current_token = ""
         bracket_depth = 0
@@ -891,54 +1008,44 @@ class AdvancedEditor:
             else:
                 current_token += char
         
-        # Add last token
+        # IMPORTANT: Add final token even if brackets/parens unclosed
+        # This ensures incomplete tokens like "[90:99" get validated
         if current_token:
             tokens.append(current_token)
         
         return tokens
     
     def _validate_port_format(self, port_str):
-        """Validate port format using main app's validation method
-        
-        Args:
-            port_str: Port string to validate
-            
-        Returns:
-            bool: True if valid port format
-        """
+        """Validate port format"""
         port_str = port_str.strip()
         
-        # Handle negation FIRST (e.g., !443 or ![80,443])
-        # This must be done before calling main app validation
+        # Handle negation
         if port_str.startswith('!'):
             inner = port_str[1:].strip()
-            # Recursively validate the negated part
             return self._validate_port_format(inner)
         
-        # Use main app's validation method if available
-        if self.main_app and hasattr(self.main_app, 'validate_port_list'):
-            return self.main_app.validate_port_list(port_str)
-        
-        # Fallback validation if main app not available
-        # "any" is always valid
+        # "any" is valid
         if port_str.lower() == 'any':
             return True
         
-        # Variable reference ($VAR) is valid (@ not allowed for ports)
+        # Variable reference ($VAR)
         if port_str.startswith('$'):
             return True
         
         if port_str.startswith('@'):
-            return False  # @ variables not allowed for ports
+            return False  # @ not allowed for ports
         
-        # Single port number (allowed without brackets)
+        # Single port number
         if port_str.isdigit():
             port_num = int(port_str)
             return 1 <= port_num <= 65535
         
-        # Bracketed specifications
-        if port_str.startswith('[') and port_str.endswith(']'):
-            return True  # Assume bracketed content is valid (main parser will catch issues)
+        # Check for mismatched brackets (starts with [ but no closing ] or has spaces inside)
+        if port_str.startswith('['):
+            if not port_str.endswith(']'):
+                return False  # Incomplete bracket
+            # Valid bracketed specification
+            return True
         
         # Anything else with colons or commas requires brackets
         if ':' in port_str or ',' in port_str:
@@ -947,24 +1054,15 @@ class AdvancedEditor:
         return False
     
     def _validate_network_format_silent(self, network_str):
-        """Validate network format using main app's validation (silent mode - no popups)
-        
-        Args:
-            network_str: Network string to validate
-            
-        Returns:
-            bool: True if valid network format
-        """
+        """Validate network format"""
         network_str = network_str.strip()
         
-        # Handle negation FIRST (e.g., !192.168.1.0/24 or !$HOME_NET)
-        # This must be done before calling main app validation
+        # Handle negation
         if network_str.startswith('!'):
             inner = network_str[1:].strip()
-            # Recursively validate the negated part
             return self._validate_network_format_silent(inner)
         
-        # "any" is always valid
+        # "any" is valid
         if network_str.lower() == 'any':
             return True
         
@@ -972,25 +1070,22 @@ class AdvancedEditor:
         if network_str.startswith(('$', '@')):
             return True
         
-        # Check for bracketed groups - validate contents properly
+        # Check for bracketed groups
         if network_str.startswith('[') and network_str.endswith(']'):
             group_content = network_str[1:-1].strip()
             if not group_content:
-                return False  # Empty brackets not valid
+                return False
             
-            # Split by commas and validate each item
             items = [item.strip() for item in group_content.split(',')]
             for item in items:
                 if not item:
-                    return False  # Empty item not valid
+                    return False
                 
-                # Handle negated items within group
                 if item.startswith('!'):
                     item = item[1:].strip()
                     if not item:
                         return False
                 
-                # Validate the individual item (recursive call for non-bracketed items)
                 if not self._validate_single_network_item_silent(item):
                     return False
             
@@ -1000,14 +1095,7 @@ class AdvancedEditor:
         return self._validate_single_network_item_silent(network_str)
     
     def _validate_single_network_item_silent(self, value):
-        """Validate a single network item without brackets
-        
-        Args:
-            value: Single network item (CIDR, IP, or variable)
-            
-        Returns:
-            bool: True if valid
-        """
+        """Validate a single network item"""
         value = value.strip()
         
         # Variables are valid
@@ -1026,615 +1114,1589 @@ class AdvancedEditor:
         except (ValueError, AttributeError):
             return False
     
-    def check_autocomplete(self):
-        """Check if auto-complete should be shown"""
-        # If autocomplete is suppressed (user pressed Escape), don't show it
-        if self.autocomplete_suppressed:
-            return
+    def on_hover_start(self, event):
+        """Handle mouse hover start - show tooltip for errors/warnings with valid options"""
+        pos = event.GetPosition()
+        line_num = self.editor.LineFromPosition(pos)
+        col_num = pos - self.editor.PositionFromLine(line_num)
         
-        # Get current line and cursor position
-        cursor_pos = self.text_widget.index('insert')
-        line_num = int(cursor_pos.split('.')[0])
-        col_num = int(cursor_pos.split('.')[1])
+        # Check if there are errors or warnings on this line
+        errors = self.validation_errors.get(line_num, [])
+        warnings = self.validation_warnings.get(line_num, [])
+        all_issues = errors + warnings
         
-        line_content = self.text_widget.get(f'{line_num}.0', f'{line_num}.end')
-        text_before_cursor = line_content[:col_num]
+        # Find which issue (if any) is at the hover position
+        tooltip_text = None
+        for start_col, end_col, msg in all_issues:
+            if start_col <= col_num < end_col:
+                # Get the line content to extract the problematic word
+                line_content = self.editor.GetLine(line_num)
+                word = line_content[start_col:end_col]
+                
+                # Build tooltip with valid options based on error type
+                tooltip_lines = []
+                
+                if 'Invalid action' in msg:
+                    tooltip_lines.append(f"Invalid action: '{word}'")
+                    tooltip_lines.append("\nValid actions:")
+                    for action in ['pass', 'alert', 'drop', 'reject']:
+                        tooltip_lines.append(f"  • {action}")
+                elif 'Invalid protocol' in msg:
+                    tooltip_lines.append(f"Invalid protocol: '{word}'")
+                    tooltip_lines.append("\nValid protocols:")
+                    protocols = SuricataConstants.SUPPORTED_PROTOCOLS[:10]
+                    for protocol in protocols:
+                        tooltip_lines.append(f"  • {protocol}")
+                    if len(SuricataConstants.SUPPORTED_PROTOCOLS) > 10:
+                        tooltip_lines.append("  • ...")
+                elif 'Invalid direction' in msg:
+                    tooltip_lines.append(f"Invalid direction: '{word}'")
+                    tooltip_lines.append("\nValid directions:")
+                    tooltip_lines.append("  • ->")
+                    tooltip_lines.append("  • <>")
+                elif 'Unknown keyword' in msg:
+                    tooltip_lines.append(f"Unknown keyword: '{word}'")
+                    if self.keywords_data:
+                        tooltip_lines.append("\nValid keywords:")
+                        known = sorted([kw.get('name', '') for kw in self.keywords_data.get('keywords', [])])[:15]
+                        for keyword in known:
+                            tooltip_lines.append(f"  • {keyword}")
+                        if len(self.keywords_data.get('keywords', [])) > 15:
+                            tooltip_lines.append("  • ...")
+                    else:
+                        tooltip_lines.append("\n(Load content_keywords.json for suggestions)")
+                elif 'Invalid value' in msg:
+                    # Extract keyword name from error message
+                    keyword_match = re.search(r"for keyword '(\w+(?:\.\w+)?)'", msg)
+                    if keyword_match and self.keywords_data:
+                        keyword_name = keyword_match.group(1)
+                        # Find keyword definition
+                        keyword_def = next((kw for kw in self.keywords_data.get('keywords', []) 
+                                          if kw.get('name', '').lower() == keyword_name.lower()), None)
+                        if keyword_def and keyword_def.get('values'):
+                            tooltip_lines.append(msg)
+                            tooltip_lines.append(f"\nValid values for '{keyword_name}':")
+                            valid_vals = keyword_def.get('values', [])[:10]
+                            for val in valid_vals:
+                                tooltip_lines.append(f"  • {val}")
+                            if len(keyword_def.get('values', [])) > 10:
+                                tooltip_lines.append("  • ...")
+                        else:
+                            tooltip_lines.append(msg)
+                    else:
+                        tooltip_lines.append(msg)
+                elif 'Undefined variable' in msg:
+                    tooltip_lines.append(f"Undefined variable: '{word}'")
+                    tooltip_lines.append(f"\n{msg}")
+                elif 'SID must be' in msg:
+                    tooltip_lines.append(msg)
+                    tooltip_lines.append(f"\nSID must be between {SuricataConstants.SID_MIN}-{SuricataConstants.SID_MAX}")
+                elif 'Invalid port' in msg or 'Invalid network' in msg:
+                    tooltip_lines.append(msg)
+                else:
+                    tooltip_lines.append(msg)
+                
+                tooltip_text = '\n'.join(tooltip_lines)
+                break
         
-        # Don't show autocomplete for comments or blank lines
-        if not text_before_cursor.strip() or text_before_cursor.strip().startswith('#'):
-            self.dismiss_autocomplete()
-            return
-        
-        # Determine context and get base suggestions
-        suggestions = self.get_autocomplete_suggestions(text_before_cursor, line_content)
-        
-        # Determine what partial text to filter on
-        # Check if we're typing a keyword value (after "keyword:")
-        keyword_value_match = re.search(r'(\w+(?:\.\w+)?):([^;]*?)$', text_before_cursor)
-        
-        if keyword_value_match and '(' in line_content and ')' not in text_before_cursor:
-            # We're typing a value for a keyword (like "flow:to_ser")
-            value_part = keyword_value_match.group(2)
-            # Get the partial value after the last comma
-            partial_value = value_part.split(',')[-1].strip()
-            
-            # Filter based on partial value
-            if partial_value:
-                filtered_suggestions = [s for s in suggestions if s.lower().startswith(partial_value.lower())]
-            else:
-                filtered_suggestions = suggestions
-        elif '(' in line_content and ')' not in text_before_cursor:
-            # Inside parentheses - extract partial keyword after last semicolon or opening paren
-            # Handle first keyword: "...(flo" or subsequent keywords: "...;flo"
-            paren_content = text_before_cursor.split('(')[-1]  # Get content after last (
-            
-            # If there's a semicolon, get text after it; otherwise use all content
-            if ';' in paren_content:
-                partial_keyword = paren_content.split(';')[-1].strip()
-            else:
-                partial_keyword = paren_content.strip()
-            
-            # Filter suggestions based on partial keyword
-            if partial_keyword:
-                filtered_suggestions = [s for s in suggestions if s.lower().startswith(partial_keyword.lower())]
-            else:
-                filtered_suggestions = suggestions
-        else:
-            # Regular word filtering (for actions, protocols, etc.)
-            words = text_before_cursor.split()
-            current_partial = ''
-            if words and not text_before_cursor.endswith(' '):
-                current_partial = words[-1]
-            
-            if current_partial:
-                filtered_suggestions = [s for s in suggestions if s.lower().startswith(current_partial.lower())]
-            else:
-                filtered_suggestions = suggestions
-        
-        if filtered_suggestions:
-            self.show_autocomplete(filtered_suggestions)
-        else:
-            # No matches - dismiss autocomplete
-            self.dismiss_autocomplete()
+        if tooltip_text:
+            # Show tooltip using Scintilla's built-in CallTipShow
+            self.editor.CallTipShow(pos, tooltip_text)
     
-    def get_autocomplete_suggestions(self, text_before_cursor, full_line):
-        """Get auto-complete suggestions based on context"""
-        words = text_before_cursor.split()
+    def on_hover_end(self, event):
+        """Handle mouse hover end - dismiss tooltip"""
+        self.editor.CallTipCancel()
+    
+    def on_char_added(self, event):
+        """Character added - trigger autocomplete or auto-close"""
+        char_code = event.GetKey()
+        
+        # Skip if it's a special key
+        if char_code > 255:
+            return
+        
+        char = chr(char_code)
+        
+        # Auto-close brackets/quotes
+        if char == '(':
+            self.editor.AddText(')')
+            self.editor.GotoPos(self.editor.GetCurrentPos() - 1)
+        elif char == '[':
+            self.editor.AddText(']')
+            self.editor.GotoPos(self.editor.GetCurrentPos() - 1)
+        elif char == '"':
+            self.editor.AddText('";')
+            self.editor.GotoPos(self.editor.GetCurrentPos() - 2)
+        
+        # Trigger autocomplete on any alphanumeric, space, or colon
+        # Use shorter delay for more responsive filtering
+        if char.isalnum() or char in (' ', ':', '$', '@'):
+            wx.CallLater(50, self.check_autocomplete)
+    
+    def on_autocomp_selected(self, event):
+        """Handle autocomplete selection - add trailing space and special behaviors"""
+        selected_text = event.GetText()
+        
+        # Get current line context
+        pos = self.editor.GetCurrentPos()
+        line_num = self.editor.LineFromPosition(pos)
+        line_start = self.editor.PositionFromLine(line_num)
+        text_before = self.editor.GetTextRange(line_start, pos)
+        
+        # Check if this is rev:1; (complete rev keyword)
+        if selected_text == 'rev:1;':
+            # Rev keyword: insert without extra space
+            def complete_rev():
+                # Find closing paren
+                current_pos = self.editor.GetCurrentPos()
+                line = self.editor.GetLine(line_num)
+                closing_paren_pos = line.find(')', current_pos - line_start)
+                if closing_paren_pos != -1:
+                    # Move to after closing paren
+                    target_pos = line_start + closing_paren_pos + 1
+                    self.editor.GotoPos(target_pos)
+                # Add newline to complete rule
+                self.editor.AddText('\n')
+            wx.CallAfter(complete_rev)
+        
+        # Check if this is a SID value with semicolon (e.g., "100;")
+        elif re.match(r'^\d+;$', selected_text):
+            # SID value with semicolon - add space and trigger next autocomplete
+            def after_sid():
+                self.editor.AddText(' ')
+                # Auto-trigger autocomplete for next field (rev)
+                wx.CallLater(100, self.check_autocomplete)
+            wx.CallAfter(after_sid)
+        
+        # Check if this is rev value with semicolon (e.g., "1;")
+        elif selected_text == '1;' and 'rev:' in text_before[-10:]:
+            # Rev value - no space needed, will complete rule
+            def after_rev():
+                # Find closing paren
+                current_pos = self.editor.GetCurrentPos()
+                line = self.editor.GetLine(line_num)
+                closing_paren_pos = line.find(')', current_pos - line_start)
+                if closing_paren_pos != -1:
+                    # Move to after closing paren
+                    target_pos = line_start + closing_paren_pos + 1
+                    self.editor.GotoPos(target_pos)
+                # Add newline
+                self.editor.AddText('\n')
+            wx.CallAfter(after_rev)
+        
+        # Check if this ends with colon (keyword like "msg:", "sid:", "flow:")
+        elif selected_text.endswith(':'):
+            # Don't add space, trigger autocomplete immediately for value suggestions
+            # Trigger immediately without delay for instant response
+            def trigger_immediate():
+                self.check_autocomplete()
+            wx.CallAfter(trigger_immediate)
+        
+        # Check if we're in a keyword value context (inside parentheses after a keyword)
+        # This handles both initial values and comma-separated values
+        elif '(' in text_before and not selected_text.endswith(':') and not selected_text.endswith(';'):
+            # Check if we're in a keyword value context by looking for keyword: pattern
+            # Extract content after opening paren
+            paren_content = text_before.split('(')[-1]
+            # Get the current statement (after last semicolon)
+            if ';' in paren_content:
+                current_statement = paren_content.split(';')[-1]
+            else:
+                current_statement = paren_content
+            
+            # If there's a colon in the current statement, we're in a keyword value context
+            if ':' in current_statement:
+                # Don't add trailing space - user needs to add comma or semicolon
+                # No action needed - value inserted as-is
+                pass
+            else:
+                # Not in a keyword value context, add space
+                def after_insert():
+                    self.editor.AddText(' ')
+                    wx.CallLater(100, self.check_autocomplete)
+                wx.CallAfter(after_insert)
+        
+        # Default: add trailing space and auto-trigger next autocomplete
+        else:
+            def after_insert():
+                self.editor.AddText(' ')
+                # Auto-trigger autocomplete for next field
+                wx.CallLater(100, self.check_autocomplete)
+            wx.CallAfter(after_insert)
+    
+    def check_autocomplete(self):
+        """Check if autocomplete should be shown"""
+        pos = self.editor.GetCurrentPos()
+        line_num = self.editor.LineFromPosition(pos)
+        line_start = self.editor.PositionFromLine(line_num)
+        
+        # Get text before cursor on current line
+        text_before = self.editor.GetTextRange(line_start, pos)
+        
+        # Don't show for comments or blank lines
+        if not text_before.strip() or text_before.strip().startswith('#'):
+            return
+        
+        # Get autocomplete suggestions based on context
+        suggestions = self.get_autocomplete_suggestions(text_before)
+        
+        if suggestions:
+            # Get current word to determine how many chars to show
+            current_word = self.get_current_word()
+            word_len = len(current_word)
+            
+            # Filter suggestions by current word
+            if current_word:
+                filtered = [s for s in suggestions if s.lower().startswith(current_word.lower())]
+            else:
+                filtered = suggestions
+            
+            if filtered:
+                # Show autocomplete (separator is space)
+                self.editor.AutoCompShow(word_len, ' '.join(filtered))
+    
+    def get_current_word(self):
+        """Get the word currently being typed"""
+        pos = self.editor.GetCurrentPos()
+        line_num = self.editor.LineFromPosition(pos)
+        line_start = self.editor.PositionFromLine(line_num)
+        text_before = self.editor.GetTextRange(line_start, pos)
+        
+        # Check if we're inside parentheses (content keywords context)
+        if '(' in text_before and ')' not in text_before:
+            paren_content = text_before.split('(')[-1]
+            
+            # Get content after last semicolon (or all if no semicolon)
+            if ';' in paren_content:
+                current_statement = paren_content.split(';')[-1].strip()
+            else:
+                current_statement = paren_content.strip()
+            
+            # Check if we have a keyword with colon (like "flow:to_server, s")
+            if ':' in current_statement:
+                # Split by colon to get keyword and values
+                parts = current_statement.split(':', 1)
+                if len(parts) == 2:
+                    values_part = parts[1]
+                    
+                    # If there are commas, get the part after the last comma
+                    # This handles "to_server, s" -> returns "s"
+                    if ',' in values_part:
+                        # Get part after last comma, strip leading spaces
+                        after_comma = values_part.split(',')[-1].lstrip()
+                        # Return just the current word being typed (no trailing space)
+                        return after_comma.rstrip()
+                    
+                    # No comma, return the value part (e.g., "s" from "flow:s")
+                    return values_part.strip()
+                
+                # Ends with colon, no value yet
+                if current_statement.endswith(':'):
+                    return ''
+            
+            # No colon, return the current word
+            return current_statement
+        
+        # Not in parentheses - regular word extraction
+        words = text_before.split()
+        if words and not text_before.endswith(' '):
+            return words[-1]
+        return ''
+    
+    def get_autocomplete_suggestions(self, text_before):
+        """Get autocomplete suggestions based on context"""
+        words = text_before.split()
         word_count = len([w for w in words if w])
         
         # Action (first word)
-        if word_count == 0 or (word_count == 1 and not text_before_cursor.endswith(' ')):
-            return ['#', 'alert', 'pass', 'drop', 'reject']
+        if word_count == 0 or (word_count == 1 and not text_before.endswith(' ')):
+            return ['alert', 'pass', 'drop', 'reject']
         
         # Protocol (second word)
-        if word_count == 1 or (word_count == 2 and not text_before_cursor.endswith(' ')):
+        if word_count == 1 or (word_count == 2 and not text_before.endswith(' ')):
             return SuricataConstants.SUPPORTED_PROTOCOLS
         
         # Source Network (third section)
-        if word_count == 2 or (word_count == 3 and not text_before_cursor.endswith(' ')):
-            suggestions = ['any', '192.168.1.0/24', '10.0.0.0/8', '172.16.0.0/12']
-            # Add defined variables
-            suggestions.extend([var for var in self.variables.keys() if var.startswith('$')])
-            suggestions.extend([var for var in self.variables.keys() if var.startswith('@')])
+        if word_count == 2 or (word_count == 3 and not text_before.endswith(' ')):
+            suggestions = ['any', '$HOME_NET', '$EXTERNAL_NET']
+            suggestions.extend([var for var in self.variables.keys() if var.startswith(('$', '@'))])
             return suggestions
         
         # Source Port (fourth section)
-        if word_count == 3 or (word_count == 4 and not text_before_cursor.endswith(' ')):
-            return ['any', '80', '443', '[8080:8090]', '[80,443,8080]']
+        if word_count == 3 or (word_count == 4 and not text_before.endswith(' ')):
+            return ['any', '80', '443', '[80,443]', '[8080:8090]']
         
         # Direction (fifth section)
-        if word_count == 4 or (word_count == 5 and not text_before_cursor.endswith(' ')):
+        if word_count == 4 or (word_count == 5 and not text_before.endswith(' ')):
             return ['->', '<>']
         
         # Destination Network (sixth section)
-        if word_count == 5 or (word_count == 6 and not text_before_cursor.endswith(' ')):
-            suggestions = ['any', '192.168.1.0/24', '10.0.0.0/8']
-            suggestions.extend([var for var in self.variables.keys() if var.startswith('$')])
-            suggestions.extend([var for var in self.variables.keys() if var.startswith('@')])
+        if word_count == 5 or (word_count == 6 and not text_before.endswith(' ')):
+            suggestions = ['any', '$HOME_NET', '$EXTERNAL_NET']
+            suggestions.extend([var for var in self.variables.keys() if var.startswith(('$', '@'))])
             return suggestions
         
         # Destination Port (seventh section)
-        if word_count == 6 or (word_count == 7 and not text_before_cursor.endswith(' ')):
-            return ['any', '80', '443', '[8080:8090]']
+        if word_count == 6 or (word_count == 7 and not text_before.endswith(' ')):
+            return ['any', '80', '443', '[80,443]']
         
         # Content keywords (inside parentheses)
-        if '(' in full_line and ')' not in text_before_cursor:
-            return self.get_content_keyword_suggestions(text_before_cursor)
+        if '(' in text_before and ')' not in text_before:
+            return self.get_content_keyword_suggestions(text_before)
         
         return []
     
-    def get_content_keyword_suggestions(self, text_before_cursor=None):
-        """Get content keyword suggestions from loaded JSON
+    def get_content_keyword_suggestions(self, text_before):
+        """Get content keyword suggestions"""
+        # Check if right after completed sid keyword - suggest rev
+        if re.search(r'sid:\s*\d+;\s*$', text_before):
+            return ['rev:1;']  # Special format for auto-completion
         
-        Args:
-            text_before_cursor: Text before cursor to check for keyword value context
-        """
-        if not self.keywords_data:
-            # Basic fallback keywords
-            return ['msg:', 'sid:', 'rev:', 'content:', 'flow:', 'http.host;', 'tls.sni;', 'dns.query;']
+        # Check for sid: suggest next SID with semicolon (allow immediate or with space)
+        if 'sid:' in text_before and re.search(r'sid:\s*$', text_before):
+            # Calculate next available SID from current editor
+            text = self.editor.GetText()
+            lines = text.split('\n')
+            used_sids = set()
+            
+            for line in lines:
+                sid_match = re.search(r'sid:\s*(\d+)', line)
+                if sid_match:
+                    used_sids.add(int(sid_match.group(1)))
+            
+            next_sid = 100
+            while next_sid in used_sids:
+                next_sid += 1
+                if next_sid > 999999:
+                    break
+            
+            return [f'{next_sid};']  # Include semicolon in suggestion
         
-        # Check if we're typing a value for a keyword (e.g., after "flow:")
-        if text_before_cursor:
-            # Check if we're right after a completed sid keyword - suggest rev
-            # Pattern: sid:XXX; or sid:XXX; (with optional space)
-            if re.search(r'sid:\s*\d+;\s*$', text_before_cursor):
-                return ['rev:1;']
+        # Check for rev: suggest default with semicolon (allow immediate or with space)
+        if 'rev:' in text_before and re.search(r'rev:\s*$', text_before):
+            return ['1;']  # Include semicolon
+        
+        # Check if typing a keyword value (after "keyword:")
+        keyword_match = re.search(r'(\w+(?:\.\w+)?):([^;]*?)$', text_before)
+        if keyword_match:
+            keyword_name = keyword_match.group(1)
             
-            # Check if we're right after a completed rev keyword - suppress auto-complete
-            # Pattern: rev:X; or rev:X; (with optional space)
-            if re.search(r'rev:\s*\d+;\s*$', text_before_cursor):
-                return []  # Return empty to suppress auto-complete after rev
-            
-            # Look for pattern like "flow:" or "flow:to_server," at the end
-            keyword_value_match = re.search(r'(\w+(?:\.\w+)?):([^;]*?)$', text_before_cursor)
-            if keyword_value_match:
-                keyword_name = keyword_value_match.group(1)
-                partial_value = keyword_value_match.group(2).split(',')[-1].strip()  # Get last value after comma
-                
-                # Special handling for SID keyword - suggest next available SID
-                if keyword_name.lower() == 'sid':
-                    # If user just typed "sid:" with no value yet, suggest next available SID
-                    if not partial_value or partial_value.isdigit():
-                        try:
-                            # Get SIDs from current editor content (not main app rules)
-                            editor_content = self.text_widget.get('1.0', 'end-1c')
-                            editor_lines = editor_content.split('\n')
-                            used_sids = set()
-                            
-                            # Parse SIDs from all rules in the editor
-                            for line in editor_lines:
-                                line_stripped = line.strip()
-                                # Skip blank lines and comments
-                                if not line_stripped or line_stripped.startswith('#'):
-                                    continue
-                                # Extract SID from line using regex
-                                sid_match = re.search(r'sid:\s*(\d+)', line_stripped, re.IGNORECASE)
-                                if sid_match:
-                                    used_sids.add(int(sid_match.group(1)))
-                            
-                            # Find next available SID starting from 100
-                            next_sid = 100
-                            while next_sid in used_sids:
-                                next_sid += 1
-                                if next_sid > 999999999:  # Prevent infinite loop
-                                    break
-                            
-                            # Return SID with semicolon
-                            return [f"{next_sid};"]
-                        except:
-                            # If there's an error getting next SID, return empty
-                            return []
-                
-                # Special handling for REV keyword - suggest default value of 1
-                if keyword_name.lower() == 'rev':
-                    # If user just typed "rev:" with no value yet, suggest 1;
-                    if not partial_value or partial_value.isdigit():
-                        return ['1;']
-                
-                # Find this keyword in our data
-                keywords = self.keywords_data.get('keywords', [])
-                for kw in keywords:
+            # Find keyword values if keywords_data loaded
+            if self.keywords_data:
+                for kw in self.keywords_data.get('keywords', []):
                     if kw.get('name', '') == keyword_name:
                         values = kw.get('values', [])
                         if values:
-                            # Filter values based on partial input
-                            if partial_value:
-                                return [v for v in values if v.lower().startswith(partial_value.lower())]
-                            else:
-                                return values
+                            return values
         
-        # Default: show keyword names (not full syntax templates)
+        # Default: show keyword names
+        if not self.keywords_data:
+            return ['msg:', 'sid:', 'rev:', 'content:', 'flow:']
+        
         keywords = self.keywords_data.get('keywords', [])
         suggestions = []
         
         for kw in keywords:
             name = kw.get('name', '')
             if name:
-                # For keywords with values, just show "name:" (not the full template)
-                # For keywords without values, show appropriate syntax
                 if kw.get('values'):
                     suggestions.append(f"{name}:")
                 else:
-                    # Use simplified syntax without placeholders
                     syntax = kw.get('syntax', '')
                     if '<' in syntax:
-                        # Has placeholder - extract just the keyword part
                         suggestions.append(f"{name}:")
                     else:
                         suggestions.append(syntax if syntax else f"{name}:")
         
-        return suggestions
+        return suggestions[:20]  # Limit to 20 suggestions
     
-    def show_autocomplete(self, suggestions):
-        """Show auto-complete popup with suggestions (Advanced IDE-like, no focus stealing)"""
-        if not suggestions:
-            self.dismiss_autocomplete()
-            return
+    def on_update_ui(self, event):
+        """UI update - update status bar and check bracket matching"""
+        self.update_status_bar()
+        self.check_bracket_match()
+    
+    def check_bracket_match(self):
+        """Check and highlight matching brackets/parentheses/quotes"""
+        pos = self.editor.GetCurrentPos()
         
-        # Get cursor position
-        cursor_pos = self.text_widget.index('insert')
-        bbox = self.text_widget.bbox('insert')
+        # Check character at cursor and before cursor
+        char_at = chr(self.editor.GetCharAt(pos)) if pos < self.editor.GetLength() else ''
+        char_before = chr(self.editor.GetCharAt(pos - 1)) if pos > 0 else ''
         
-        if not bbox:
-            return
+        # Define bracket pairs to match
+        open_brackets = '(["\''
+        close_brackets = ')]\'"'
+        bracket_pairs = {'(': ')', '[': ']', '"': '"', "'": "'"}
         
-        # Calculate position
-        x = self.text_widget.winfo_rootx() + bbox[0]
-        y = self.text_widget.winfo_rooty() + bbox[1] + bbox[3]
+        match_pos = -1
+        check_pos = -1
         
-        # If window already exists, update it instead of recreating
-        if self.autocomplete_window and self.autocomplete_listbox:
-            # Update position
-            self.autocomplete_window.wm_geometry(f"+{x}+{y}")
+        # Check if cursor is after an opening or closing bracket
+        if char_before in open_brackets or char_before in close_brackets:
+            check_pos = pos - 1
+        # Or if cursor is before an opening or closing bracket
+        elif char_at in open_brackets or char_at in close_brackets:
+            check_pos = pos
+        
+        if check_pos >= 0:
+            # Find matching bracket
+            match_pos = self.find_matching_bracket(check_pos)
             
-            # Update listbox contents
-            self.autocomplete_listbox.delete(0, tk.END)
-            self.autocomplete_suggestions = suggestions[:10]
-            
-            for suggestion in self.autocomplete_suggestions:
-                self.autocomplete_listbox.insert(tk.END, suggestion)
-            
-            # Update height
-            self.autocomplete_listbox.config(height=min(10, len(self.autocomplete_suggestions)))
-            
-            if self.autocomplete_listbox.size() > 0:
-                self.autocomplete_listbox.selection_set(0)
-                self.autocomplete_listbox.activate(0)
+            if match_pos >= 0:
+                # Highlight both brackets
+                self.editor.BraceHighlight(check_pos, match_pos)
+            else:
+                # Bad bracket (no match)
+                self.editor.BraceBadLight(check_pos)
         else:
-            # Create new popup window
-            self.autocomplete_window = tk.Toplevel(self.dialog)
-            self.autocomplete_window.wm_overrideredirect(True)
-            self.autocomplete_window.wm_geometry(f"+{x}+{y}")
-            
-            # Create listbox
-            self.autocomplete_listbox = tk.Listbox(self.autocomplete_window, height=min(10, len(suggestions)),
-                                                   font=('Consolas', 9), takefocus=0)
-            self.autocomplete_listbox.pack()
-            
-            # Store suggestions
-            self.autocomplete_suggestions = suggestions[:10]
-            
-            # Populate with suggestions
-            for suggestion in self.autocomplete_suggestions:
-                self.autocomplete_listbox.insert(tk.END, suggestion)
-            
-            if self.autocomplete_listbox.size() > 0:
-                self.autocomplete_listbox.selection_set(0)
-                self.autocomplete_listbox.activate(0)
-            
-            # Bind mouse click on listbox
-            self.autocomplete_listbox.bind('<Button-1>', self.on_autocomplete_click)
-            
-            # DON'T steal focus - keep focus on text_widget
-            # This allows continuous typing while autocomplete is visible
-            
-            # Set up text_widget bindings to handle autocomplete navigation
-            self.setup_autocomplete_bindings()
+            # No bracket at cursor, clear highlighting
+            self.editor.BraceHighlight(stc.STC_INVALID_POSITION, stc.STC_INVALID_POSITION)
     
-    def setup_autocomplete_bindings(self):
-        """Set up keyboard bindings when autocomplete is visible"""
-        # Handle Tab and Enter in text_widget when autocomplete is visible
-        self.text_widget.bind('<Return>', self.on_autocomplete_return, add='+')
-        self.text_widget.bind('<Up>', self.on_autocomplete_up, add='+')
-        self.text_widget.bind('<Down>', self.on_autocomplete_down, add='+')
+    def find_matching_bracket(self, pos):
+        """Find the matching bracket for the bracket at pos
+        
+        Supports nested brackets: ( ), [ ], " "
+        Returns position of matching bracket or -1 if not found
+        """
+        if pos < 0 or pos >= self.editor.GetLength():
+            return -1
+        
+        char = chr(self.editor.GetCharAt(pos))
+        
+        # Special handling for quotes (they're self-matching and need context to determine direction)
+        if char == '"':
+            # Get current line boundaries
+            current_line_num = self.editor.LineFromPosition(pos)
+            line_start = self.editor.PositionFromLine(current_line_num)
+            line_end = self.editor.GetLineEndPosition(current_line_num)
+            
+            # Count unescaped quotes before this position on the same line
+            quote_count = 0
+            check_pos = line_start
+            while check_pos < pos:
+                if chr(self.editor.GetCharAt(check_pos)) == '"':
+                    # Check if escaped
+                    if check_pos > 0 and chr(self.editor.GetCharAt(check_pos - 1)) == '\\':
+                        pass  # Escaped, don't count
+                    else:
+                        quote_count += 1
+                check_pos += 1
+            
+            # Even count = this is an opening quote (search forward)
+            # Odd count = this is a closing quote (search backward)
+            if quote_count % 2 == 0:
+                # Opening quote - search forward
+                search_pos = pos + 1
+                while search_pos < line_end:
+                    if chr(self.editor.GetCharAt(search_pos)) == '"':
+                        # Check if escaped
+                        if search_pos > 0 and chr(self.editor.GetCharAt(search_pos - 1)) == '\\':
+                            search_pos += 1
+                            continue
+                        return search_pos
+                    search_pos += 1
+                return -1
+            else:
+                # Closing quote - search backward
+                search_pos = pos - 1
+                while search_pos >= line_start:
+                    if chr(self.editor.GetCharAt(search_pos)) == '"':
+                        # Check if escaped
+                        if search_pos > 0 and chr(self.editor.GetCharAt(search_pos - 1)) == '\\':
+                            search_pos -= 1
+                            continue
+                        return search_pos
+                    search_pos -= 1
+                return -1
+        
+        # Define bracket pairs (not for quotes since handled above)
+        opening = {'(': ')', '[': ']'}
+        closing = {')': '(', ']': '['}
+        
+        # Determine if we're on an opening or closing bracket
+        if char in opening:
+            # Search forward for closing bracket
+            target = opening[char]
+            direction = 1
+            start = pos + 1
+            end = self.editor.GetLength()
+            depth = 1
+        elif char in closing:
+            # Search backward for opening bracket
+            target = closing[char]
+            direction = -1
+            start = pos - 1
+            end = -1
+            depth = 1
+        else:
+            return -1
+        
+        # For brackets and parentheses, handle nesting (limit to same line)
+        current_line_num = self.editor.LineFromPosition(pos)
+        line_start = self.editor.PositionFromLine(current_line_num)
+        line_end = self.editor.GetLineEndPosition(current_line_num)
+        
+        search_pos = start
+        while (direction > 0 and search_pos < end) or (direction < 0 and search_pos > end):
+            # Stop if we've gone beyond the current line
+            if direction > 0 and search_pos >= line_end:
+                return -1
+            if direction < 0 and search_pos < line_start:
+                return -1
+            
+            check_char = chr(self.editor.GetCharAt(search_pos))
+            
+            if check_char == char:
+                # Found another opening bracket, increase depth
+                depth += 1
+            elif check_char == target:
+                # Found a closing bracket, decrease depth
+                depth -= 1
+                if depth == 0:
+                    return search_pos
+            
+            search_pos += direction
+        
+        return -1
     
-    def remove_autocomplete_bindings(self):
-        """Remove autocomplete-specific bindings"""
-        # Unbind the autocomplete navigation keys
-        try:
-            self.text_widget.unbind('<Return>')
-            self.text_widget.unbind('<Up>')
-            self.text_widget.unbind('<Down>')
-        except:
-            pass
+    def on_margin_click(self, event):
+        """Handle margin click for folding"""
+        # Check if click was on fold margin
+        if event.GetMargin() == 2:
+            line_num = self.editor.LineFromPosition(event.GetPosition())
+            
+            # Toggle fold
+            self.editor.ToggleFold(line_num)
     
-    def on_autocomplete_return(self, event):
-        """Handle Return key when autocomplete is visible"""
-        if self.autocomplete_window and self.autocomplete_listbox:
-            self.accept_autocomplete_from_text()
-            return 'break'
-        return None
+    def on_char_hook(self, event):
+        """Character hook - highest priority event handler for capturing shortcuts"""
+        key_code = event.GetKeyCode()
+        ctrl_down = event.ControlDown() or event.CmdDown()
+        
+        # Ctrl+F for find/replace
+        if ctrl_down and (key_code == ord('F') or key_code == ord('f') or key_code == 70):
+            self.show_find_replace_dialog()
+            return  # Don't skip - consume the event
+        
+        # Ctrl+G for go to line
+        if ctrl_down and key_code == ord('G'):
+            self.on_goto_line(event)
+            return  # Don't skip - consume the event
+        
+        # Ctrl+/ for toggle comment
+        if ctrl_down and key_code == ord('/'):
+            self.on_toggle_comment(event)
+            return  # Don't skip - consume the event
+        
+        # F3 for find next
+        if key_code == wx.WXK_F3:
+            if event.ShiftDown():
+                self.find_previous()
+            else:
+                self.find_next()
+            return  # Don't skip - consume the event
+        
+        # Escape to close search
+        if key_code == wx.WXK_ESCAPE:
+            if self.search_active:
+                self.close_search()
+                return  # Don't skip - consume the event
+        
+        # Allow all other events to propagate
+        event.Skip()
     
-    def on_autocomplete_up(self, event):
-        """Handle Up arrow when autocomplete is visible"""
-        if self.autocomplete_window and self.autocomplete_listbox:
-            current = self.autocomplete_listbox.curselection()
-            if current:
-                index = current[0]
-                if index > 0:
-                    self.autocomplete_listbox.selection_clear(0, tk.END)
-                    self.autocomplete_listbox.selection_set(index - 1)
-                    self.autocomplete_listbox.activate(index - 1)
-                    self.autocomplete_listbox.see(index - 1)
-            return 'break'
-        return None
-    
-    def on_autocomplete_down(self, event):
-        """Handle Down arrow when autocomplete is visible"""
-        if self.autocomplete_window and self.autocomplete_listbox:
-            current = self.autocomplete_listbox.curselection()
-            if current:
-                index = current[0]
-                if index < self.autocomplete_listbox.size() - 1:
-                    self.autocomplete_listbox.selection_clear(0, tk.END)
-                    self.autocomplete_listbox.selection_set(index + 1)
-                    self.autocomplete_listbox.activate(index + 1)
-                    self.autocomplete_listbox.see(index + 1)
-            return 'break'
-        return None
-    
-    def on_autocomplete_click(self, event):
-        """Handle click on autocomplete listbox"""
-        # Get the clicked item
-        widget = event.widget
-        index = widget.nearest(event.y)
-        if index >= 0:
-            widget.selection_clear(0, tk.END)
-            widget.selection_set(index)
-            # Accept the suggestion
-            self.accept_autocomplete_from_text()
-    
-    def accept_autocomplete_from_text(self):
-        """Accept currently selected autocomplete suggestion without needing listbox reference"""
-        if not self.autocomplete_window or not self.autocomplete_listbox:
+    def on_key_down(self, event):
+        """Handle special key combinations"""
+        key_code = event.GetKeyCode()
+        ctrl_down = event.ControlDown() or event.CmdDown()  # CmdDown for Mac
+        
+        # F3 for find next
+        if key_code == wx.WXK_F3:
+            if event.ShiftDown():
+                self.find_previous()
+            else:
+                self.find_next()
             return
         
-        selection = self.autocomplete_listbox.curselection()
-        if selection:
-            value = self.autocomplete_listbox.get(selection[0])
-            
-            # Get current position and word
-            cursor_pos = self.text_widget.index('insert')
-            line_num = int(cursor_pos.split('.')[0])
-            col_num = int(cursor_pos.split('.')[1])
-            
-            # Get current line
-            line_content = self.text_widget.get(f'{line_num}.0', f'{line_num}.end')
-            text_before = line_content[:col_num]
-            
-            # Check if this is the rev keyword suggestion (special handling)
-            is_rev_keyword = (value == 'rev:1;')
-            
-            # Check if this is a sid value suggestion (number followed by semicolon)
-            is_sid_value = re.match(r'^\d+;$', value) is not None
-            
-            # Check if we're inserting a keyword value (after "keyword:")
-            is_keyword_value = False
-            keyword_match = re.search(r'(\w+(?:\.\w+)?):([^;]*?)$', text_before)
-            if keyword_match and ':' in text_before:
-                # We're inserting a value for a keyword
-                is_keyword_value = True
-                # Delete only the partial value after the last comma (if any)
-                value_part = keyword_match.group(2)
-                if ',' in value_part:
-                    # Delete only after last comma
-                    last_comma_pos = value_part.rfind(',')
-                    partial_after_comma = value_part[last_comma_pos + 1:].strip()
-                    if partial_after_comma:
-                        # Delete the partial value after comma
-                        delete_count = len(partial_after_comma)
-                        self.text_widget.delete(f'insert-{delete_count}c', 'insert')
-                else:
-                    # Delete the entire value part (everything after colon)
-                    if value_part.strip():
-                        delete_count = len(value_part)
-                        self.text_widget.delete(f'insert-{delete_count}c', 'insert')
-            else:
-                # Regular word completion
-                # Check if we're inside parentheses (first keyword after opening paren)
-                if '(' in text_before and ')' not in text_before:
-                    paren_content = text_before.split('(')[-1]
-                    # Extract the partial keyword (after last semicolon or opening paren)
-                    if ';' in paren_content:
-                        partial_keyword = paren_content.split(';')[-1].strip()
-                    else:
-                        partial_keyword = paren_content.strip()
-                    
-                    if partial_keyword:
-                        # Delete only the partial keyword, not the opening paren
-                        delete_count = len(partial_keyword)
-                        self.text_widget.delete(f'insert-{delete_count}c', 'insert')
-                else:
-                    # Outside parentheses - normal word deletion
-                    words = text_before.split()
-                    if words and not text_before.endswith(' '):
-                        current_word = words[-1]
-                        # Delete current word
-                        start_col = col_num - len(current_word)
-                        self.text_widget.delete(f'{line_num}.{start_col}', 'insert')
-            
-            # Insert suggestion with special handling for sid value and rev keyword
-            if is_rev_keyword:
-                # Rev keyword: insert without space
-                self.text_widget.insert('insert', value)
-                # Move cursor to next line (after closing paren)
-                # Find the closing paren on this line
-                updated_line = self.text_widget.get(f'{line_num}.0', f'{line_num}.end')
-                closing_paren_pos = updated_line.find(')', col_num)
-                if closing_paren_pos != -1:
-                    # Position cursor after the closing paren
-                    self.text_widget.mark_set('insert', f'{line_num}.{closing_paren_pos + 1}')
-                    # Insert a newline to move to next line
-                    self.text_widget.insert('insert', '\n')
-                    # Cursor is now on the new line
-            elif is_sid_value:
-                # SID value: insert with space after semicolon
-                self.text_widget.insert('insert', value + ' ')
-            elif is_keyword_value or value.endswith(':'):
-                # Other keyword values or keywords ending with ':' - no trailing space
-                self.text_widget.insert('insert', value)
-            else:
-                # Default: add trailing space
-                self.text_widget.insert('insert', value + ' ')
+        # Escape to close search
+        if key_code == wx.WXK_ESCAPE:
+            if self.search_active:
+                self.close_search()
+            return
         
-        self.dismiss_autocomplete()
-    
-    def accept_autocomplete(self, listbox):
-        """Accept selected auto-complete suggestion (legacy method for backward compatibility)"""
-        selection = listbox.curselection()
-        if selection:
-            value = listbox.get(selection[0])
+        # Backspace for smart delete of matching pairs
+        if key_code == wx.WXK_BACK:
+            pos = self.editor.GetCurrentPos()
             
-            # Get current position and word
-            cursor_pos = self.text_widget.index('insert')
-            line_num = int(cursor_pos.split('.')[0])
-            col_num = int(cursor_pos.split('.')[1])
+            # Get character before and after cursor
+            if pos > 0:
+                char_before = self.editor.GetCharAt(pos - 1)
+                char_after = self.editor.GetCharAt(pos)
+                
+                # Check for matching pairs
+                pairs = {
+                    ord('('): ord(')'),
+                    ord('['): ord(']'),
+                    ord('"'): ord('"')
+                }
+                
+                # Special case for "; after quote
+                if char_before == ord('"'):
+                    # Check if next two characters are ";
+                    if pos + 1 < self.editor.GetLength():
+                        next_char = self.editor.GetCharAt(pos + 1)
+                        if char_after == ord('"') and next_char == ord(';'):
+                            # Delete all three: opening quote, closing quote, and semicolon
+                            self.editor.SetSelection(pos - 1, pos + 2)
+                            self.editor.ReplaceSelection('')
+                            return
+                
+                # Check for standard pairs
+                if char_before in pairs and char_after == pairs[char_before]:
+                    # Delete both characters
+                    self.editor.SetSelection(pos - 1, pos + 1)
+                    self.editor.ReplaceSelection('')
+                    return
             
-            # Get current line
-            line_content = self.text_widget.get(f'{line_num}.0', f'{line_num}.end')
-            text_before = line_content[:col_num]
-            
-            # Find start of current word
-            words = text_before.split()
-            if words and not text_before.endswith(' '):
-                current_word = words[-1]
-                # Delete current word
-                start_col = col_num - len(current_word)
-                self.text_widget.delete(f'{line_num}.{start_col}', 'insert')
-            
-            # Insert suggestion
-            self.text_widget.insert('insert', value + ' ')
+            # If no pair matched, use default backspace behavior
+            event.Skip()
+            return
         
-        self.dismiss_autocomplete()
+        # Tab key for smart navigation in rule options or regular tab
+        if key_code == wx.WXK_TAB:
+            # Check if autocomplete is active - if so, it will handle Tab
+            if self.editor.AutoCompActive():
+                event.Skip()
+                return
+            
+            # Smart Tab: Jump to next semicolon when inside parentheses
+            pos = self.editor.GetCurrentPos()
+            line_num = self.editor.LineFromPosition(pos)
+            line_start = self.editor.PositionFromLine(line_num)
+            col = pos - line_start
+            
+            line_text = self.editor.GetLine(line_num)
+            text_before = line_text[:col]
+            text_after = line_text[col:]
+            
+            # Check if we're inside parentheses
+            open_parens = text_before.count('(') - text_before.count(')')
+            
+            if open_parens > 0 and ')' in text_after:
+                # Find next semicolon
+                semicolon_pos = text_after.find(';')
+                closing_paren_pos = text_after.find(')')
+                
+                if semicolon_pos != -1 and semicolon_pos < closing_paren_pos:
+                    # Jump to after semicolon
+                    new_pos = pos + semicolon_pos + 1
+                    self.editor.GotoPos(new_pos)
+                    return
+                elif closing_paren_pos != -1:
+                    # No semicolon, jump to after closing paren
+                    new_pos = pos + closing_paren_pos + 1
+                    self.editor.GotoPos(new_pos)
+                    return
+            
+            # Default: insert 4 spaces
+            self.editor.AddText('    ')
+        else:
+            event.Skip()
     
-    def trigger_autocomplete(self):
-        """Manually trigger auto-complete (Ctrl+Space)"""
-        # Clear suppression when manually triggering
-        self.autocomplete_suppressed = False
-        self.check_autocomplete()
-        return 'break'
+    def on_find(self, event):
+        """Show find/replace dialog"""
+        self.show_find_replace_dialog()
     
-    def dismiss_autocomplete(self, suppress=False):
-        """Dismiss auto-complete popup and restore bindings
+    def on_goto_line(self, event):
+        """Go to specific line"""
+        line_count = self.editor.GetLineCount()
         
-        Args:
-            suppress: If True, suppress autocomplete until next section (used for Escape key)
-        """
-        if self.autocomplete_window:
-            self.remove_autocomplete_bindings()
-            self.autocomplete_window.destroy()
-            self.autocomplete_window = None
-            self.autocomplete_listbox = None
-            # Only set suppression flag if explicitly requested (Escape key)
-            if suppress:
-                self.autocomplete_suppressed = True
-        return 'break'
-    
-    def undo_action(self):
-        """Undo last change"""
-        try:
-            self.text_widget.edit_undo()
-        except tk.TclError:
-            pass
-        return 'break'
-    
-    def redo_action(self):
-        """Redo last undone change"""
-        try:
-            self.text_widget.edit_redo()
-        except tk.TclError:
-            pass
-        return 'break'
-    
-    def goto_line(self):
-        """Go to specific line number"""
-        line_count = int(self.text_widget.index('end-1c').split('.')[0])
-        
-        line_num = simpledialog.askinteger(
-            "Go to Line",
+        dlg = wx.TextEntryDialog(
+            self,
             f"Enter line number (1-{line_count}):",
-            minvalue=1,
-            maxvalue=line_count,
-            parent=self.dialog
+            "Go to Line"
         )
         
-        if line_num:
-            self.text_widget.mark_set('insert', f'{line_num}.0')
-            self.text_widget.see('insert')
-            self.update_status_bar()
+        if dlg.ShowModal() == wx.ID_OK:
+            try:
+                line_num = int(dlg.GetValue())
+                if 1 <= line_num <= line_count:
+                    # Go to line
+                    pos = self.editor.PositionFromLine(line_num - 1)
+                    self.editor.GotoPos(pos)
+                    self.editor.SetSelection(pos, self.editor.GetLineEndPosition(line_num - 1))
+                else:
+                    wx.MessageBox(f"Line number must be between 1 and {line_count}", "Invalid Line")
+            except ValueError:
+                wx.MessageBox("Please enter a valid line number", "Invalid Input")
         
-        return 'break'
+        dlg.Destroy()
     
-    def validate_and_parse_rules(self):
-        """Validate rules and parse text back to rule objects
+    def on_toggle_comment(self, event):
+        """Toggle comment for selected lines or current line"""
+        # Get selection or current line
+        if self.editor.GetSelectionStart() != self.editor.GetSelectionEnd():
+            # Has selection
+            start_pos = self.editor.GetSelectionStart()
+            end_pos = self.editor.GetSelectionEnd()
+            start_line = self.editor.LineFromPosition(start_pos)
+            end_line = self.editor.LineFromPosition(end_pos)
+            
+            # If selection ends at start of line, don't include that line
+            if self.editor.GetColumn(end_pos) == 0 and end_line > start_line:
+                end_line -= 1
+        else:
+            # No selection - use current line
+            pos = self.editor.GetCurrentPos()
+            start_line = self.editor.LineFromPosition(pos)
+            end_line = start_line
         
-        Returns:
-            tuple: (rules_list, errors_list, warnings_list, undefined_vars)
-        """
-        content = self.text_widget.get('1.0', 'end-1c')
-        lines = content.split('\n')
+        # Check if all lines are comments
+        all_comments = True
+        for line_num in range(start_line, end_line + 1):
+            line_text = self.editor.GetLine(line_num).strip()
+            if line_text and not line_text.startswith('#'):
+                all_comments = False
+                break
         
-        rules = []
-        errors = []
-        warnings = []
-        undefined_vars = set()
+        # Toggle comments
+        for line_num in range(start_line, end_line + 1):
+            line_start_pos = self.editor.PositionFromLine(line_num)
+            line_end_pos = self.editor.GetLineEndPosition(line_num)
+            line_text = self.editor.GetTextRange(line_start_pos, line_end_pos)
+            line_stripped = line_text.lstrip()
+            
+            if not line_stripped:
+                # Skip blank lines
+                continue
+            
+            if all_comments:
+                # Uncomment: remove # and space
+                if line_stripped.startswith('# '):
+                    new_line = line_text.replace('# ', '', 1)
+                elif line_stripped.startswith('#'):
+                    new_line = line_text.replace('#', '', 1)
+                else:
+                    continue
+            else:
+                # Comment: add # and space
+                leading_spaces = len(line_text) - len(line_stripped)
+                new_line = line_text[:leading_spaces] + '# ' + line_stripped
+            
+            # Replace the line
+            self.editor.SetTargetStart(line_start_pos)
+            self.editor.SetTargetEnd(line_end_pos)
+            self.editor.ReplaceTarget(new_line)
+    
+    def on_show_shortcuts(self, event):
+        """Display keyboard shortcuts"""
+        shortcuts_text = """Advanced Editor Keyboard Shortcuts:
+
+Editing:
+  Ctrl+Z        Undo
+  Ctrl+Y        Redo
+  Ctrl+X        Cut
+  Ctrl+C        Copy
+  Ctrl+V        Paste
+  Ctrl+A        Select All
+  Ctrl+/        Toggle Comment
+  Backspace     Smart delete matching pairs
+  Tab           Jump to next semicolon (in rule options)
+
+Auto-Complete:
+  Type          Auto-trigger suggestions
+  Tab/Enter     Accept suggestion
+  Esc           Cancel auto-complete
+
+Auto-Close:
+  (             Auto-insert )
+  [             Auto-insert ]
+  "             Auto-insert ";
+
+Search & Replace:
+  Ctrl+F        Find and Replace
+  F3            Find Next
+  Shift+F3      Find Previous
+  Escape        Close Search
+
+Navigation:
+  Ctrl+G        Go to Line
+  Home/End      Start/End of Line
+
+View:
+  Ctrl+Scroll   Zoom In/Out
+
+Code Folding:
+  Click +/-     Collapse/Expand Groups
+"""
+        dlg = wx.MessageDialog(self, shortcuts_text, "Keyboard Shortcuts", wx.OK)
+        dlg.ShowModal()
+        dlg.Destroy()
+    
+    def show_find_replace_dialog(self):
+        """Show unified Find and Replace dialog"""
+        # Create dialog
+        dlg = wx.Dialog(self, title="Find and Replace", size=(600, 750),
+                       style=wx.DEFAULT_DIALOG_STYLE | wx.RESIZE_BORDER)
+        dlg.CentreOnParent()
         
-        for i, line in enumerate(lines, 1):
+        # Main sizer
+        main_sizer = wx.BoxSizer(wx.VERTICAL)
+        
+        # Search term section
+        search_box = wx.StaticBoxSizer(wx.VERTICAL, dlg, "Search Term")
+        
+        find_label = wx.StaticText(search_box.GetStaticBox(), label="Find what:")
+        search_box.Add(find_label, 0, wx.ALL, 5)
+        search_ctrl = wx.TextCtrl(search_box.GetStaticBox(), value=self.search_term, size=(550, -1))
+        search_box.Add(search_ctrl, 0, wx.EXPAND | wx.ALL, 5)
+        
+        replace_label = wx.StaticText(search_box.GetStaticBox(), label="Replace with:")
+        search_box.Add(replace_label, 0, wx.ALL, 5)
+        replace_ctrl = wx.TextCtrl(search_box.GetStaticBox(), value=self.replace_term, size=(550, -1))
+        search_box.Add(replace_ctrl, 0, wx.EXPAND | wx.ALL, 5)
+        
+        main_sizer.Add(search_box, 0, wx.EXPAND | wx.ALL, 10)
+        
+        # Field-specific search section
+        field_box = wx.StaticBoxSizer(wx.VERTICAL, dlg, "Field-Specific Search")
+        field_panel = wx.Panel(field_box.GetStaticBox())
+        field_sizer = wx.BoxSizer(wx.HORIZONTAL)
+        
+        search_in_label = wx.StaticText(field_panel, label="Search in:")
+        field_sizer.Add(search_in_label, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 10)
+        
+        field_choices = ["All fields", "Message", "Content", "Networks (src/dst)", 
+                        "Ports (src/dst)", "SID", "Protocol"]
+        field_choice = wx.Choice(field_panel, choices=field_choices)
+        field_choice.SetSelection(0)  # Default to "All fields"
+        field_sizer.Add(field_choice, 1, wx.EXPAND)
+        
+        field_panel.SetSizer(field_sizer)
+        field_box.Add(field_panel, 0, wx.EXPAND | wx.ALL, 5)
+        
+        main_sizer.Add(field_box, 0, wx.EXPAND | wx.ALL, 10)
+        
+        # Action-based filtering section
+        action_box = wx.StaticBoxSizer(wx.VERTICAL, dlg, "Action-Based Filtering")
+        action_panel = wx.Panel(action_box.GetStaticBox())
+        action_grid = wx.GridSizer(3, 2, 5, 20)
+        
+        pass_cb = wx.CheckBox(action_panel, label="Pass rules")
+        pass_cb.SetValue(self.search_filters['pass'])
+        drop_cb = wx.CheckBox(action_panel, label="Drop rules")
+        drop_cb.SetValue(self.search_filters['drop'])
+        reject_cb = wx.CheckBox(action_panel, label="Reject rules")
+        reject_cb.SetValue(self.search_filters['reject'])
+        alert_cb = wx.CheckBox(action_panel, label="Alert rules")
+        alert_cb.SetValue(self.search_filters['alert'])
+        comments_cb = wx.CheckBox(action_panel, label="Comments")
+        comments_cb.SetValue(self.search_filters['comments'])
+        
+        action_grid.Add(pass_cb)
+        action_grid.Add(drop_cb)
+        action_grid.Add(reject_cb)
+        action_grid.Add(alert_cb)
+        action_grid.Add(comments_cb)
+        
+        action_panel.SetSizer(action_grid)
+        action_box.Add(action_panel, 0, wx.EXPAND | wx.ALL, 5)
+        
+        # Select/Deselect buttons
+        btn_sizer = wx.BoxSizer(wx.HORIZONTAL)
+        select_all_btn = wx.Button(action_box.GetStaticBox(), label="Select All")
+        deselect_all_btn = wx.Button(action_box.GetStaticBox(), label="Deselect All")
+        
+        def on_select_all(e):
+            pass_cb.SetValue(True)
+            drop_cb.SetValue(True)
+            reject_cb.SetValue(True)
+            alert_cb.SetValue(True)
+            comments_cb.SetValue(True)
+        
+        def on_deselect_all(e):
+            pass_cb.SetValue(False)
+            drop_cb.SetValue(False)
+            reject_cb.SetValue(False)
+            alert_cb.SetValue(False)
+            comments_cb.SetValue(False)
+        
+        select_all_btn.Bind(wx.EVT_BUTTON, on_select_all)
+        deselect_all_btn.Bind(wx.EVT_BUTTON, on_deselect_all)
+        
+        btn_sizer.Add(select_all_btn, 0, wx.RIGHT, 5)
+        btn_sizer.Add(deselect_all_btn)
+        action_box.Add(btn_sizer, 0, wx.ALL, 5)
+        
+        main_sizer.Add(action_box, 0, wx.EXPAND | wx.ALL, 10)
+        
+        # Advanced search options
+        options_box = wx.StaticBoxSizer(wx.VERTICAL, dlg, "Advanced Search Options")
+        options_panel = wx.Panel(options_box.GetStaticBox())
+        options_grid = wx.GridSizer(2, 2, 5, 20)
+        
+        case_cb = wx.CheckBox(options_panel, label="Case sensitive")
+        case_cb.SetValue(self.search_options['case_sensitive'])
+        whole_word_cb = wx.CheckBox(options_panel, label="Whole word matching")
+        whole_word_cb.SetValue(self.search_options['whole_word'])
+        regex_cb = wx.CheckBox(options_panel, label="Regular expression")
+        regex_cb.SetValue(self.search_options['regex'])
+        
+        options_grid.Add(case_cb)
+        options_grid.Add(whole_word_cb)
+        options_grid.Add(regex_cb)
+        
+        options_panel.SetSizer(options_grid)
+        options_box.Add(options_panel, 0, wx.EXPAND | wx.ALL, 5)
+        
+        main_sizer.Add(options_box, 0, wx.EXPAND | wx.ALL, 10)
+        
+        # Buttons
+        button_sizer = wx.BoxSizer(wx.HORIZONTAL)
+        button_sizer.AddStretchSpacer()
+        
+        find_btn = wx.Button(dlg, label="Find")
+        find_next_btn = wx.Button(dlg, label="Find Next")
+        replace_btn = wx.Button(dlg, label="Replace")
+        replace_all_btn = wx.Button(dlg, label="Replace All")
+        close_btn = wx.Button(dlg, wx.ID_CLOSE, "Close")
+        
+        def on_find(e):
+            term = search_ctrl.GetValue().strip()
+            if not term:
+                wx.MessageBox("Please enter a search term.", "Find", wx.OK | wx.ICON_WARNING, dlg)
+                return
+            
+            self.search_term = term
+            self.replace_term = replace_ctrl.GetValue()
+            
+            # Get field selection
+            field_map = ["all", "message", "content", "networks", "ports", "sid", "protocol"]
+            self.search_field = field_map[field_choice.GetSelection()]
+            
+            # Update filters
+            self.search_filters['pass'] = pass_cb.GetValue()
+            self.search_filters['drop'] = drop_cb.GetValue()
+            self.search_filters['reject'] = reject_cb.GetValue()
+            self.search_filters['alert'] = alert_cb.GetValue()
+            self.search_filters['comments'] = comments_cb.GetValue()
+            
+            # Update options
+            self.search_options['case_sensitive'] = case_cb.GetValue()
+            self.search_options['whole_word'] = whole_word_cb.GetValue()
+            self.search_options['regex'] = regex_cb.GetValue()
+            
+            # Perform search
+            self.perform_search()
+            
+            if self.search_results:
+                wx.MessageBox(f"Found {len(self.search_results)} matches.\n\nPress F3 for next, Shift+F3 for previous, Escape to close.",
+                            "Search", wx.OK | wx.ICON_INFORMATION, self)
+            
+            dlg.Close()
+        
+        def on_find_next(e):
+            term = search_ctrl.GetValue().strip()
+            if not term:
+                wx.MessageBox("Please enter a search term.", "Find", wx.OK | wx.ICON_WARNING, dlg)
+                return
+            
+            # Update search if term or filters changed
+            if (not self.search_active or self.search_term != term or
+                self.search_filters['pass'] != pass_cb.GetValue() or
+                self.search_filters['drop'] != drop_cb.GetValue() or
+                self.search_filters['reject'] != reject_cb.GetValue() or
+                self.search_filters['alert'] != alert_cb.GetValue() or
+                self.search_filters['comments'] != comments_cb.GetValue()):
+                
+                self.search_term = term
+                self.replace_term = replace_ctrl.GetValue()
+                
+                # Get field selection
+                field_map = ["all", "message", "content", "networks", "ports", "sid", "protocol"]
+                self.search_field = field_map[field_choice.GetSelection()]
+                
+                # Update filters
+                self.search_filters['pass'] = pass_cb.GetValue()
+                self.search_filters['drop'] = drop_cb.GetValue()
+                self.search_filters['reject'] = reject_cb.GetValue()
+                self.search_filters['alert'] = alert_cb.GetValue()
+                self.search_filters['comments'] = comments_cb.GetValue()
+                
+                # Update options
+                self.search_options['case_sensitive'] = case_cb.GetValue()
+                self.search_options['whole_word'] = whole_word_cb.GetValue()
+                self.search_options['regex'] = regex_cb.GetValue()
+                
+                # Perform new search
+                self.perform_search()
+            else:
+                # Just move to next
+                if self.search_results:
+                    self.find_next()
+                else:
+                    wx.MessageBox("No matches found.", "Find", wx.OK | wx.ICON_INFORMATION, dlg)
+        
+        def on_replace(e):
+            term = search_ctrl.GetValue().strip()
+            if not term:
+                wx.MessageBox("Please enter a search term.", "Replace", wx.OK | wx.ICON_WARNING, dlg)
+                return
+            
+            self.replace_term = replace_ctrl.GetValue()
+            
+            # If search not active or term changed, perform search first
+            if not self.search_active or self.search_term != term:
+                on_find_next(e)
+                return
+            
+            # Replace current match
+            if self.search_results and self.current_search_index >= 0:
+                self.replace_current()
+                if not self.search_results:
+                    wx.MessageBox("No more matches found. All replacements complete.",
+                                "Replace", wx.OK | wx.ICON_INFORMATION, dlg)
+            else:
+                wx.MessageBox("No match at current position.", "Replace", wx.OK | wx.ICON_INFORMATION, dlg)
+        
+        def on_replace_all(e):
+            term = search_ctrl.GetValue().strip()
+            if not term:
+                wx.MessageBox("Please enter a search term.", "Replace All", wx.OK | wx.ICON_WARNING, dlg)
+                return
+            
+            self.search_term = term
+            self.replace_term = replace_ctrl.GetValue()
+            
+            # Get field selection
+            field_map = ["all", "message", "content", "networks", "ports", "sid", "protocol"]
+            self.search_field = field_map[field_choice.GetSelection()]
+            
+            # Update filters
+            self.search_filters['pass'] = pass_cb.GetValue()
+            self.search_filters['drop'] = drop_cb.GetValue()
+            self.search_filters['reject'] = reject_cb.GetValue()
+            self.search_filters['alert'] = alert_cb.GetValue()
+            self.search_filters['comments'] = comments_cb.GetValue()
+            
+            # Update options
+            self.search_options['case_sensitive'] = case_cb.GetValue()
+            self.search_options['whole_word'] = whole_word_cb.GetValue()
+            self.search_options['regex'] = regex_cb.GetValue()
+            
+            # Perform replacement
+            count = self.replace_all()
+            dlg.Close()
+            
+            if count > 0:
+                wx.MessageBox(f"Replaced {count} occurrences.", "Replace All",
+                            wx.OK | wx.ICON_INFORMATION, self)
+            else:
+                wx.MessageBox("No occurrences found to replace.", "Replace All",
+                            wx.OK | wx.ICON_INFORMATION, self)
+        
+        def on_close(e):
+            self.close_search()
+            dlg.Close()
+        
+        find_btn.Bind(wx.EVT_BUTTON, on_find)
+        find_next_btn.Bind(wx.EVT_BUTTON, on_find_next)
+        replace_btn.Bind(wx.EVT_BUTTON, on_replace)
+        replace_all_btn.Bind(wx.EVT_BUTTON, on_replace_all)
+        close_btn.Bind(wx.EVT_BUTTON, on_close)
+        
+        button_sizer.Add(find_btn, 0, wx.ALL, 5)
+        button_sizer.Add(find_next_btn, 0, wx.ALL, 5)
+        button_sizer.Add(replace_btn, 0, wx.ALL, 5)
+        button_sizer.Add(replace_all_btn, 0, wx.ALL, 5)
+        button_sizer.Add(close_btn, 0, wx.ALL, 5)
+        
+        main_sizer.Add(button_sizer, 0, wx.EXPAND | wx.ALL, 10)
+        
+        dlg.SetSizer(main_sizer)
+        dlg.ShowModal()
+        dlg.Destroy()
+    
+    def perform_search(self):
+        """Perform search with current settings using Scintilla's search"""
+        if not self.search_term:
+            return
+        
+        # Clear previous search results
+        self.clear_search_highlights()
+        self.search_results = []
+        self.current_search_index = -1
+        
+        # Get all text
+        text = self.editor.GetText()
+        lines = text.split('\n')
+        
+        # Compile regex if needed
+        regex_pattern = None
+        if self.search_options['regex']:
+            try:
+                flags = 0 if self.search_options['case_sensitive'] else re.IGNORECASE
+                regex_pattern = re.compile(self.search_term, flags)
+            except re.error as e:
+                wx.MessageBox(f"Invalid regular expression: {str(e)}", "Regex Error",
+                            wx.OK | wx.ICON_ERROR, self)
+                return
+        
+        # Search through lines
+        for line_num, line in enumerate(lines):
             line_stripped = line.strip()
             
-            # Blank line
+            # Skip blank lines
             if not line_stripped:
-                blank_rule = SuricataRule()
-                blank_rule.is_blank = True
-                rules.append(blank_rule)
                 continue
             
-            # Comment line
-            if line_stripped.startswith('#'):
-                comment_rule = SuricataRule()
-                comment_rule.is_comment = True
-                comment_rule.comment_text = line
-                rules.append(comment_rule)
+            # Check if comment
+            is_comment = line_stripped.startswith('#')
+            
+            # Apply action filters
+            if is_comment:
+                if not self.search_filters['comments']:
+                    continue
+            else:
+                # Parse action
+                tokens = line_stripped.split()
+                if tokens:
+                    action = tokens[0].lower()
+                    if action not in ['pass', 'drop', 'reject', 'alert']:
+                        continue
+                    if not self.search_filters.get(action, True):
+                        continue
+            
+            # Get search text based on field filter
+            search_text = self.get_search_text_from_line(line, line_stripped, is_comment)
+            if search_text is None:
                 continue
             
-            # Try to parse as rule
-            try:
-                rule = SuricataRule.from_string(line)
-                if rule:
-                    # Basic validation
-                    error_found = False
-                    
-                    # Validate action
-                    if rule.action.lower() not in ['pass', 'alert', 'drop', 'reject']:
-                        errors.append((i, f"Invalid action: {rule.action}"))
-                        error_found = True
-                    
-                    # Validate protocol
-                    if rule.protocol.lower() not in [p.lower() for p in SuricataConstants.SUPPORTED_PROTOCOLS]:
-                        errors.append((i, f"Invalid protocol: {rule.protocol}"))
-                        error_found = True
-                    
-                    # Check for undefined variables
-                    for field in [rule.src_net, rule.dst_net, rule.src_port, rule.dst_port]:
-                        if field.startswith(('$', '@')) and field not in self.variables:
-                            undefined_vars.add(field)
-                            warnings.append((i, f"Undefined variable: {field}"))
-                    
-                    if error_found:
-                        # Comment out the rule
-                        comment_rule = SuricataRule()
-                        comment_rule.is_comment = True
-                        comment_rule.comment_text = f"# [SYNTAX ERROR] {line}"
-                        rules.append(comment_rule)
-                    else:
-                        rules.append(rule)
-                else:
-                    errors.append((i, "Failed to parse rule"))
-                    comment_rule = SuricataRule()
-                    comment_rule.is_comment = True
-                    comment_rule.comment_text = f"# [SYNTAX ERROR] {line}"
-                    rules.append(comment_rule)
-            except Exception as e:
-                errors.append((i, f"Parse error: {str(e)}"))
-                comment_rule = SuricataRule()
-                comment_rule.is_comment = True
-                comment_rule.comment_text = f"# [SYNTAX ERROR] {line}"
-                rules.append(comment_rule)
+            # Find matches in this line
+            matches = self.find_matches_in_text(search_text, line, line_num, regex_pattern)
+            self.search_results.extend(matches)
         
-        return rules, errors, warnings, undefined_vars
+        # Show results
+        if self.search_results:
+            self.search_active = True
+            self.current_search_index = 0
+            self.highlight_current_match()
+        else:
+            self.search_active = False
     
-    def on_ok(self):
-        """Handle OK button click"""
+    def get_search_text_from_line(self, line, line_stripped, is_comment):
+        """Extract appropriate text to search based on field filter"""
+        if is_comment:
+            return line if self.search_field == "all" else line if self.search_field == "message" else None
+        
+        # For rules, parse components
+        if self.search_field == "all":
+            return line
+        
+        # Parse rule to extract fields
+        try:
+            tokens = line_stripped.split()
+            if len(tokens) < 7:
+                return None
+            
+            action = tokens[0]
+            protocol = tokens[1]
+            src_net = tokens[2]
+            src_port = tokens[3]
+            dst_net = tokens[5] if len(tokens) > 5 else ""
+            dst_port = tokens[6] if len(tokens) > 6 else ""
+            
+            # Extract message and SID from options
+            message = ""
+            sid = ""
+            content = ""
+            
+            if '(' in line and ')' in line:
+                opts_start = line.find('(')
+                opts_end = line.rfind(')')
+                options = line[opts_start+1:opts_end]
+                
+                msg_match = re.search(r'msg:"([^"]*)"', options)
+                if msg_match:
+                    message = msg_match.group(1)
+                
+                sid_match = re.search(r'sid:(\d+)', options)
+                if sid_match:
+                    sid = sid_match.group(1)
+                
+                content = options
+            
+            # Return appropriate field
+            if self.search_field == "message":
+                return message
+            elif self.search_field == "content":
+                return content
+            elif self.search_field == "networks":
+                return f"{src_net} {dst_net}"
+            elif self.search_field == "ports":
+                return f"{src_port} {dst_port}"
+            elif self.search_field == "sid":
+                return sid
+            elif self.search_field == "protocol":
+                return protocol
+        except:
+            return None
+        
+        return line
+    
+    def find_matches_in_text(self, search_text, original_line, line_num, regex_pattern):
+        """Find all matches in text and return positions"""
+        matches = []
+        searching_full_line = (self.search_field == "all")
+        
+        if regex_pattern:
+            # Regex search
+            text_to_search = original_line if searching_full_line else search_text
+            for match in regex_pattern.finditer(text_to_search):
+                if searching_full_line:
+                    start_col = match.start()
+                    end_col = match.end()
+                    matched_text = match.group(0)
+                    matches.append((line_num, start_col, end_col, matched_text))
+                else:
+                    # Find position in original line
+                    field_pos = original_line.find(search_text)
+                    if field_pos >= 0:
+                        start_col = field_pos + match.start()
+                        end_col = field_pos + match.end()
+                        matched_text = match.group(0)
+                        matches.append((line_num, start_col, end_col, matched_text))
+        elif self.search_options['whole_word']:
+            # Whole word matching
+            pattern = r'\b' + re.escape(self.search_term) + r'\b'
+            flags = 0 if self.search_options['case_sensitive'] else re.IGNORECASE
+            text_to_search = original_line if searching_full_line else search_text
+            
+            for match in re.finditer(pattern, text_to_search, flags):
+                if searching_full_line:
+                    start_col = match.start()
+                    end_col = match.end()
+                    matched_text = match.group(0)
+                    matches.append((line_num, start_col, end_col, matched_text))
+                else:
+                    field_pos = original_line.find(search_text)
+                    if field_pos >= 0:
+                        start_col = field_pos + match.start()
+                        end_col = field_pos + match.end()
+                        matched_text = match.group(0)
+                        matches.append((line_num, start_col, end_col, matched_text))
+        else:
+            # Simple substring search
+            text_to_search = original_line if searching_full_line else search_text
+            search_in = text_to_search if self.search_options['case_sensitive'] else text_to_search.lower()
+            search_term = self.search_term if self.search_options['case_sensitive'] else self.search_term.lower()
+            
+            start_pos = 0
+            while True:
+                pos = search_in.find(search_term, start_pos)
+                if pos == -1:
+                    break
+                
+                if searching_full_line:
+                    start_col = pos
+                    end_col = pos + len(self.search_term)
+                    matched_text = original_line[pos:end_col]
+                    matches.append((line_num, start_col, end_col, matched_text))
+                else:
+                    field_pos = original_line.find(search_text)
+                    if field_pos >= 0:
+                        start_col = field_pos + pos
+                        end_col = field_pos + pos + len(self.search_term)
+                        matched_text = original_line[start_col:end_col]
+                        matches.append((line_num, start_col, end_col, matched_text))
+                
+                start_pos = pos + 1
+        
+        return matches
+    
+    def highlight_current_match(self):
+        """Highlight current match using Indicator 2"""
+        if not self.search_results or self.current_search_index < 0:
+            return
+        
+        # Clear search highlights
+        self.editor.SetIndicatorCurrent(2)
+        self.editor.IndicatorClearRange(0, self.editor.GetLength())
+        
+        # Highlight all matches in gray/yellow
+        for i, (line_num, start_col, end_col, matched_text) in enumerate(self.search_results):
+            pos = self.editor.PositionFromLine(line_num) + start_col
+            length = end_col - start_col
+            
+            self.editor.SetIndicatorCurrent(2)
+            self.editor.IndicatorFillRange(pos, length)
+        
+        # Scroll to current match
+        current_match = self.search_results[self.current_search_index]
+        line_num, start_col, end_col, matched_text = current_match
+        pos = self.editor.PositionFromLine(line_num) + start_col
+        
+        self.editor.GotoPos(pos)
+        self.editor.SetSelection(pos, pos + (end_col - start_col))
+        
+        # Update status bar
+        self.update_status_bar()
+    
+    def find_next(self):
+        """Find next search result"""
+        if not self.search_active or not self.search_results:
+            return
+        
+        self.current_search_index = (self.current_search_index + 1) % len(self.search_results)
+        self.highlight_current_match()
+    
+    def find_previous(self):
+        """Find previous search result"""
+        if not self.search_active or not self.search_results:
+            return
+        
+        self.current_search_index = (self.current_search_index - 1) % len(self.search_results)
+        self.highlight_current_match()
+    
+    def replace_current(self):
+        """Replace current match using Scintilla's ReplaceTarget"""
+        if not self.search_results or self.current_search_index < 0:
+            return
+        
+        # Get current match
+        line_num, start_col, end_col, matched_text = self.search_results[self.current_search_index]
+        pos = self.editor.PositionFromLine(line_num) + start_col
+        length = end_col - start_col
+        
+        # Use Scintilla's replace target
+        self.editor.SetTargetStart(pos)
+        self.editor.SetTargetEnd(pos + length)
+        self.editor.ReplaceTarget(self.replace_term)
+        
+        # Calculate position shift
+        position_shift = len(self.replace_term) - length
+        
+        # Update positions of remaining matches on same line
+        if position_shift != 0:
+            for i in range(self.current_search_index + 1, len(self.search_results)):
+                match_line, match_start, match_end, match_text = self.search_results[i]
+                if match_line == line_num:
+                    self.search_results[i] = (match_line, match_start + position_shift,
+                                             match_end + position_shift, match_text)
+        
+        # Remove current match
+        del self.search_results[self.current_search_index]
+        
+        # Move to next or close if done
+        if self.search_results:
+            if self.current_search_index >= len(self.search_results):
+                self.current_search_index = 0
+            self.highlight_current_match()
+        else:
+            self.close_search()
+    
+    def replace_all(self):
+        """Replace all matches"""
+        if not self.search_term:
+            return 0
+        
+        # Perform search first
+        if not self.search_results:
+            self.perform_search()
+        
+        if not self.search_results:
+            return 0
+        
+        # Replace in reverse order to maintain positions
+        count = 0
+        for line_num, start_col, end_col, matched_text in reversed(self.search_results):
+            pos = self.editor.PositionFromLine(line_num) + start_col
+            length = end_col - start_col
+            
+            self.editor.SetTargetStart(pos)
+            self.editor.SetTargetEnd(pos + length)
+            self.editor.ReplaceTarget(self.replace_term)
+            count += 1
+        
+        # Close search
+        self.close_search()
+        
+        return count
+    
+    def clear_search_highlights(self):
+        """Clear search highlights (Indicator 2)"""
+        self.editor.SetIndicatorCurrent(2)
+        self.editor.IndicatorClearRange(0, self.editor.GetLength())
+    
+    def close_search(self):
+        """Close search mode"""
+        self.search_active = False
+        self.search_results = []
+        self.current_search_index = -1
+        self.clear_search_highlights()
+        self.update_status_bar()
+    
+    def on_toggle_dark_mode(self, event):
+        """Toggle dark mode"""
+        self.dark_mode = self.dark_mode_cb.GetValue()
+        self.apply_theme()
+    
+    def on_toggle_sig_coloring(self, event):
+        """Toggle SIG type coloring"""
+        sig_coloring_enabled = self.sig_coloring_cb.GetValue()
+        
+        if sig_coloring_enabled:
+            # Apply SIG type coloring
+            self.apply_sig_type_coloring()
+        else:
+            # Remove SIG type coloring - reset to default text color
+            self.clear_sig_type_coloring()
+    
+    def _map_detailed_sig_type_to_color(self, detailed_sig_type):
+        """Map detailed SIG type to one of the 4 color categories
+        
+        Maps the 10 detailed Suricata SIG types to 4 visual color categories:
+        - Generic (IPONLY, LIKE_IPONLY, DEONLY): Basic rules, least specific
+        - Specific Protocol (PKT, PKT_STREAM, STREAM, PDONLY): Flow/content rules
+        - Specific Network/Port (APPLAYER): Application protocols
+        - Specific Protocol + Specific Network/Port (APP_TX): App-layer transaction rules, most specific
+        
+        Args:
+            detailed_sig_type: One of the 10 SIG_TYPE_* constants
+            
+        Returns:
+            str: Color category name
+        """
+        # Map detailed types to color categories
+        sig_type_mapping = {
+            'SIG_TYPE_IPONLY': 'Generic',
+            'SIG_TYPE_LIKE_IPONLY': 'Generic',
+            'SIG_TYPE_DEONLY': 'Generic',
+            'SIG_TYPE_PKT': 'Specific Protocol',
+            'SIG_TYPE_PKT_STREAM': 'Specific Protocol',
+            'SIG_TYPE_STREAM': 'Specific Protocol',
+            'SIG_TYPE_PDONLY': 'Specific Protocol',
+            'SIG_TYPE_APPLAYER': 'Specific Network/Port',
+            'SIG_TYPE_APP_TX': 'Specific Protocol + Specific Network/Port',
+            'SIG_TYPE_NOT_SET': 'Generic'
+        }
+        
+        return sig_type_mapping.get(detailed_sig_type, 'Generic')
+    
+    def apply_sig_type_coloring(self):
+        """Apply SIG type text coloring to all rule lines using indicators"""
+        if not HAS_RULE_ANALYZER:
+            return
+        
+        # Clear any existing SIG type coloring first (all 4 indicators)
+        for indicator_id in [5, 6, 7, 8]:
+            self.editor.SetIndicatorCurrent(indicator_id)
+            self.editor.IndicatorClearRange(0, self.editor.GetLength())
+        
+        text = self.editor.GetText()
+        lines = text.split('\n')
+        
+        # Map color categories to their indicator IDs
+        category_to_indicator = {
+            'Generic': 5,
+            'Specific Protocol': 6,
+            'Specific Network/Port': 7,
+            'Specific Protocol + Specific Network/Port': 8
+        }
+        
+        rule_analyzer = RuleAnalyzer()
+        
+        for line_num, line in enumerate(lines):
+            line_stripped = line.strip()
+            
+            # Skip blank lines and comments
+            if not line_stripped or line_stripped.startswith('#'):
+                continue
+            
+            # Try to parse and classify the rule
+            try:
+                rule = SuricataRule.from_string(line_stripped)
+                if rule:
+                    # Get detailed SIG type from RuleAnalyzer
+                    detailed_sig_type = rule_analyzer.get_detailed_suricata_rule_type(rule)
+                    
+                    # Map detailed type to color category
+                    color_category = self._map_detailed_sig_type_to_color(detailed_sig_type)
+                    
+                    # Get the appropriate indicator ID for this category
+                    if color_category in category_to_indicator:
+                        indicator_id = category_to_indicator[color_category]
+                        
+                        # Apply indicator to the entire line
+                        line_start = self.editor.PositionFromLine(line_num)
+                        line_end = self.editor.GetLineEndPosition(line_num)
+                        line_length = line_end - line_start
+                        
+                        # Set current indicator and fill range
+                        self.editor.SetIndicatorCurrent(indicator_id)
+                        self.editor.IndicatorFillRange(line_start, line_length)
+            except:
+                pass  # If classification fails, leave default color
+    
+    def clear_sig_type_coloring(self):
+        """Clear SIG type coloring and restore default text color"""
+        # Clear all 4 SIG type indicators from entire document
+        for indicator_id in [5, 6, 7, 8]:
+            self.editor.SetIndicatorCurrent(indicator_id)
+            self.editor.IndicatorClearRange(0, self.editor.GetLength())
+    
+    def apply_theme(self):
+        """Apply color theme"""
+        if self.dark_mode:
+            # VS Code dark theme colors
+            bg = wx.Colour(30, 30, 30)
+            fg = wx.Colour(212, 212, 212)
+            
+            # Editor colors
+            self.editor.StyleSetBackground(stc.STC_STYLE_DEFAULT, bg)
+            self.editor.StyleSetForeground(stc.STC_STYLE_DEFAULT, fg)
+            self.editor.StyleClearAll()  # Apply to all styles
+            
+            # Selection
+            self.editor.SetSelBackground(True, wx.Colour(38, 79, 120))
+            
+            # Caret
+            self.editor.SetCaretForeground(wx.Colour(174, 175, 173))
+            self.editor.SetCaretLineBackground(wx.Colour(44, 44, 44))
+            
+            # Line numbers
+            self.editor.StyleSetBackground(stc.STC_STYLE_LINENUMBER, wx.Colour(37, 37, 38))
+            self.editor.StyleSetForeground(stc.STC_STYLE_LINENUMBER, wx.Colour(133, 133, 133))
+            
+            # Fold margin
+            self.editor.SetFoldMarginColour(True, wx.Colour(37, 37, 38))
+            self.editor.SetFoldMarginHiColour(True, wx.Colour(37, 37, 38))
+        else:
+            # Light theme (default)
+            bg = wx.WHITE
+            fg = wx.BLACK
+            
+            self.editor.StyleSetBackground(stc.STC_STYLE_DEFAULT, bg)
+            self.editor.StyleSetForeground(stc.STC_STYLE_DEFAULT, fg)
+            self.editor.StyleClearAll()
+            
+            # Selection
+            self.editor.SetSelBackground(True, wx.Colour(0, 120, 215))
+            
+            # Caret
+            self.editor.SetCaretForeground(wx.BLACK)
+            self.editor.SetCaretLineBackground(wx.Colour(232, 232, 255))
+            
+            # Line numbers
+            self.editor.StyleSetBackground(stc.STC_STYLE_LINENUMBER, wx.Colour(240, 240, 240))
+            self.editor.StyleSetForeground(stc.STC_STYLE_LINENUMBER, wx.BLACK)
+            
+            # Fold margin
+            self.editor.SetFoldMarginColour(True, wx.Colour(240, 240, 240))
+            self.editor.SetFoldMarginHiColour(True, wx.WHITE)
+    
+    def on_ok(self, event):
+        """Handle OK button"""
         # Validate and parse rules
         parsed_rules, errors, warnings, undefined_vars = self.validate_and_parse_rules()
         
@@ -1668,1130 +2730,164 @@ class AdvancedEditor:
             
             report += "Continue with these changes?"
             
-            if not messagebox.askyesno("Validation Results", report, parent=self.dialog):
+            dlg = wx.MessageDialog(self, report, "Validation Results",
+                                  wx.YES_NO | wx.ICON_QUESTION)
+            if dlg.ShowModal() != wx.ID_YES:
+                dlg.Destroy()
                 return
+            dlg.Destroy()
         
         # Auto-create undefined variables
         for var in undefined_vars:
             if var not in self.variables:
                 self.variables[var] = ""
         
-        # Set result
-        self.result = parsed_rules
-        self.dialog.destroy()
+        # Get result data with validated rules
+        result_data = {
+            'ok': True,
+            'rules': [self._rule_dict_from_suricata_rule(r) for r in parsed_rules],
+            'variables': self.variables
+        }
+        
+        # Write to output file
+        try:
+            with open(self.output_file, 'w', encoding='utf-8') as f:
+                json.dump(result_data, f, indent=2)
+            
+            self.EndModal(wx.ID_OK)
+        except Exception as e:
+            wx.MessageBox(f"Error saving result: {e}", "Error", wx.OK | wx.ICON_ERROR)
     
-    def on_cancel(self):
-        """Handle Cancel button click"""
+    def on_cancel(self, event):
+        """Handle Cancel button"""
         if self.modified:
-            if not messagebox.askyesno("Unsaved Changes",
-                                      "You have unsaved changes in the Advanced Editor. Discard all changes?",
-                                      parent=self.dialog):
+            dlg = wx.MessageDialog(
+                self,
+                "You have unsaved changes. Discard them?",
+                "Unsaved Changes",
+                wx.YES_NO | wx.ICON_WARNING
+            )
+            if dlg.ShowModal() != wx.ID_YES:
+                dlg.Destroy()
                 return
+            dlg.Destroy()
         
-        self.result = None
-        self.dialog.destroy()
+        self.EndModal(wx.ID_CANCEL)
     
-    def show_tooltip_at_index(self, index):
-        """Show tooltip at the given text index if there's an error/warning"""
-        # Check if there's an error or warning tag at this position
-        tags = self.text_widget.tag_names(index)
+    def validate_and_parse_rules(self):
+        """Validate rules and parse text back to rule objects (mimics tkinter version)
         
-        if 'error' not in tags and 'warning' not in tags:
-            return
+        Returns:
+            tuple: (rules_list, errors_list, warnings_list, undefined_vars)
+        """
+        text = self.editor.GetText()
+        lines = text.split('\n')
         
-        # Get the line content and position
-        line_num = int(index.split('.')[0])
-        col_num = int(index.split('.')[1])
-        line_content = self.text_widget.get(f'{line_num}.0', f'{line_num}.end')
+        # Parse rules from editor
+        edited_rules = []
+        errors = []
+        warnings = []
+        undefined_vars = set()
         
-        # Find what word/token is at this position
-        # Get all error/warning ranges on this line
-        errors, warnings = self.validate_line(line_content, line_num)
-        all_issues = errors + warnings
-        
-        # Find which issue matches this position
-        tooltip_text = None
-        suggestions = []
-        
-        for start_col, end_col, msg in all_issues:
-            if start_col <= col_num < end_col:
-                # Found the issue at this position
-                word = line_content[start_col:end_col]
-                
-                # Determine what suggestions to show based on the error type
-                if 'Invalid action' in msg:
-                    tooltip_text = f"Invalid action: '{word}'\n\nValid actions:"
-                    suggestions = ['pass', 'alert', 'drop', 'reject']
-                elif 'Invalid protocol' in msg:
-                    tooltip_text = f"Invalid protocol: '{word}'\n\nValid protocols:"
-                    suggestions = SuricataConstants.SUPPORTED_PROTOCOLS[:10]  # Show first 10
-                    if len(SuricataConstants.SUPPORTED_PROTOCOLS) > 10:
-                        suggestions.append('...')
-                elif 'Invalid direction' in msg:
-                    tooltip_text = f"Invalid direction: '{word}'\n\nValid directions:"
-                    suggestions = ['->', '<>']
-                elif 'Unknown keyword' in msg:
-                    tooltip_text = f"Unknown keyword: '{word}'\n\nValid keywords:"
-                    if self.keywords_data:
-                        known = [kw.get('name', '') for kw in self.keywords_data.get('keywords', [])]
-                        suggestions = sorted(known[:15])  # Show first 15 alphabetically
-                        if len(known) > 15:
-                            suggestions.append('...')
-                    else:
-                        suggestions = ['(Load content_keywords.json for suggestions)']
-                elif 'Undefined variable' in msg:
-                    tooltip_text = f"Undefined variable: '{word}'\n\n{msg}"
-                elif 'SID must be' in msg:
-                    tooltip_text = f"{msg}\n\nSID must be between {SuricataConstants.SID_MIN}-{SuricataConstants.SID_MAX}"
-                else:
-                    tooltip_text = msg
-                
-                break
-        
-        if not tooltip_text:
-            return
-        
-        # Create tooltip window
-        bbox = self.text_widget.bbox(index)
-        if not bbox:
-            return
-        
-        x = self.text_widget.winfo_rootx() + bbox[0]
-        y = self.text_widget.winfo_rooty() + bbox[1] + bbox[3] + 5  # 5px below
-        
-        self.tooltip_window = tk.Toplevel(self.dialog)
-        self.tooltip_window.wm_overrideredirect(True)
-        self.tooltip_window.wm_transient(self.dialog)
-        self.tooltip_window.wm_attributes('-topmost', True)
-        self.tooltip_window.wm_geometry(f"+{x}+{y}")
-        
-        # Create frame with border
-        frame = tk.Frame(self.tooltip_window, background='#FFFFE0', 
-                        borderwidth=1, relief='solid', highlightthickness=1,
-                        highlightbackground='black')
-        frame.pack()
-        
-        # Add text
-        label = tk.Label(frame, text=tooltip_text, justify=tk.LEFT,
-                        background='#FFFFE0', foreground='black',
-                        font=('Consolas', 9), padx=8, pady=5)
-        label.pack()
-        
-        # Add suggestions if any
-        if suggestions:
-            for suggestion in suggestions:
-                sugg_label = tk.Label(frame, text=f"  • {suggestion}", justify=tk.LEFT,
-                                     background='#FFFFE0', foreground='#0066CC',
-                                     font=('Consolas', 9), padx=8, pady=2)
-                sugg_label.pack(anchor='w')
-        
-        # Force the window to update and display
-        self.tooltip_window.update_idletasks()
-        self.tooltip_window.deiconify()
-        self.tooltip_window.lift()
-    
-    def dismiss_tooltip(self):
-        """Dismiss the tooltip if visible"""
-        if self.tooltip_window:
-            self.tooltip_window.destroy()
-            self.tooltip_window = None
-    
-    def on_text_scroll(self, *args):
-        """Handle text widget scroll to sync line numbers"""
-        # Scroll the text widget
-        self.text_widget.yview(*args)
-        # Sync line numbers
-        self.line_numbers.yview_moveto(args[1] if len(args) > 1 else args[0])
-    
-    def on_text_yscroll(self, *args):
-        """Handle text widget yscroll callback to sync line numbers and scrollbar"""
-        # Update the scrollbar
-        if hasattr(self, 'v_scrollbar'):
-            self.v_scrollbar.set(*args)
-        # Sync line numbers with text widget
-        self.line_numbers.yview_moveto(args[0])
-    
-    def cut_text(self):
-        """Cut selected text to clipboard"""
-        try:
-            # Get selected text
-            selected_text = self.text_widget.selection_get()
-            # Copy to clipboard
-            self.dialog.clipboard_clear()
-            self.dialog.clipboard_append(selected_text)
-            # Delete selected text
-            self.text_widget.delete(tk.SEL_FIRST, tk.SEL_LAST)
-        except tk.TclError:
-            pass  # No selection
-        return 'break'  # Prevent default handler from running
-    
-    def copy_text(self):
-        """Copy selected text to clipboard"""
-        try:
-            # Get selected text
-            selected_text = self.text_widget.selection_get()
-            # Copy to clipboard
-            self.dialog.clipboard_clear()
-            self.dialog.clipboard_append(selected_text)
-        except tk.TclError:
-            pass  # No selection
-        return 'break'  # Prevent default handler from running
-    
-    def paste_text(self):
-        """Paste text from clipboard"""
-        try:
-            # Get clipboard content
-            clipboard_content = self.dialog.clipboard_get()
-            # Delete selection if any
-            try:
-                self.text_widget.delete(tk.SEL_FIRST, tk.SEL_LAST)
-            except tk.TclError:
-                pass  # No selection
-            # Insert at cursor position
-            self.text_widget.insert('insert', clipboard_content)
-        except tk.TclError:
-            pass  # No clipboard content
-        return 'break'  # Prevent default handler from running (fixes double paste bug)
-    
-    def select_all_text(self):
-        """Select all text in the editor"""
-        self.text_widget.tag_add(tk.SEL, '1.0', 'end-1c')
-        self.text_widget.mark_set('insert', 'end-1c')
-        self.text_widget.see('insert')
-    
-    def on_escape_key(self):
-        """Handle Escape key - close search or dismiss autocomplete"""
-        # If search is active, close it first
-        if self.search_active:
-            self.close_search()
-            return 'break'
-        # Otherwise dismiss autocomplete
-        return self.dismiss_autocomplete(suppress=True)
-    
-    def show_find_replace_dialog(self):
-        """Show unified Find and Replace dialog"""
-        dialog = tk.Toplevel(self.dialog)
-        dialog.title("Find and Replace in Advanced Editor")
-        dialog.geometry("600x700")
-        dialog.transient(self.dialog)
-        dialog.grab_set()
-        dialog.resizable(False, False)
-        
-        # Center the dialog
-        dialog.geometry("+%d+%d" % (self.dialog.winfo_rootx() + 200, self.dialog.winfo_rooty() + 50))
-        
-        # Main frame
-        main_frame = ttk.Frame(dialog)
-        main_frame.pack(fill=tk.BOTH, expand=True, padx=15, pady=15)
-        
-        # Search term section
-        search_frame = ttk.LabelFrame(main_frame, text="Search Term")
-        search_frame.pack(fill=tk.X, pady=(0, 10))
-        
-        ttk.Label(search_frame, text="Find what:").pack(anchor=tk.W, padx=10, pady=(10, 5))
-        search_var = tk.StringVar(value=self.search_term)
-        entry = ttk.Entry(search_frame, textvariable=search_var, width=50)
-        entry.pack(fill=tk.X, padx=10, pady=(0, 10))
-        entry.focus()
-        entry.select_range(0, tk.END)
-        
-        # Replace section (always shown now)
-        ttk.Label(search_frame, text="Replace with:").pack(anchor=tk.W, padx=10, pady=(5, 5))
-        replace_var = tk.StringVar(value="")
-        replace_entry = ttk.Entry(search_frame, textvariable=replace_var, width=50)
-        replace_entry.pack(fill=tk.X, padx=10, pady=(0, 10))
-        
-        # Field-specific search section
-        field_frame = ttk.LabelFrame(main_frame, text="Field-Specific Search")
-        field_frame.pack(fill=tk.X, pady=(0, 10))
-        
-        search_field_var = tk.StringVar(value="all")
-        field_options = [
-            ("All fields", "all"),
-            ("Message", "message"),
-            ("Content", "content"),
-            ("Networks (src/dst)", "networks"),
-            ("Ports (src/dst)", "ports"),
-            ("SID", "sid"),
-            ("Protocol", "protocol")
-        ]
-        
-        field_combo_frame = ttk.Frame(field_frame)
-        field_combo_frame.pack(fill=tk.X, padx=10, pady=10)
-        ttk.Label(field_combo_frame, text="Search in:").pack(side=tk.LEFT)
-        field_combo = ttk.Combobox(field_combo_frame, textvariable=search_field_var, 
-                                  values=[opt[1] for opt in field_options], state="readonly", width=15)
-        field_combo.pack(side=tk.LEFT, padx=(10, 0))
-        
-        # Set display values
-        field_combo['values'] = [opt[0] for opt in field_options]
-        field_combo.set("All fields")
-        
-        # Action-based filtering section
-        action_frame = ttk.LabelFrame(main_frame, text="Action-Based Filtering")
-        action_frame.pack(fill=tk.X, pady=(0, 10))
-        
-        # Create BooleanVars for filters
-        filter_vars = {
-            'pass': tk.BooleanVar(value=self.search_filters['pass']),
-            'drop': tk.BooleanVar(value=self.search_filters['drop']),
-            'reject': tk.BooleanVar(value=self.search_filters['reject']),
-            'alert': tk.BooleanVar(value=self.search_filters['alert']),
-            'comments': tk.BooleanVar(value=self.search_filters['comments'])
-        }
-        
-        # Arrange checkboxes in a grid
-        checkbox_frame = ttk.Frame(action_frame)
-        checkbox_frame.pack(padx=10, pady=10)
-        
-        ttk.Checkbutton(checkbox_frame, text="Pass rules", variable=filter_vars['pass']).grid(row=0, column=0, sticky=tk.W, padx=(0, 20))
-        ttk.Checkbutton(checkbox_frame, text="Drop rules", variable=filter_vars['drop']).grid(row=0, column=1, sticky=tk.W)
-        ttk.Checkbutton(checkbox_frame, text="Reject rules", variable=filter_vars['reject']).grid(row=1, column=0, sticky=tk.W, padx=(0, 20), pady=(5, 0))
-        ttk.Checkbutton(checkbox_frame, text="Alert rules", variable=filter_vars['alert']).grid(row=1, column=1, sticky=tk.W, pady=(5, 0))
-        ttk.Checkbutton(checkbox_frame, text="Comments", variable=filter_vars['comments']).grid(row=2, column=0, sticky=tk.W, pady=(5, 0))
-        
-        # Select/Deselect all buttons
-        select_frame = ttk.Frame(action_frame)
-        select_frame.pack(padx=10, pady=(0, 10))
-        
-        def select_all():
-            for var in filter_vars.values():
-                var.set(True)
-        
-        def deselect_all():
-            for var in filter_vars.values():
-                var.set(False)
-        
-        ttk.Button(select_frame, text="Select All", command=select_all).pack(side=tk.LEFT, padx=(0, 5))
-        ttk.Button(select_frame, text="Deselect All", command=deselect_all).pack(side=tk.LEFT)
-        
-        # Advanced search options section
-        advanced_frame = ttk.LabelFrame(main_frame, text="Advanced Search Options")
-        advanced_frame.pack(fill=tk.X, pady=(0, 10))
-        
-        # Create BooleanVars for options
-        option_vars = {
-            'case_sensitive': tk.BooleanVar(value=self.search_options['case_sensitive']),
-            'whole_word': tk.BooleanVar(value=self.search_options['whole_word']),
-            'regex': tk.BooleanVar(value=self.search_options['regex'])
-        }
-        
-        options_frame = ttk.Frame(advanced_frame)
-        options_frame.pack(padx=10, pady=10)
-        
-        ttk.Checkbutton(options_frame, text="Case sensitive", variable=option_vars['case_sensitive']).grid(row=0, column=0, sticky=tk.W, padx=(0, 20))
-        ttk.Checkbutton(options_frame, text="Whole word matching", variable=option_vars['whole_word']).grid(row=0, column=1, sticky=tk.W)
-        ttk.Checkbutton(options_frame, text="Regular expression", variable=option_vars['regex']).grid(row=1, column=0, sticky=tk.W, padx=(0, 20), pady=(5, 0))
-        
-        # Buttons
-        button_frame = ttk.Frame(main_frame)
-        button_frame.pack(fill=tk.X, pady=(10, 0))
-        
-        def on_find_next():
-            """Find next match without replacing (renamed from on_skip)"""
-            term = search_var.get().strip()
-            if not term:
-                messagebox.showwarning("Find", "Please enter a search term.", parent=dialog)
-                return
-            
-            # Update replace term
-            replace_text = replace_var.get() if replace_var else ""
-            self.replace_term = replace_text
-            
-            # If search hasn't been performed yet or search term changed, perform new search
-            if not self.search_active or self.search_term != term:
-                self.search_term = term
-                # Store the field selection
-                field_index = field_combo.current()
-                if field_index >= 0:
-                    self.search_field = field_options[field_index][1]
-                else:
-                    self.search_field = "all"
-                
-                # Update search filters and options
-                for key in self.search_filters:
-                    self.search_filters[key] = filter_vars[key].get()
-                for key in self.search_options:
-                    self.search_options[key] = option_vars[key].get()
-                
-                # Perform search to highlight first match
-                self.perform_search()
-                return
-            
-            # Search is already active - move to next match
-            if self.search_results:
-                self.find_next()
-            else:
-                messagebox.showinfo("Find", "No matches found.", parent=dialog)
-        
-        def on_replace():
-            term = search_var.get().strip()
-            replace_text = replace_var.get() if replace_var else ""
-            if not term:
-                messagebox.showwarning("Replace", "Please enter a search term.", parent=dialog)
-                return
-            
-            # Update replace term
-            self.replace_term = replace_text
-            
-            # If search hasn't been performed yet or search term changed, just highlight first match (don't replace)
-            if not self.search_active or self.search_term != term:
-                self.search_term = term
-                # Store the field selection
-                field_index = field_combo.current()
-                if field_index >= 0:
-                    self.search_field = field_options[field_index][1]
-                else:
-                    self.search_field = "all"
-                
-                # Update search filters and options
-                for key in self.search_filters:
-                    self.search_filters[key] = filter_vars[key].get()
-                for key in self.search_options:
-                    self.search_options[key] = option_vars[key].get()
-                
-                # Perform search to highlight first match (don't replace yet)
-                self.perform_search()
-                # Dialog stays open, user can now review first match and decide to replace or skip
-                return
-            
-            # Search is already active - replace current match and move to next
-            if self.search_results and self.current_search_index >= 0:
-                self.replace_current()
-                # Dialog stays open for next replacement
-                if not self.search_results:
-                    # No more matches - show message
-                    messagebox.showinfo("Replace", "No more matches found. All replacements complete.", parent=dialog)
-            else:
-                messagebox.showinfo("Replace", "No match at current position.", parent=dialog)
-        
-        
-        def on_replace_all():
-            term = search_var.get().strip()
-            replace_text = replace_var.get() if replace_var else ""
-            if term:
-                self.search_term = term
-                self.replace_term = replace_text
-                # Store the field selection
-                field_index = field_combo.current()
-                if field_index >= 0:
-                    self.search_field = field_options[field_index][1]
-                else:
-                    self.search_field = "all"
-                
-                # Update search filters and options
-                for key in self.search_filters:
-                    self.search_filters[key] = filter_vars[key].get()
-                for key in self.search_options:
-                    self.search_options[key] = option_vars[key].get()
-                
-                # Perform replacement
-                count = self.replace_all()
-                dialog.destroy()
-                if count > 0:
-                    messagebox.showinfo("Replace All", 
-                                      f"Replaced {count} occurrences of '{self.search_term}' with '{replace_text}'.",
-                                      parent=self.dialog)
-                else:
-                    messagebox.showinfo("Replace All",
-                                      f"No occurrences found to replace.",
-                                      parent=self.dialog)
-            else:
-                messagebox.showwarning("Replace All", "Please enter a search term.", parent=dialog)
-        
-        def on_find():
-            """Perform find and close dialog, keeping search active for F3"""
-            term = search_var.get().strip()
-            if not term:
-                messagebox.showwarning("Find", "Please enter a search term.", parent=dialog)
-                return
-            
-            self.search_term = term
-            self.replace_term = replace_var.get() if replace_var else ""
-            
-            # Store the field selection
-            field_index = field_combo.current()
-            if field_index >= 0:
-                self.search_field = field_options[field_index][1]
-            else:
-                self.search_field = "all"
-            
-            # Update search filters and options
-            for key in self.search_filters:
-                self.search_filters[key] = filter_vars[key].get()
-            for key in self.search_options:
-                self.search_options[key] = option_vars[key].get()
-            
-            # Perform search
-            self.perform_search()
-            
-            # Show F3 navigation message only when Find button is used
-            if self.search_results:
-                messagebox.showinfo("Search", 
-                                  f"Found {len(self.search_results)} matches for '{self.search_term}'.\n\n"
-                                  "Press F3 for next, Shift+F3 for previous, Escape to close.", 
-                                  parent=self.dialog)
-            
-            # Close dialog but keep search active
-            dialog.destroy()
-        
-        def on_cancel():
-            # Clear search when closing with Close button
-            self.close_search()
-            dialog.destroy()
-        
-        # Add buttons (always show all buttons since this is unified dialog)
-        ttk.Button(button_frame, text="Replace All", command=on_replace_all).pack(side=tk.RIGHT, padx=(5, 0))
-        ttk.Button(button_frame, text="Replace", command=on_replace).pack(side=tk.RIGHT, padx=(5, 0))
-        ttk.Button(button_frame, text="Find Next", command=on_find_next).pack(side=tk.RIGHT, padx=(5, 0))
-        ttk.Button(button_frame, text="Find", command=on_find).pack(side=tk.RIGHT, padx=(5, 0))
-        ttk.Button(button_frame, text="Close", command=on_cancel).pack(side=tk.RIGHT)
-        
-        # Handle window close button (X) - same as Close button
-        dialog.protocol("WM_DELETE_WINDOW", on_cancel)
-        
-        # Bind Enter key to Find
-        dialog.bind('<Return>', lambda e: on_find())
-        
-        return 'break'
-    
-    def perform_search(self):
-        """Perform search with current settings"""
-        if not self.search_term:
-            return
-        
-        # Clear previous search results
-        self.clear_search_highlights()
-        self.search_results = []
-        self.current_search_index = -1
-        
-        # Get all content
-        content = self.text_widget.get('1.0', 'end-1c')
-        lines = content.split('\n')
-        
-        # Compile regex pattern if needed
-        regex_pattern = None
-        if self.search_options['regex']:
-            try:
-                flags = 0 if self.search_options['case_sensitive'] else re.IGNORECASE
-                regex_pattern = re.compile(self.search_term, flags)
-            except re.error as e:
-                messagebox.showerror("Regex Error", f"Invalid regular expression: {str(e)}", parent=self.dialog)
-                return
-        
-        # Prepare search term
-        search_term = self.search_term
-        if not self.search_options['case_sensitive']:
-            search_term = search_term.lower()
-        
-        # Search through lines
-        for line_num, line in enumerate(lines, 1):
+        for i, line in enumerate(lines, 1):
             line_stripped = line.strip()
             
-            # Skip blank lines
+            # Blank line
             if not line_stripped:
+                blank_rule = SuricataRule()
+                blank_rule.is_blank = True
+                edited_rules.append(blank_rule)
                 continue
             
-            # Check if this is a comment
-            is_comment = line_stripped.startswith('#')
+            # Comment line
+            if line_stripped.startswith('#'):
+                comment_rule = SuricataRule()
+                comment_rule.is_comment = True
+                comment_rule.comment_text = line.rstrip()
+                edited_rules.append(comment_rule)
+                continue
             
-            # Apply action filters
-            if is_comment:
-                if not self.search_filters['comments']:
-                    continue
-            else:
-                # Parse line to get action
-                tokens = line_stripped.split()
-                if tokens:
-                    action = tokens[0].lower()
-                    if action not in ['pass', 'drop', 'reject', 'alert']:
-                        continue  # Invalid action, skip
-                    if not self.search_filters.get(action, True):
-                        continue  # Filtered out by action
+            # Check for validation errors using validate_line (catches semicolon issues, etc.)
+            line_errors, line_warnings = self.validate_line(line, i - 1)
             
-            # Determine which part of the line to search based on field filter
-            search_text = self.get_search_text_from_line(line, line_stripped, is_comment)
-            if search_text is None:
-                continue  # This field doesn't apply to this line
+            # Add any validation errors found
+            for start_col, end_col, msg in line_errors:
+                errors.append((i, msg))
             
-            # Check if the search text actually contains the search term
-            # before performing detailed match finding
-            search_text_lower = search_text.lower() if not self.search_options['case_sensitive'] else search_text
-            search_term_lower = search_term
+            # Add any validation warnings found
+            for start_col, end_col, msg in line_warnings:
+                warnings.append((i, msg))
             
-            # Quick check: does this line contain the search term at all?
-            if regex_pattern:
-                if not regex_pattern.search(search_text):
-                    continue  # No match in this field
-            elif self.search_options['whole_word']:
-                pattern = r'\b' + re.escape(self.search_term) + r'\b'
-                flags = 0 if self.search_options['case_sensitive'] else re.IGNORECASE
-                if not re.search(pattern, search_text, flags):
-                    continue  # No match in this field
-            else:
-                if search_term_lower not in search_text_lower:
-                    continue  # No match in this field
-            
-            # Perform the detailed search to find exact positions
-            matches = self.find_matches_in_text(search_text, line, line_num, regex_pattern)
-            self.search_results.extend(matches)
-        
-        # Show results - only show message if no results found
-        if self.search_results:
-            self.search_active = True
-            self.current_search_index = 0
-            self.highlight_current_match()
-        else:
-            self.search_active = False
-            messagebox.showinfo("Search", f"No results found for '{self.search_term}' with current filters.", 
-                              parent=self.dialog)
-    
-    def get_search_text_from_line(self, line, line_stripped, is_comment):
-        """Extract the appropriate text to search based on field filter"""
-        if is_comment:
-            return line if self.search_field == "all" else line if self.search_field == "message" else None
-        
-        # For rules, parse components
-        if self.search_field == "all":
-            return line
-        
-        # Parse the rule to extract specific fields
-        try:
-            # Simple parsing for field extraction
-            tokens = line_stripped.split()
-            if len(tokens) < 7:
-                return None  # Incomplete rule
-            
-            # Extract fields by position
-            action = tokens[0]
-            protocol = tokens[1]
-            src_net = tokens[2]
-            src_port = tokens[3]
-            dst_net = tokens[5]
-            dst_port = tokens[6]
-            
-            # Extract message and content from options section
-            message = ""
-            content = ""
-            sid = ""
-            
-            if '(' in line and ')' in line:
-                options_start = line.find('(')
-                options_end = line.rfind(')')
-                options_section = line[options_start+1:options_end]
-                
-                # Extract message
-                msg_match = re.search(r'msg:"([^"]*)"', options_section)
-                if msg_match:
-                    message = msg_match.group(1)
-                
-                # Extract SID
-                sid_match = re.search(r'sid:(\d+)', options_section)
-                if sid_match:
-                    sid = sid_match.group(1)
-                
-                # Content is everything else (simplified)
-                content = options_section
-            
-            # Return appropriate field
-            if self.search_field == "message":
-                return message
-            elif self.search_field == "content":
-                return content
-            elif self.search_field == "networks":
-                return f"{src_net} {dst_net}"
-            elif self.search_field == "ports":
-                return f"{src_port} {dst_port}"
-            elif self.search_field == "sid":
-                return sid
-            elif self.search_field == "protocol":
-                return protocol
-        except:
-            return None
-        
-        return line  # Fallback
-    
-    def find_matches_in_text(self, search_text, original_line, line_num, regex_pattern):
-        """Find all matches of search term in the given text
-        
-        Args:
-            search_text: The text to search in (may be a field or full line)
-            original_line: The original full line (for position calculation)
-            line_num: Line number
-            regex_pattern: Compiled regex pattern if regex mode is active
-        
-        Returns:
-            List of (line_num, start_col, end_col, matched_text) tuples
-        """
-        matches = []
-        
-        # Determine if we're searching a specific field or the whole line
-        searching_full_line = (self.search_field == "all")
-        
-        if regex_pattern:
-            # Regex search - search in the filtered search_text
-            for match in regex_pattern.finditer(search_text if not searching_full_line else original_line):
-                if searching_full_line:
-                    start_col = match.start()
-                    end_col = match.end()
-                    matched_text = match.group(0)
-                    matches.append((line_num, start_col, end_col, matched_text))
-                else:
-                    # Field-specific: find position of this field text in original line
-                    field_match_start = original_line.find(search_text)
-                    if field_match_start >= 0:
-                        start_col = field_match_start + match.start()
-                        end_col = field_match_start + match.end()
-                        matched_text = match.group(0)
-                        matches.append((line_num, start_col, end_col, matched_text))
-        elif self.search_options['whole_word']:
-            # Whole word matching
-            pattern = r'\b' + re.escape(self.search_term) + r'\b'
-            flags = 0 if self.search_options['case_sensitive'] else re.IGNORECASE
-            text_to_search = original_line if searching_full_line else search_text
-            for match in re.finditer(pattern, text_to_search, flags):
-                if searching_full_line:
-                    start_col = match.start()
-                    end_col = match.end()
-                    matched_text = match.group(0)
-                    matches.append((line_num, start_col, end_col, matched_text))
-                else:
-                    # Field-specific: find position of field in original line
-                    field_match_start = original_line.find(search_text)
-                    if field_match_start >= 0:
-                        start_col = field_match_start + match.start()
-                        end_col = field_match_start + match.end()
-                        matched_text = match.group(0)
-                        matches.append((line_num, start_col, end_col, matched_text))
-        else:
-            # Simple substring search
-            text_to_search = original_line if searching_full_line else search_text
-            search_in = text_to_search
-            if not self.search_options['case_sensitive']:
-                search_in = text_to_search.lower()
-            
-            search_term = self.search_term
-            if not self.search_options['case_sensitive']:
-                search_term = search_term.lower()
-            
-            start_pos = 0
-            while True:
-                pos = search_in.find(search_term, start_pos)
-                if pos == -1:
-                    break
-                if searching_full_line:
-                    start_col = pos
-                    end_col = pos + len(self.search_term)
-                    matched_text = original_line[pos:end_col]
-                    matches.append((line_num, start_col, end_col, matched_text))
-                else:
-                    # Field-specific: find position of field in original line
-                    field_match_start = original_line.find(search_text)
-                    if field_match_start >= 0:
-                        start_col = field_match_start + pos
-                        end_col = field_match_start + pos + len(self.search_term)
-                        matched_text = original_line[start_col:end_col]
-                        matches.append((line_num, start_col, end_col, matched_text))
-                start_pos = pos + 1  # Move past this match
-        
-        return matches
-    
-    def highlight_current_match(self):
-        """Highlight current match and show all other matches"""
-        if not self.search_results or self.current_search_index < 0:
-            return
-        
-        # Clear all search highlights
-        self.text_widget.tag_remove('search_current', '1.0', 'end')
-        self.text_widget.tag_remove('search_other', '1.0', 'end')
-        
-        # Highlight all matches in gray
-        for i, (line_num, start_col, end_col, matched_text) in enumerate(self.search_results):
-            start_idx = f'{line_num}.{start_col}'
-            end_idx = f'{line_num}.{end_col}'
-            self.text_widget.tag_add('search_other', start_idx, end_idx)
-        
-        # Highlight current match in yellow
-        current_match = self.search_results[self.current_search_index]
-        line_num, start_col, end_col, matched_text = current_match
-        start_idx = f'{line_num}.{start_col}'
-        end_idx = f'{line_num}.{end_col}'
-        self.text_widget.tag_add('search_current', start_idx, end_idx)
-        
-        # Scroll to show current match
-        self.text_widget.see(start_idx)
-        
-        # Update status bar
-        self.update_status_bar()
-    
-    def find_next(self):
-        """Find next search result"""
-        if not self.search_active or not self.search_results:
-            if not self.search_term:
-                self.show_find_replace_dialog()
-            return 'break'
-        
-        # Move to next result with wraparound
-        self.current_search_index = (self.current_search_index + 1) % len(self.search_results)
-        self.highlight_current_match()
-        
-        return 'break'
-    
-    def find_previous(self):
-        """Find previous search result"""
-        if not self.search_active or not self.search_results:
-            if not self.search_term:
-                self.show_find_replace_dialog()
-            return 'break'
-        
-        # Move to previous result with wraparound
-        self.current_search_index = (self.current_search_index - 1) % len(self.search_results)
-        self.highlight_current_match()
-        
-        return 'break'
-    
-    def clear_search_highlights(self):
-        """Clear all search highlights"""
-        self.text_widget.tag_remove('search_current', '1.0', 'end')
-        self.text_widget.tag_remove('search_other', '1.0', 'end')
-    
-    def close_search(self):
-        """Close search mode and clear highlights"""
-        self.search_active = False
-        self.search_results = []
-        self.current_search_index = -1
-        self.clear_search_highlights()
-        self.update_status_bar()
-    
-    def replace_current(self):
-        """Replace the current search match"""
-        if not self.search_results or self.current_search_index < 0:
-            return
-        
-        # Get current match
-        line_num, start_col, end_col, matched_text = self.search_results[self.current_search_index]
-        start_idx = f'{line_num}.{start_col}'
-        end_idx = f'{line_num}.{end_col}'
-        
-        # Calculate the position shift (difference between replacement and original text length)
-        position_shift = len(self.replace_term) - len(matched_text)
-        
-        # Delete the matched text
-        self.text_widget.delete(start_idx, end_idx)
-        
-        # Insert replacement text
-        self.text_widget.insert(start_idx, self.replace_term)
-        
-        # Update positions of all remaining matches on the same line
-        if position_shift != 0:
-            for i in range(self.current_search_index + 1, len(self.search_results)):
-                match_line_num, match_start_col, match_end_col, match_text = self.search_results[i]
-                if match_line_num == line_num:
-                    # Update positions for matches on the same line
-                    self.search_results[i] = (
-                        match_line_num,
-                        match_start_col + position_shift,
-                        match_end_col + position_shift,
-                        match_text
-                    )
-        
-        # Remove the current match from results
-        del self.search_results[self.current_search_index]
-        
-        # If there are more results, stay at same index (which is now the next match)
-        # Otherwise, close search
-        if self.search_results:
-            # Adjust index if we were at the end
-            if self.current_search_index >= len(self.search_results):
-                self.current_search_index = 0
-            self.highlight_current_match()
-        else:
-            self.close_search()
-            messagebox.showinfo("Replace", "No more matches found.", parent=self.dialog)
-    
-    def replace_all(self):
-        """Replace all search matches
-        
-        Returns:
-            int: Number of replacements made
-        """
-        if not self.search_term:
-            return 0
-        
-        # Perform search first if not already done
-        if not self.search_results:
-            self.perform_search()
-        
-        if not self.search_results:
-            return 0
-        
-        # Replace all matches in reverse order (from end to start)
-        # This prevents position shifts from affecting subsequent replacements
-        replace_count = 0
-        for line_num, start_col, end_col, matched_text in reversed(self.search_results):
-            start_idx = f'{line_num}.{start_col}'
-            end_idx = f'{line_num}.{end_col}'
-            
-            # Delete the matched text
-            self.text_widget.delete(start_idx, end_idx)
-            
-            # Insert replacement text
-            self.text_widget.insert(start_idx, self.replace_term)
-            replace_count += 1
-        
-        # Clear search state
-        self.close_search()
-        
-        return replace_count
-    
-    def toggle_comment(self):
-        """Toggle comment status for selected lines or current line"""
-        try:
-            # Check if there's a selection
+            # Try to parse as rule
             try:
-                sel_start = self.text_widget.index(tk.SEL_FIRST)
-                sel_end = self.text_widget.index(tk.SEL_LAST)
-                has_selection = True
-            except tk.TclError:
-                has_selection = False
-            
-            if has_selection:
-                # Get the range of selected lines
-                start_line = int(sel_start.split('.')[0])
-                end_line = int(sel_end.split('.')[0])
-                
-                # If selection ends at column 0 of a line, don't include that line
-                if sel_end.split('.')[1] == '0' and end_line > start_line:
-                    end_line -= 1
-            else:
-                # No selection - use current line
-                cursor_pos = self.text_widget.index('insert')
-                start_line = int(cursor_pos.split('.')[0])
-                end_line = start_line
-            
-            # Check if all selected lines are comments
-            all_comments = True
-            for line_num in range(start_line, end_line + 1):
-                line_content = self.text_widget.get(f'{line_num}.0', f'{line_num}.end')
-                line_stripped = line_content.lstrip()
-                if line_stripped and not line_stripped.startswith('#'):
-                    all_comments = False
-                    break
-            
-            # Toggle comments for each line
-            for line_num in range(start_line, end_line + 1):
-                line_content = self.text_widget.get(f'{line_num}.0', f'{line_num}.end')
-                line_stripped = line_content.lstrip()
-                
-                if not line_stripped:
-                    # Skip blank lines
-                    continue
-                
-                if all_comments:
-                    # Uncomment: remove # and one space if present
-                    if line_stripped.startswith('# '):
-                        # Remove "# " (hash and space)
-                        new_line = line_content.replace('# ', '', 1)
-                    elif line_stripped.startswith('#'):
-                        # Remove just "#" (no space)
-                        new_line = line_content.replace('#', '', 1)
+                rule = SuricataRule.from_string(line)
+                if rule:
+                    # Basic validation
+                    error_found = len(line_errors) > 0  # If validate_line found errors, mark as error
+                    
+                    # Validate action
+                    if rule.action.lower() not in ['pass', 'alert', 'drop', 'reject']:
+                        if not any('Invalid action' in msg for _, msg in errors if _ == i):
+                            errors.append((i, f"Invalid action: {rule.action}"))
+                            error_found = True
+                    
+                    # Validate protocol
+                    if rule.protocol.lower() not in [p.lower() for p in SuricataConstants.SUPPORTED_PROTOCOLS]:
+                        if not any('Invalid protocol' in msg for _, msg in errors if _ == i):
+                            errors.append((i, f"Invalid protocol: {rule.protocol}"))
+                            error_found = True
+                    
+                    # Check for undefined variables
+                    for field in [rule.src_net, rule.dst_net, rule.src_port, rule.dst_port]:
+                        if field.startswith(('$', '@')) and field not in self.variables:
+                            undefined_vars.add(field)
+                            if not any(field in msg for _, msg in warnings if _ == i):
+                                warnings.append((i, f"Undefined variable: {field}"))
+                    
+                    if error_found:
+                        # Comment out the rule
+                        comment_rule = SuricataRule()
+                        comment_rule.is_comment = True
+                        comment_rule.comment_text = f"# [SYNTAX ERROR] {line}"
+                        edited_rules.append(comment_rule)
                     else:
-                        # Already uncommented
-                        continue
+                        edited_rules.append(rule)
                 else:
-                    # Comment: add # and space at the start
-                    # Find the position of first non-whitespace character
-                    leading_spaces = len(line_content) - len(line_stripped)
-                    new_line = line_content[:leading_spaces] + '# ' + line_stripped
-                
-                # Replace the line
-                self.text_widget.delete(f'{line_num}.0', f'{line_num}.end')
-                self.text_widget.insert(f'{line_num}.0', new_line)
-            
-            # Restore selection if there was one
-            if has_selection:
-                self.text_widget.tag_add(tk.SEL, f'{start_line}.0', f'{end_line}.end')
-            
-        except Exception as e:
-            messagebox.showerror("Comment Toggle Error", f"Error toggling comments: {str(e)}", parent=self.dialog)
+                    errors.append((i, "Failed to parse rule"))
+                    comment_rule = SuricataRule()
+                    comment_rule.is_comment = True
+                    comment_rule.comment_text = f"# [SYNTAX ERROR] {line}"
+                    edited_rules.append(comment_rule)
+            except Exception as e:
+                errors.append((i, f"Parse error: {str(e)}"))
+                comment_rule = SuricataRule()
+                comment_rule.is_comment = True
+                comment_rule.comment_text = f"# [SYNTAX ERROR] {line}"
+                edited_rules.append(comment_rule)
         
-        return 'break'
+        return edited_rules, errors, warnings, undefined_vars
     
-    def show_keyboard_shortcuts(self):
-        """Display keyboard shortcuts for the Advanced Editor"""
-        shortcuts_dialog = tk.Toplevel(self.dialog)
-        shortcuts_dialog.title("Advanced Editor - Keyboard Shortcuts")
-        shortcuts_dialog.geometry("650x550")
-        shortcuts_dialog.transient(self.dialog)
-        shortcuts_dialog.grab_set()
-        shortcuts_dialog.resizable(False, False)
-        
-        # Center the dialog
-        shortcuts_dialog.geometry("+%d+%d" % (self.dialog.winfo_rootx() + 100, self.dialog.winfo_rooty() + 50))
-        
-        # Main frame
-        main_frame = ttk.Frame(shortcuts_dialog)
-        main_frame.pack(fill=tk.BOTH, expand=True, padx=20, pady=20)
-        
-        # Title
-        title_label = ttk.Label(main_frame, text="Advanced Editor Keyboard Shortcuts", 
-                               font=("TkDefaultFont", 14, "bold"))
-        title_label.pack(pady=(0, 15))
-        
-        # Create text widget with scrollbar for shortcuts
-        text_frame = ttk.Frame(main_frame)
-        text_frame.pack(fill=tk.BOTH, expand=True)
-        
-        text_widget = tk.Text(text_frame, wrap=tk.WORD, font=("TkDefaultFont", 10),
-                             bg=shortcuts_dialog.cget('bg'), relief=tk.FLAT, cursor="arrow")
-        scrollbar = ttk.Scrollbar(text_frame, orient=tk.VERTICAL, command=text_widget.yview)
-        text_widget.configure(yscrollcommand=scrollbar.set)
-        
-        text_widget.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
-        
-        # Configure text tags for formatting
-        text_widget.tag_configure("category", font=("TkDefaultFont", 11, "bold"), 
-                                foreground="#1976D2", spacing1=10, spacing3=5)
-        text_widget.tag_configure("shortcut", font=("Consolas", 10, "bold"))
-        text_widget.tag_configure("description", font=("TkDefaultFont", 10))
-        
-        # Add shortcuts organized by category
-        shortcuts = [
-            ("Clipboard Operations", [
-                ("Ctrl+X", "Cut selected text"),
-                ("Ctrl+C", "Copy selected text"),
-                ("Ctrl+V", "Paste from clipboard"),
-                ("Ctrl+A", "Select all text"),
-            ]),
-            ("Editing", [
-                ("Ctrl+Z", "Undo last change"),
-                ("Ctrl+Y", "Redo last undone change"),
-                ("Ctrl+/", "Toggle comment for selected lines"),
-                ("Tab", "Accept autocomplete or jump to next position in rule options"),
-            ]),
-            ("Search and Replace", [
-                ("Ctrl+F", "Open Find and Replace dialog"),
-                ("F3", "Find next match"),
-                ("Shift+F3", "Find previous match"),
-                ("Escape", "Close search and clear highlights"),
-            ]),
-            ("Navigation", [
-                ("Ctrl+G", "Go to line number"),
-                ("Home/End", "Move to start/end of line"),
-                ("Ctrl+Home/End", "Move to start/end of document"),
-                ("Page Up/Down", "Scroll by page"),
-            ]),
-            ("Auto-Complete", [
-                ("Ctrl+Space", "Manually trigger auto-complete"),
-                ("Up/Down", "Navigate auto-complete suggestions"),
-                ("Enter or Tab", "Accept selected suggestion"),
-                ("Escape", "Dismiss auto-complete"),
-            ]),
-            ("Special Features", [
-                ("(, [, \"", "Auto-close brackets and quotes"),
-                ("Hover over error", "Show error tooltip with suggestions"),
-                ("Right-click", "Show context menu"),
-            ]),
-        ]
-        
-        # Insert shortcuts into text widget
-        for category, shortcuts_list in shortcuts:
-            # Category header
-            text_widget.insert(tk.END, f"{category}\n", "category")
-            
-            # Shortcuts in this category
-            for shortcut, description in shortcuts_list:
-                text_widget.insert(tk.END, f"  {shortcut:<25}", "shortcut")
-                text_widget.insert(tk.END, f"{description}\n", "description")
-            
-            text_widget.insert(tk.END, "\n")
-        
-        # Make text widget read-only
-        text_widget.config(state=tk.DISABLED)
-        
-        # Close button
-        button_frame = ttk.Frame(main_frame)
-        button_frame.pack(fill=tk.X, pady=(15, 0))
-        
-        ttk.Button(button_frame, text="Close", command=shortcuts_dialog.destroy).pack(side=tk.RIGHT)
-        
-        # Focus on dialog
-        shortcuts_dialog.focus_set()
-    
-    def toggle_dark_mode(self):
-        """Toggle dark mode on/off"""
-        self.dark_mode = self.dark_mode_var.get()
-        self.apply_theme()
-    
-    def apply_theme(self):
-        """Apply the current theme (light or dark) to all UI elements"""
-        if self.dark_mode:
-            # Dark mode colors
-            bg_color = '#1E1E1E'
-            fg_color = '#D4D4D4'
-            line_num_bg = '#252526'
-            line_num_fg = '#858585'
-            cursor_color = '#AEAFAD'
-            selection_bg = '#264F78'
-            selection_fg = '#FFFFFF'
-            
-            # Apply to text widget
-            self.text_widget.config(
-                background=bg_color,
-                foreground=fg_color,
-                insertbackground=cursor_color,
-                selectbackground=selection_bg,
-                selectforeground=selection_fg
-            )
-            
-            # Apply to line numbers
-            self.line_numbers.config(
-                background=line_num_bg,
-                foreground=line_num_fg
-            )
-            
-            # Status bar labels - keep text colors unchanged (don't modify)
-            
-            # Reconfigure tags for dark mode
-            self.text_widget.tag_config('error', underline=True, underlinefg='#F48771', background='#5A1D1D')
-            self.text_widget.tag_config('warning', underline=True, underlinefg='#F0AD4E', background='#5A4A1D')
-            self.text_widget.tag_config('search_current', background='#4A4A00')  # Darker yellow
-            self.text_widget.tag_config('search_other', background='#3A3A3A')    # Dark gray
-        else:
-            # Light mode colors (original)
-            bg_color = '#FFFFFF'
-            fg_color = '#000000'
-            line_num_bg = '#F0F0F0'
-            line_num_fg = '#000000'
-            cursor_color = '#000000'
-            selection_bg = '#0078D7'
-            selection_fg = '#FFFFFF'
-            
-            # Apply to text widget
-            self.text_widget.config(
-                background=bg_color,
-                foreground=fg_color,
-                insertbackground=cursor_color,
-                selectbackground=selection_bg,
-                selectforeground=selection_fg
-            )
-            
-            # Apply to line numbers
-            self.line_numbers.config(
-                background=line_num_bg,
-                foreground=line_num_fg
-            )
-            
-            # Status bar labels - keep text colors unchanged (don't modify)
-            
-            # Reconfigure tags for light mode (original)
-            self.text_widget.tag_config('error', underline=True, underlinefg='red', background='#FFE6E6')
-            self.text_widget.tag_config('warning', underline=True, underlinefg='orange', background='#FFF4E6')
-            self.text_widget.tag_config('search_current', background='#FFFF00')  # Yellow
-            self.text_widget.tag_config('search_other', background='#E0E0E0')    # Light gray
-    
-    def on_window_close(self):
-        """Handle window close (X button)"""
-        self.dismiss_tooltip()
-        self.on_cancel()
+    def _rule_dict_from_suricata_rule(self, rule):
+        """Convert SuricataRule object to dict for JSON serialization"""
+        return {
+            'is_blank': getattr(rule, 'is_blank', False),
+            'is_comment': getattr(rule, 'is_comment', False),
+            'comment_text': getattr(rule, 'comment_text', ''),
+            'action': getattr(rule, 'action', ''),
+            'protocol': getattr(rule, 'protocol', ''),
+            'src_net': getattr(rule, 'src_net', ''),
+            'src_port': getattr(rule, 'src_port', ''),
+            'direction': getattr(rule, 'direction', ''),
+            'dst_net': getattr(rule, 'dst_net', ''),
+            'dst_port': getattr(rule, 'dst_port', ''),
+            'message': getattr(rule, 'message', ''),
+            'content': getattr(rule, 'content', ''),
+            'sid': getattr(rule, 'sid', 0),
+            'rev': getattr(rule, 'rev', 1),
+            'original_options': getattr(rule, 'original_options', '')
+        }
+
+
+# Entry point
+if __name__ == '__main__':
+    main()

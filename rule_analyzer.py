@@ -36,7 +36,7 @@ class RuleAnalyzer:
         Returns:
             Dictionary with conflict categories: {'critical': [], 'warning': [], 'info': [], 'protocol_layering': [], 'sticky_buffer_order': [], 'udp_flow_established': [], 'protocol_keyword_mismatch': []}
         """
-        conflicts = {'critical': [], 'warning': [], 'info': [], 'protocol_layering': [], 'sticky_buffer_order': [], 'udp_flow_established': [], 'protocol_keyword_mismatch': [], 'asymmetric_flow': [], 'reject_ip_protocol': []}
+        conflicts = {'critical': [], 'warning': [], 'info': [], 'protocol_layering': [], 'sticky_buffer_order': [], 'udp_flow_established': [], 'protocol_keyword_mismatch': [], 'asymmetric_flow': [], 'reject_ip_protocol': [], 'unsupported_keywords': [], 'pcre_restrictions': [], 'priority_strict_order': []}
         
         # Filter out comments and blank lines for analysis
         actual_rules = [r for r in rules if not getattr(r, 'is_comment', False) and not getattr(r, 'is_blank', False)]
@@ -138,6 +138,18 @@ class RuleAnalyzer:
         # Check for reject actions on IP protocol rules (AWS Network Firewall restriction)
         reject_ip_issues = self.check_reject_on_ip_protocol(rules)
         conflicts['reject_ip_protocol'] = reject_ip_issues
+        
+        # AWS Network Firewall: Check for unsupported keywords
+        unsupported_keyword_issues = self.check_unsupported_keywords(rules)
+        conflicts['unsupported_keywords'] = unsupported_keyword_issues
+        
+        # AWS Network Firewall: Check for PCRE restrictions
+        pcre_restriction_issues = self.check_pcre_restrictions(rules)
+        conflicts['pcre_restrictions'] = pcre_restriction_issues
+        
+        # AWS Network Firewall: Check for priority keyword in strict order mode
+        priority_strict_issues = self.check_priority_strict_order(rules)
+        conflicts['priority_strict_order'] = priority_strict_issues
         
         return conflicts
     
@@ -1086,8 +1098,190 @@ class RuleAnalyzer:
         # Original protocol layering logic for low-level vs high-level protocols
         return self.check_traditional_protocol_layering(upper_rule, lower_rule, upper_line, lower_line, variables)
     
+    def get_detailed_suricata_rule_type(self, rule: SuricataRule) -> str:
+        """Determine detailed Suricata rule type (all 10 official types)
+        
+        Per https://docs.suricata.io/en/latest/rules/rule-types.html
+        
+        Returns one of:
+        - SIG_TYPE_DEONLY (Decoder Events Only)
+        - SIG_TYPE_IPONLY (IP Only)
+        - SIG_TYPE_LIKE_IPONLY (IP Only with negated addresses)
+        - SIG_TYPE_PDONLY (Protocol Detection Only)
+        - SIG_TYPE_PKT (Packet)
+        - SIG_TYPE_PKT_STREAM (Packet-Stream)
+        - SIG_TYPE_STREAM (Stream)
+        - SIG_TYPE_APPLAYER (Application Layer Protocol)
+        - SIG_TYPE_APP_TX (Application Layer Transaction)
+        - SIG_TYPE_NOT_SET (error/unknown)
+        """
+        content = (rule.content or '').lower()
+        protocol = rule.protocol.lower()
+        
+        # 1. DECODER EVENTS ONLY - decode-event keyword
+        if 'decode-event:' in content or protocol == 'pkthdr':
+            return 'SIG_TYPE_DEONLY'
+        
+        # 2. APPLICATION TRANSACTION - Sticky buffer keywords
+        app_layer_buffers = [
+            'http.accept', 'http.accept_enc', 'http.accept_lang', 'http.connection',
+            'http.content_len', 'http.content_type', 'http.cookie', 'http.header',
+            'http.header_names', 'http.host', 'http.method', 'http.protocol',
+            'http.referer', 'http.request_body', 'http.request_header', 'http.request_line',
+            'http.response_body', 'http.response_header', 'http.response_line',
+            'http.server', 'http.start', 'http.stat_code', 'http.stat_msg',
+            'http.uri', 'http.uri.raw', 'http.user_agent',
+            'tls.cert_fingerprint', 'tls.cert_issuer', 'tls.cert_serial',
+            'tls.cert_subject', 'tls.certs', 'tls.sni', 'tls.version',
+            'dns.query', 'dns.answer',
+            'ssh.proto', 'ssh.software', 'ssh.protoversion', 'ssh.softwareversion',
+            'ja3.hash', 'ja3.string', 'ja3s.hash', 'ja3s.string',
+            'ja4.hash', 'ja4.string',
+            'file.data', 'file.name',
+            'smb.named_pipe', 'smb.share',
+            'krb5.cname', 'krb5.sname',
+            'dcerpc.iface', 'dcerpc.stub_data',
+            'ftp.command', 'ftp.command_line',
+            'frame:', 'modbus.', 'nfs3.', 'sip.', 'snmp.'
+        ]
+        
+        if any(buffer in content for buffer in app_layer_buffers):
+            return 'SIG_TYPE_APP_TX'
+        
+        # 3. PROTOCOL DETECTION ONLY - app-layer-protocol keyword
+        # NOTE: Since Suricata 7, this is PDONLY not APPLAYER
+        if 'app-layer-protocol:' in content:
+            return 'SIG_TYPE_PDONLY'
+        
+        # 4. PACKET-STREAM - content with startswith or depth (anchored)
+        if 'content:' in content:
+            if 'startswith' in content or 'depth:' in content:
+                return 'SIG_TYPE_PKT_STREAM'
+        
+        # 5. STREAM - unanchored content or byte_extract/byte_test
+        if 'content:' in content or 'byte_extract:' in content or 'byte_test:' in content:
+            return 'SIG_TYPE_STREAM'
+        
+        if protocol == 'tcp-stream':
+            return 'SIG_TYPE_STREAM'
+        
+        # 6. APPLICATION LAYER PROTOCOL - app protocol in protocol field
+        app_layer_protocols = ['dcerpc', 'dhcp', 'dns', 'ftp', 'http', 'http2', 
+                               'https', 'ikev2', 'imap', 'krb5', 'msn', 'ntp', 
+                               'pop3', 'quic', 'rdp', 'smb', 'smtp', 'ssh', 'tftp', 'tls']
+        
+        if protocol in app_layer_protocols:
+            # Check if variable-like keywords force packet-level classification
+            if 'flow:established' in content or 'flow:not_established' in content:
+                return 'SIG_TYPE_PKT'
+            return 'SIG_TYPE_APPLAYER'
+        
+        # 7. PACKET - Variable-like keywords or flow keywords
+        # flowbits:isset/isnotset (NOT set/unset/toggle)
+        if any(keyword in content for keyword in ['flowbits:isset', 'flowbits:isnotset']):
+            return 'SIG_TYPE_PKT'
+        
+        # flowint with isset/notset operations
+        if 'flowint:' in content and any(op in content for op in ['isset', 'notset']):
+            return 'SIG_TYPE_PKT'
+        
+        # iprep keyword
+        if 'iprep:' in content:
+            return 'SIG_TYPE_PKT'
+        
+        # flow: keyword (any flow keyword makes it packet type)
+        if 'flow:' in content:
+            return 'SIG_TYPE_PKT'
+        
+        # tcp-pkt protocol
+        if protocol == 'tcp-pkt':
+            return 'SIG_TYPE_PKT'
+        
+        # 8. LIKE_IPONLY - IP-only rules with negated addresses
+        # Check if source or destination has negated addresses
+        if self._has_negated_addresses(rule.src_net, rule.dst_net):
+            return 'SIG_TYPE_LIKE_IPONLY'
+        
+        # 9. IPONLY - Basic IP/protocol rules with no keywords
+        return 'SIG_TYPE_IPONLY'
+    
+    def _has_negated_addresses(self, src_net: str, dst_net: str) -> bool:
+        """Check if network specification contains negated addresses
+        
+        Examples:
+        - ![10.0.0.0/8] - negated group
+        - [10.0.0.0/8,!10.0.0.5] - group with negation
+        - !192.168.1.0/24 - simple negation
+        """
+        for net in [src_net, dst_net]:
+            if not net or net.lower() == 'any':
+                continue
+            # Check for negation patterns
+            if net.startswith('!'):
+                return True
+            if '!' in net and '[' in net:
+                return True
+        return False
+    
+    def map_detailed_to_simplified(self, detailed_type: str) -> str:
+        """Map detailed 10-type classification to simplified 3-tier for conflict detection
+        
+        Args:
+            detailed_type: One of the 10 detailed SIG_TYPE_* values
+        
+        Returns:
+            Simplified type: SIG_TYPE_IPONLY, SIG_TYPE_PKT, or SIG_TYPE_APPLAYER
+        """
+        mapping = {
+            'SIG_TYPE_DEONLY': 'SIG_TYPE_PKT',          # Packet-level processing
+            'SIG_TYPE_IPONLY': 'SIG_TYPE_IPONLY',       # IP-only processing
+            'SIG_TYPE_LIKE_IPONLY': 'SIG_TYPE_IPONLY',  # IP-only processing
+            'SIG_TYPE_PDONLY': 'SIG_TYPE_APPLAYER',     # Application-layer processing
+            'SIG_TYPE_PKT': 'SIG_TYPE_PKT',             # Packet-level processing
+            'SIG_TYPE_PKT_STREAM': 'SIG_TYPE_PKT',      # Packet-level processing
+            'SIG_TYPE_STREAM': 'SIG_TYPE_PKT',          # Packet-level processing
+            'SIG_TYPE_APPLAYER': 'SIG_TYPE_APPLAYER',   # Application-layer processing
+            'SIG_TYPE_APP_TX': 'SIG_TYPE_APPLAYER',     # Application-layer processing
+            'SIG_TYPE_NOT_SET': 'SIG_TYPE_IPONLY',      # Default to IP-only
+        }
+        return mapping.get(detailed_type, 'SIG_TYPE_IPONLY')
+    
+    def get_display_label_for_type(self, detailed_type: str) -> str:
+        """Get display label for SIG type (raw constant names)
+        
+        Args:
+            detailed_type: One of the 10 detailed SIG_TYPE_* values
+        
+        Returns:
+            Raw constant name for UI display (3-11 characters)
+        """
+        labels = {
+            'SIG_TYPE_DEONLY': 'DEONLY',
+            'SIG_TYPE_IPONLY': 'IPONLY',
+            'SIG_TYPE_LIKE_IPONLY': 'LIKE_IPONLY',
+            'SIG_TYPE_PDONLY': 'PDONLY',
+            'SIG_TYPE_PKT': 'PKT',
+            'SIG_TYPE_PKT_STREAM': 'PKT_STREAM',
+            'SIG_TYPE_STREAM': 'STREAM',
+            'SIG_TYPE_APPLAYER': 'APPLAYER',
+            'SIG_TYPE_APP_TX': 'APP_TX',
+            'SIG_TYPE_NOT_SET': '(unset)',
+        }
+        return labels.get(detailed_type, '(unset)')
+    
     def get_suricata_rule_type(self, rule: SuricataRule) -> str:
-        """Determine Suricata rule type based on keywords per official Suricata documentation
+        """Determine Suricata rule type for conflict detection (simplified 3-tier)
+        
+        This uses the detailed classification but maps to simplified 3-tier system
+        for AWS Network Firewall conflict detection.
+        
+        Per https://docs.suricata.io/en/latest/rules/rule-types.html
+        """
+        detailed_type = self.get_detailed_suricata_rule_type(rule)
+        return self.map_detailed_to_simplified(detailed_type)
+    
+    def get_suricata_rule_type_legacy(self, rule: SuricataRule) -> str:
+        """Legacy implementation - kept for reference but not used
         
         Per https://docs.suricata.io/en/latest/rules/rule-types.html
         """
@@ -2852,6 +3046,173 @@ class RuleAnalyzer:
         
         return issues
     
+    def check_unsupported_keywords(self, rules: List[SuricataRule]) -> List[Dict]:
+        """Check for AWS Network Firewall unsupported keywords
+        
+        AWS Network Firewall does not support certain Suricata keywords:
+        - Datasets (dataset, datarep)
+        - IP reputation (iprep)
+        - File extraction (file keywords except file.data, file.name)
+        - Thresholding keywords
+        
+        Per: https://docs.aws.amazon.com/network-firewall/latest/developerguide/suricata-limitations-caveats.html
+        
+        Args:
+            rules: List of SuricataRule objects to analyze
+            
+        Returns:
+            List of dictionaries describing unsupported keyword issues
+        """
+        issues = []
+        
+        # Define unsupported keywords
+        unsupported_keywords = {
+            # Datasets
+            'dataset': 'Datasets are not supported by AWS Network Firewall',
+            'datarep': 'Dataset reputation is not supported by AWS Network Firewall',
+            
+            # IP reputation (note: iprep is already detected in rule type classification)
+            # We still check here for completeness
+            'iprep:': 'IP reputation (iprep) is not supported by AWS Network Firewall',
+            
+            # File extraction keywords (excluding file.data and file.name which are supported)
+            'filestore': 'File extraction (filestore) is not supported by AWS Network Firewall',
+            'filemagic:': 'File extraction (filemagic) is not supported by AWS Network Firewall',
+            'filename:': 'File extraction (filename) is not supported by AWS Network Firewall',
+            'fileext:': 'File extraction (fileext) is not supported by AWS Network Firewall',
+            'filesize:': 'File extraction (filesize) is not supported by AWS Network Firewall',
+            'filemd5:': 'File extraction (filemd5) is not supported by AWS Network Firewall',
+            'filesha1:': 'File extraction (filesha1) is not supported by AWS Network Firewall',
+            'filesha256:': 'File extraction (filesha256) is not supported by AWS Network Firewall',
+            
+            # Thresholding
+            'threshold:': 'Thresholding is not supported by AWS Network Firewall',
+            'detection_filter:': 'Detection filter (thresholding) is not supported by AWS Network Firewall',
+        }
+        
+        # Filter out comments and blank lines
+        actual_rules = [r for r in rules if not getattr(r, 'is_comment', False) and not getattr(r, 'is_blank', False)]
+        
+        for rule in actual_rules:
+            line_num = rules.index(rule) + 1
+            
+            # Get full rule content
+            full_content = (rule.content or '') + ' ' + (rule.original_options or '')
+            full_content_lower = full_content.lower()
+            
+            # Check for each unsupported keyword
+            found_keywords = []
+            for keyword, reason in unsupported_keywords.items():
+                if keyword in full_content_lower:
+                    found_keywords.append((keyword, reason))
+            
+            # Report issues for found unsupported keywords
+            if found_keywords:
+                for keyword, reason in found_keywords:
+                    issue = {
+                        'line': line_num,
+                        'rule': rule,
+                        'keyword': keyword,
+                        'issue': f"Rule uses unsupported keyword '{keyword}'. {reason}",
+                        'suggestion': f"Remove '{keyword}' keyword - AWS Network Firewall does not support this feature",
+                        'severity': 'critical'
+                    }
+                    issues.append(issue)
+        
+        return issues
+    
+    def check_pcre_restrictions(self, rules: List[SuricataRule]) -> List[Dict]:
+        """Check for PCRE keyword usage restrictions in AWS Network Firewall
+        
+        AWS Network Firewall only allows 'pcre' keyword with specific companion keywords:
+        - content
+        - tls.sni
+        - http.host
+        - dns.query
+        
+        Per: https://docs.aws.amazon.com/network-firewall/latest/developerguide/suricata-limitations-caveats.html
+        
+        Args:
+            rules: List of SuricataRule objects to analyze
+            
+        Returns:
+            List of dictionaries describing PCRE restriction violations
+        """
+        issues = []
+        
+        # Define allowed companion keywords for pcre
+        allowed_companions = ['content:', 'tls.sni', 'http.host', 'dns.query']
+        
+        # Filter out comments and blank lines
+        actual_rules = [r for r in rules if not getattr(r, 'is_comment', False) and not getattr(r, 'is_blank', False)]
+        
+        for rule in actual_rules:
+            line_num = rules.index(rule) + 1
+            
+            # Get full rule content
+            full_content = (rule.content or '') + ' ' + (rule.original_options or '')
+            full_content_lower = full_content.lower()
+            
+            # Check if rule contains pcre keyword
+            if 'pcre:' not in full_content_lower:
+                continue
+            
+            # Check if rule has at least one of the allowed companion keywords
+            has_allowed_companion = any(companion in full_content_lower for companion in allowed_companions)
+            
+            if not has_allowed_companion:
+                issue = {
+                    'line': line_num,
+                    'rule': rule,
+                    'issue': (f"Rule uses 'pcre' keyword without allowed companion keywords. "
+                             f"AWS Network Firewall only allows 'pcre' with: content, tls.sni, http.host, or dns.query"),
+                    'suggestion': f"Add one of the allowed companion keywords (content, tls.sni, http.host, dns.query) or remove 'pcre' keyword",
+                    'severity': 'critical'
+                }
+                issues.append(issue)
+        
+        return issues
+    
+    def check_priority_strict_order(self, rules: List[SuricataRule]) -> List[Dict]:
+        """Check for priority keyword in strict evaluation order mode
+        
+        AWS Network Firewall uses strict evaluation order by default, where the 'priority'
+        keyword is not supported. Rules are evaluated in file order within their tier.
+        
+        Per: https://docs.aws.amazon.com/network-firewall/latest/developerguide/suricata-limitations-caveats.html
+        
+        Args:
+            rules: List of SuricataRule objects to analyze
+            
+        Returns:
+            List of dictionaries describing priority keyword usage issues
+        """
+        issues = []
+        
+        # Filter out comments and blank lines
+        actual_rules = [r for r in rules if not getattr(r, 'is_comment', False) and not getattr(r, 'is_blank', False)]
+        
+        for rule in actual_rules:
+            line_num = rules.index(rule) + 1
+            
+            # Get full rule content
+            full_content = (rule.content or '') + ' ' + (rule.original_options or '')
+            full_content_lower = full_content.lower()
+            
+            # Check if rule contains priority keyword
+            if 'priority:' in full_content_lower:
+                issue = {
+                    'line': line_num,
+                    'rule': rule,
+                    'issue': (f"Rule uses 'priority' keyword. AWS Network Firewall uses strict evaluation order "
+                             f"(file order) and does not support the 'priority' keyword."),
+                    'suggestion': f"Remove 'priority' keyword and rely on file order for rule evaluation",
+                    'severity': 'warning'
+                }
+                issues.append(issue)
+        
+        return issues
+    
     def generate_analysis_report(self, conflicts: Dict[str, List[Dict]],
                                total_rules: int, current_file: str = None, 
                                version: str = None) -> str:
@@ -3024,6 +3385,36 @@ class RuleAnalyzer:
             report += f"🚨 REJECT ON IP PROTOCOL - CRITICAL ({len(conflicts['reject_ip_protocol'])})\n"
             report += f"-" * 30 + "\n"
             for i, issue in enumerate(conflicts['reject_ip_protocol'], 1):
+                report += f"{i}. Line {issue['line']}\n"
+                report += f"   Issue: {issue['issue']}\n"
+                report += f"   Rule: {issue['rule'].to_string()[:80]}...\n"
+                report += f"   Suggestion: {issue['suggestion']}\n\n"
+        
+        # AWS Network Firewall: Unsupported keywords (CRITICAL)
+        if conflicts.get('unsupported_keywords'):
+            report += f"🚨 AWS UNSUPPORTED KEYWORDS - CRITICAL ({len(conflicts['unsupported_keywords'])})\n"
+            report += f"-" * 30 + "\n"
+            for i, issue in enumerate(conflicts['unsupported_keywords'], 1):
+                report += f"{i}. Line {issue['line']} - Keyword: '{issue['keyword']}'\n"
+                report += f"   Issue: {issue['issue']}\n"
+                report += f"   Rule: {issue['rule'].to_string()[:80]}...\n"
+                report += f"   Suggestion: {issue['suggestion']}\n\n"
+        
+        # AWS Network Firewall: PCRE restrictions (CRITICAL)
+        if conflicts.get('pcre_restrictions'):
+            report += f"🚨 AWS PCRE RESTRICTIONS - CRITICAL ({len(conflicts['pcre_restrictions'])})\n"
+            report += f"-" * 30 + "\n"
+            for i, issue in enumerate(conflicts['pcre_restrictions'], 1):
+                report += f"{i}. Line {issue['line']}\n"
+                report += f"   Issue: {issue['issue']}\n"
+                report += f"   Rule: {issue['rule'].to_string()[:80]}...\n"
+                report += f"   Suggestion: {issue['suggestion']}\n\n"
+        
+        # AWS Network Firewall: Priority keyword in strict order (WARNING)
+        if conflicts.get('priority_strict_order'):
+            report += f"⚠️ AWS PRIORITY KEYWORD - WARNING ({len(conflicts['priority_strict_order'])})\n"
+            report += f"-" * 30 + "\n"
+            for i, issue in enumerate(conflicts['priority_strict_order'], 1):
                 report += f"{i}. Line {issue['line']}\n"
                 report += f"   Issue: {issue['issue']}\n"
                 report += f"   Rule: {issue['rule'].to_string()[:80]}...\n"
@@ -3259,6 +3650,39 @@ class RuleAnalyzer:
                 html += f'<h2 class="critical">🚨 REJECT ON IP PROTOCOL - CRITICAL ({len(conflicts["reject_ip_protocol"])})</h2>'
                 for i, issue in enumerate(conflicts['reject_ip_protocol'], 1):
                     html += f'<div class="conflict conflict-critical">'
+                    html += f'<strong>{i}. Line {issue["line"]}</strong><br>'
+                    html += f'<strong>Issue:</strong> {issue["issue"]}<br>'
+                    html += f'<strong>Suggestion:</strong> {issue["suggestion"]}<br>'
+                    html += f'<div class="rule-text">Rule: {issue["rule"].to_string()[:100]}...</div>'
+                    html += '</div>'
+            
+            # AWS Network Firewall: Unsupported keywords (CRITICAL)
+            if conflicts.get('unsupported_keywords'):
+                html += f'<h2 class="critical">🚨 AWS UNSUPPORTED KEYWORDS - CRITICAL ({len(conflicts["unsupported_keywords"])})</h2>'
+                for i, issue in enumerate(conflicts['unsupported_keywords'], 1):
+                    html += f'<div class="conflict conflict-critical">'
+                    html += f'<strong>{i}. Line {issue["line"]} - Keyword: \'{issue["keyword"]}\'</strong><br>'
+                    html += f'<strong>Issue:</strong> {issue["issue"]}<br>'
+                    html += f'<strong>Suggestion:</strong> {issue["suggestion"]}<br>'
+                    html += f'<div class="rule-text">Rule: {issue["rule"].to_string()[:100]}...</div>'
+                    html += '</div>'
+            
+            # AWS Network Firewall: PCRE restrictions (CRITICAL)
+            if conflicts.get('pcre_restrictions'):
+                html += f'<h2 class="critical">🚨 AWS PCRE RESTRICTIONS - CRITICAL ({len(conflicts["pcre_restrictions"])})</h2>'
+                for i, issue in enumerate(conflicts['pcre_restrictions'], 1):
+                    html += f'<div class="conflict conflict-critical">'
+                    html += f'<strong>{i}. Line {issue["line"]}</strong><br>'
+                    html += f'<strong>Issue:</strong> {issue["issue"]}<br>'
+                    html += f'<strong>Suggestion:</strong> {issue["suggestion"]}<br>'
+                    html += f'<div class="rule-text">Rule: {issue["rule"].to_string()[:100]}...</div>'
+                    html += '</div>'
+            
+            # AWS Network Firewall: Priority keyword in strict order (WARNING)
+            if conflicts.get('priority_strict_order'):
+                html += f'<h2 class="warning">⚠️ AWS PRIORITY KEYWORD - WARNING ({len(conflicts["priority_strict_order"])})</h2>'
+                for i, issue in enumerate(conflicts['priority_strict_order'], 1):
+                    html += f'<div class="conflict conflict-warning">'
                     html += f'<strong>{i}. Line {issue["line"]}</strong><br>'
                     html += f'<strong>Issue:</strong> {issue["issue"]}<br>'
                     html += f'<strong>Suggestion:</strong> {issue["suggestion"]}<br>'

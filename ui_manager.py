@@ -4,6 +4,7 @@ import re
 import os
 from typing import Optional
 from constants import SuricataConstants
+from suricata_rule import SuricataRule
 
 class UIManager:
     """Manages all UI components and setup for the Suricata Rule Generator"""
@@ -85,6 +86,8 @@ class UIManager:
         tools_menu.add_command(label="SID Management", command=self.show_sid_management)
         tools_menu.add_command(label="Test Flow", command=self.show_test_flow_dialog)
         tools_menu.add_separator()
+        self.parent.show_sigtype_var = tk.BooleanVar(value=False)
+        tools_menu.add_checkbutton(label="Show SIG Type Classification", variable=self.parent.show_sigtype_var, command=self.toggle_sigtype_column)
         self.parent.tracking_menu_var = tk.BooleanVar(value=self.parent.tracking_enabled)
         tools_menu.add_checkbutton(label="Enable Change Tracking", variable=self.parent.tracking_menu_var, command=self.parent.toggle_tracking)
         
@@ -92,6 +95,8 @@ class UIManager:
         help_menu = tk.Menu(menubar, tearoff=0)
         menubar.add_cascade(label="Help", menu=help_menu)
         help_menu.add_command(label="Keyboard Shortcuts", command=self.show_keyboard_shortcuts)
+        help_menu.add_separator()
+        help_menu.add_command(label="About SIG Types", command=self.show_sigtype_help)
         help_menu.add_separator()
         help_menu.add_command(label="About", command=self.parent.show_about)
         
@@ -112,10 +117,14 @@ class UIManager:
         self.parent.root.bind('<Home>', self.on_key_home)
         self.parent.root.bind('<space>', self.on_space_key)
         self.parent.root.bind('<Control-g>', self.on_ctrl_g_key)
+        self.parent.root.bind('<Return>', self.on_enter_key)
         
         # Main frame
         main_frame = ttk.Frame(self.parent.root)
         main_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+        
+        # Filter bar (above table)
+        self.setup_filter_bar(main_frame)
         
         # Rules table
         self.setup_rules_table(main_frame)
@@ -128,6 +137,296 @@ class UIManager:
         
         self.parent.root.protocol("WM_DELETE_WINDOW", self.parent.on_closing)
     
+    def setup_filter_bar(self, parent):
+        """Setup collapsible filter bar above the rules table"""
+        # Main filter container
+        filter_container = ttk.Frame(parent)
+        filter_container.pack(fill=tk.X, pady=(0, 5))
+        
+        # Row 1: Always visible (shown when collapsed or expanded)
+        self.filter_row1_frame = ttk.Frame(filter_container)
+        self.filter_row1_frame.pack(fill=tk.X, pady=2)
+        
+        # Collapse/expand control
+        self.filter_collapsed = True
+        self.collapse_label = ttk.Label(self.filter_row1_frame, text="▶", cursor="hand2", 
+                                       font=("TkDefaultFont", 9, "bold"))
+        self.collapse_label.pack(side=tk.LEFT, padx=5)
+        self.collapse_label.bind('<Button-1>', lambda e: self.toggle_filter_bar())
+        
+        # Action checkboxes (always visible)
+        self.filter_pass_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(self.filter_row1_frame, text="Pass", variable=self.filter_pass_var,
+                       command=self.apply_filters_phase1).pack(side=tk.LEFT, padx=3)
+        
+        self.filter_drop_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(self.filter_row1_frame, text="Drop", variable=self.filter_drop_var,
+                       command=self.apply_filters_phase1).pack(side=tk.LEFT, padx=3)
+        
+        self.filter_reject_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(self.filter_row1_frame, text="Reject", variable=self.filter_reject_var,
+                       command=self.apply_filters_phase1).pack(side=tk.LEFT, padx=3)
+        
+        self.filter_alert_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(self.filter_row1_frame, text="Alert", variable=self.filter_alert_var,
+                       command=self.apply_filters_phase1).pack(side=tk.LEFT, padx=3)
+        
+        self.filter_comments_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(self.filter_row1_frame, text="Comments", variable=self.filter_comments_var,
+                       command=self.apply_filters_phase1).pack(side=tk.LEFT, padx=3)
+        
+        # Protocol button (always visible)
+        ttk.Label(self.filter_row1_frame, text="| Protocol:", font=("TkDefaultFont", 9)).pack(side=tk.LEFT, padx=(10, 2))
+        self.filter_protocol_var = tk.StringVar(value="All Protocols")
+        self.selected_protocols = []
+        self.protocol_button = ttk.Button(self.filter_row1_frame, text="All Protocols", width=14, 
+                                         command=self.show_protocol_selector)
+        self.protocol_button.pack(side=tk.LEFT, padx=(0, 5))
+        
+        # Row 2: SID range, Variable filters + buttons (only visible when expanded)
+        self.filter_row2_frame = ttk.Frame(filter_container)
+        row2 = self.filter_row2_frame
+        
+        # Add spacing to align with row1
+        ttk.Label(row2, text="              ", font=("TkDefaultFont", 9)).pack(side=tk.LEFT)
+        
+        # SID range inputs with exclude checkbox
+        ttk.Label(row2, text="SID:", font=("TkDefaultFont", 9)).pack(side=tk.LEFT, padx=(0, 2))
+        self.filter_sid_from_var = tk.StringVar()
+        ttk.Entry(row2, textvariable=self.filter_sid_from_var, width=8).pack(side=tk.LEFT)
+        ttk.Label(row2, text="to", font=("TkDefaultFont", 9)).pack(side=tk.LEFT, padx=2)
+        self.filter_sid_to_var = tk.StringVar()
+        ttk.Entry(row2, textvariable=self.filter_sid_to_var, width=8).pack(side=tk.LEFT)
+        
+        # Exclude range checkbox
+        self.filter_sid_exclude_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(row2, text="Exclude", variable=self.filter_sid_exclude_var).pack(side=tk.LEFT, padx=(2, 10))
+        
+        # Variable dropdown (auto-populated from rules)
+        ttk.Label(row2, text="Var:", font=("TkDefaultFont", 9)).pack(side=tk.LEFT, padx=(0, 2))
+        self.filter_variable_var = tk.StringVar(value="All")
+        self.variable_combo = ttk.Combobox(row2, textvariable=self.filter_variable_var,
+                                          values=["All"],
+                                          state="readonly", width=12)
+        self.variable_combo.pack(side=tk.LEFT, padx=(0, 10))
+        
+        # Apply and Clear buttons
+        ttk.Button(row2, text="Apply", command=self.apply_filters_phase2).pack(side=tk.RIGHT, padx=(5, 0))
+        ttk.Button(row2, text="Clear", command=self.clear_filters).pack(side=tk.RIGHT)
+        
+        # Initially update variable dropdown
+        self.refresh_variable_dropdown()
+    
+    def toggle_filter_bar(self):
+        """Toggle filter bar between collapsed and expanded states"""
+        self.filter_collapsed = not self.filter_collapsed
+        
+        if self.filter_collapsed:
+            # Collapsed: Hide Row 2, show Row 1 only
+            self.collapse_label.config(text="▶")
+            self.filter_row2_frame.pack_forget()
+        else:
+            # Expanded: Show both rows
+            self.collapse_label.config(text="▼")
+            self.filter_row2_frame.pack(fill=tk.X, pady=2)
+            # Refresh variable dropdown when expanding
+            self.refresh_variable_dropdown()
+    
+    
+    def show_protocol_selector(self):
+        """Show multi-select protocol popup with checkmarks"""
+        # Create popup window with optimized dimensions
+        popup = tk.Toplevel(self.parent.root)
+        popup.title("Select Protocols")
+        popup.transient(self.parent.root)
+        popup.grab_set()
+        popup.resizable(False, False)
+        
+        # Position popup near the protocol button
+        button_x = self.protocol_button.winfo_rootx()
+        button_y = self.protocol_button.winfo_rooty() + self.protocol_button.winfo_height()
+        popup.geometry(f"180x350+{button_x}+{button_y}")
+        
+        # Main container
+        main_container = ttk.Frame(popup)
+        main_container.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+        
+        # Create scrollable frame for checkboxes
+        canvas = tk.Canvas(main_container, width=140, height=280)
+        scrollbar = ttk.Scrollbar(main_container, orient="vertical", command=canvas.yview)
+        scrollable_frame = ttk.Frame(canvas)
+        
+        scrollable_frame.bind(
+            "<Configure>",
+            lambda e: canvas.configure(scrollregion=canvas.bbox("all"))
+        )
+        
+        canvas.create_window((0, 0), window=scrollable_frame, anchor="nw")
+        canvas.configure(yscrollcommand=scrollbar.set)
+        
+        # Create checkbox variables for each protocol
+        protocol_vars = {}
+        
+        for protocol in SuricataConstants.SUPPORTED_PROTOCOLS:
+            var = tk.BooleanVar(value=(protocol in self.selected_protocols))
+            protocol_vars[protocol] = var
+            
+            cb = ttk.Checkbutton(scrollable_frame, text=protocol.upper(), variable=var)
+            cb.pack(anchor=tk.W, padx=10, pady=1)
+        
+        # Pack canvas and scrollbar
+        canvas.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
+        
+        # Enable mouse wheel scrolling
+        def on_mousewheel(event):
+            try:
+                if event.delta:
+                    canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+                elif event.num == 4:
+                    canvas.yview_scroll(-1, "units")
+                elif event.num == 5:
+                    canvas.yview_scroll(1, "units")
+            except:
+                pass
+        
+        canvas.bind_all("<MouseWheel>", on_mousewheel)
+        canvas.bind_all("<Button-4>", on_mousewheel)
+        canvas.bind_all("<Button-5>", on_mousewheel)
+        
+        # Buttons at bottom - no padding above to eliminate wasted space
+        button_frame = ttk.Frame(popup)
+        button_frame.pack(fill=tk.X, padx=5, pady=(0, 5))
+        
+        def on_ok():
+            # Unbind mouse wheel before closing
+            canvas.unbind_all("<MouseWheel>")
+            canvas.unbind_all("<Button-4>")
+            canvas.unbind_all("<Button-5>")
+            
+            # Collect selected protocols
+            self.selected_protocols = [p for p, v in protocol_vars.items() if v.get()]
+            
+            # Update button text
+            if not self.selected_protocols:
+                self.protocol_button.config(text="All Protocols")
+                self.filter_protocol_var.set("All Protocols")
+            elif len(self.selected_protocols) == 1:
+                self.protocol_button.config(text=self.selected_protocols[0].upper())
+                self.filter_protocol_var.set(self.selected_protocols[0].upper())
+            else:
+                self.protocol_button.config(text=f"{len(self.selected_protocols)} Protocols")
+                self.filter_protocol_var.set(f"{len(self.selected_protocols)} Protocols")
+            
+            popup.destroy()
+            
+            # Apply filters immediately
+            self.apply_filters_phase1()
+        
+        def on_cancel():
+            # Unbind mouse wheel before closing
+            canvas.unbind_all("<MouseWheel>")
+            canvas.unbind_all("<Button-4>")
+            canvas.unbind_all("<Button-5>")
+            popup.destroy()
+        
+        ttk.Button(button_frame, text="OK", command=on_ok).pack(side=tk.RIGHT, padx=(5, 0))
+        ttk.Button(button_frame, text="Cancel", command=on_cancel).pack(side=tk.RIGHT)
+        
+        # Bind Escape key
+        popup.bind('<Escape>', lambda e: on_cancel())
+    
+    def apply_filters_phase1(self):
+        """Apply Phase 1 filters (Actions + Protocol) - instant filtering"""
+        filter_obj = self.parent.rule_filter
+        
+        # Collect checked actions
+        filter_obj.actions = []
+        if self.filter_pass_var.get():
+            filter_obj.actions.append('pass')
+        if self.filter_drop_var.get():
+            filter_obj.actions.append('drop')
+        if self.filter_reject_var.get():
+            filter_obj.actions.append('reject')
+        if self.filter_alert_var.get():
+            filter_obj.actions.append('alert')
+        
+        filter_obj.show_comments = self.filter_comments_var.get()
+        
+        # Protocol filter (support multiple protocols)
+        if self.selected_protocols:
+            filter_obj.protocols = [p.lower() for p in self.selected_protocols]
+        else:
+            filter_obj.protocols = []
+        
+        # Refresh table
+        self.parent.refresh_table(preserve_selection=False)
+    
+    def apply_filters_phase2(self):
+        """Apply Phase 2 filters (includes SID Range + Variable) - with Apply button"""
+        # First apply Phase 1 filters
+        self.apply_filters_phase1()
+        
+        filter_obj = self.parent.rule_filter
+        
+        # Apply SID range filter
+        try:
+            sid_from = self.filter_sid_from_var.get().strip()
+            sid_to = self.filter_sid_to_var.get().strip()
+            
+            filter_obj.sid_min = int(sid_from) if sid_from else None
+            filter_obj.sid_max = int(sid_to) if sid_to else None
+            filter_obj.sid_exclude_range = self.filter_sid_exclude_var.get()
+        except ValueError:
+            # Invalid SID input - ignore filter
+            filter_obj.sid_min = None
+            filter_obj.sid_max = None
+            filter_obj.sid_exclude_range = False
+        
+        # Apply Variable filter
+        selected_var = self.filter_variable_var.get()
+        if selected_var != "All":
+            filter_obj.variables = [selected_var]
+        else:
+            filter_obj.variables = []
+        
+        # Refresh variable dropdown (to catch any new variables added)
+        self.refresh_variable_dropdown()
+        
+        # Refresh table
+        self.parent.refresh_table(preserve_selection=False)
+    
+    def refresh_variable_dropdown(self):
+        """Refresh variable dropdown when rules change"""
+        used_vars = self.parent.rule_filter.get_used_variables(self.parent.rules)
+        var_values = ["All"] + used_vars
+        self.variable_combo['values'] = var_values
+        
+        # If currently selected variable is no longer in use, reset to "All"
+        if self.filter_variable_var.get() not in var_values:
+            self.filter_variable_var.set("All")
+    
+    def clear_filters(self):
+        """Reset all filters to default (show all)"""
+        self.filter_pass_var.set(True)
+        self.filter_drop_var.set(True)
+        self.filter_reject_var.set(True)
+        self.filter_alert_var.set(True)
+        self.filter_comments_var.set(True)
+        
+        # Reset protocol multi-select
+        self.selected_protocols = []
+        self.protocol_button.config(text="All Protocols")
+        self.filter_protocol_var.set("All Protocols")
+        
+        self.filter_sid_from_var.set("")
+        self.filter_sid_to_var.set("")
+        self.filter_sid_exclude_var.set(False)
+        self.filter_variable_var.set("All")
+        
+        # Apply the cleared filters
+        self.apply_filters_phase2()
+    
     def setup_rules_table(self, parent):
         """Setup the rules display table with color coding and enhanced scrolling"""
         table_frame = ttk.LabelFrame(parent, text="Suricata Rules")
@@ -139,17 +438,19 @@ class UIManager:
         
         # Create treeview with enhanced scrolling capabilities
         # Reduced height to allocate more space to editor section below
-        columns = ("Line", "Action", "Protocol", "Rule Data")
+        columns = ("Line", "SigType", "Action", "Protocol", "Rule Data")
         self.tree = ttk.Treeview(table_container, columns=columns, show="headings", 
                                 height=15, selectmode="extended")
         
         # Configure column headings and widths
         self.tree.heading("Line", text="Line")
+        self.tree.heading("SigType", text="SIG Type")
         self.tree.heading("Action", text="Action") 
         self.tree.heading("Protocol", text="Protocol")
         self.tree.heading("Rule Data", text="Source | Src Port | Direction | Destination | Dst Port | Options | Message | SID | Rev")
         
         self.tree.column("Line", width=50, stretch=False, minwidth=40)
+        self.tree.column("SigType", width=0, stretch=False, minwidth=0)  # Hidden by default
         self.tree.column("Action", width=80, stretch=False, minwidth=60)
         self.tree.column("Protocol", width=80, stretch=False, minwidth=60)
         self.tree.column("Rule Data", width=1000, stretch=True, minwidth=300)
@@ -511,6 +812,7 @@ class UIManager:
         self.sid_label = tk.Label(status_frame, text="", fg="#666666", font=("TkDefaultFont", 9))
         self.vars_label = tk.Label(status_frame, text="", fg="#FF6600", font=("TkDefaultFont", 9))
         self.refs_label = tk.Label(status_frame, text="", fg="#008B8B", font=("TkDefaultFont", 9))
+        self.filter_label = tk.Label(status_frame, text="", fg="#666666", font=("TkDefaultFont", 9))
         
         # Store references in parent for access by other components
         self.parent.status_label = self.status_label
@@ -521,6 +823,7 @@ class UIManager:
         self.parent.sid_label = self.sid_label
         self.parent.vars_label = self.vars_label
         self.parent.refs_label = self.refs_label
+        self.parent.filter_label = self.filter_label
     
     def on_rule_select(self, event):
         """Handle rule selection to populate editor fields with selected rule data"""
@@ -545,34 +848,39 @@ class UIManager:
         
         # Get the index of the selected rule
         selected_item = selection[0]
-        rule_index = self.tree.index(selected_item)
         
-        if rule_index < len(self.parent.rules):
-            rule = self.parent.rules[rule_index]
-            self.parent.selected_rule_index = rule_index
+        # Get the line number from the first column (this is the actual line number in the file)
+        values = self.tree.item(selected_item, 'values')
+        if values and values[0]:
+            # Line numbers are 1-based, convert to 0-based index
+            actual_rule_index = int(values[0]) - 1
             
-            # Show appropriate editor based on rule type
-            if getattr(rule, 'is_blank', False):
-                # Blank line - no editor fields needed
-                self.hide_all_editor_fields()
-            elif getattr(rule, 'is_comment', False):
-                # Comment line - show comment editor only
-                self.show_comment_editor()
-                self.comment_var.set(rule.comment_text)
-            else:
-                # Regular rule - populate all rule editor fields
-                self.show_rule_editor()
-                self.action_var.set(rule.action)
-                self.protocol_var.set(rule.protocol)
-                self.src_net_var.set(rule.src_net)
-                self.src_port_var.set(rule.src_port)
-                self.direction_var.set(rule.direction)
-                self.dst_net_var.set(rule.dst_net)
-                self.dst_port_var.set(rule.dst_port)
-                self.message_var.set(rule.message)
-                self.content_var.set(rule.content)
-                self.sid_var.set(str(rule.sid))
-                self.rev_var.set(str(rule.rev))
+            if actual_rule_index < len(self.parent.rules):
+                rule = self.parent.rules[actual_rule_index]
+                self.parent.selected_rule_index = actual_rule_index
+                
+                # Show appropriate editor based on rule type
+                if getattr(rule, 'is_blank', False):
+                    # Blank line - no editor fields needed
+                    self.hide_all_editor_fields()
+                elif getattr(rule, 'is_comment', False):
+                    # Comment line - show comment editor only
+                    self.show_comment_editor()
+                    self.comment_var.set(rule.comment_text)
+                else:
+                    # Regular rule - populate all rule editor fields
+                    self.show_rule_editor()
+                    self.action_var.set(rule.action)
+                    self.protocol_var.set(rule.protocol)
+                    self.src_net_var.set(rule.src_net)
+                    self.src_port_var.set(rule.src_port)
+                    self.direction_var.set(rule.direction)
+                    self.dst_net_var.set(rule.dst_net)
+                    self.dst_port_var.set(rule.dst_port)
+                    self.message_var.set(rule.message)
+                    self.content_var.set(rule.content)
+                    self.sid_var.set(str(rule.sid))
+                    self.rev_var.set(str(rule.rev))
     
     def show_rule_editor(self):
         """Show rule editing fields, hide comment fields"""
@@ -839,6 +1147,58 @@ class UIManager:
             return 'break'  # Prevent default behavior
         # If focus is elsewhere, let the default behavior handle it
     
+    def on_enter_key(self, event):
+        """Handle Enter key - insert blank line at selected position when no filters active"""
+        # Only handle if the tree view has focus
+        if self.parent.root.focus_get() != self.tree:
+            return
+        
+        # Check if filters are active - only allow blank line insertion when no filters
+        if self.parent.rule_filter.is_active():
+            messagebox.showinfo("Blank Line Insertion", 
+                "Cannot insert blank lines while filters are active.\n\n"
+                "Please clear all filters first to insert blank lines.")
+            return 'break'
+        
+        # Get selected item
+        selection = self.tree.selection()
+        if not selection:
+            return 'break'
+        
+        # Get the actual line number from tree
+        selected_item = selection[0]
+        values = self.tree.item(selected_item, 'values')
+        if not values or not values[0]:
+            return 'break'
+        
+        # Convert 1-based line number to 0-based index
+        insert_index = int(values[0]) - 1
+        
+        # Save state for undo
+        self.parent.save_undo_state()
+        
+        # Create blank line rule
+        blank_rule = SuricataRule()
+        blank_rule.is_blank = True
+        
+        # Insert blank line at the selected position
+        self.parent.rules.insert(insert_index, blank_rule)
+        
+        # Refresh table
+        self.parent.refresh_table(preserve_selection=False)
+        self.parent.modified = True
+        self.parent.update_status_bar()
+        
+        # Select the line after the inserted blank line
+        all_items = self.tree.get_children()
+        if insert_index + 1 < len(all_items):
+            next_item = all_items[insert_index + 1]
+            self.tree.selection_set(next_item)
+            self.tree.focus(next_item)
+            self.tree.see(next_item)
+        
+        return 'break'  # Prevent default behavior
+    
     def show_jump_to_line_dialog(self):
         """Show dialog to jump to a specific line number"""
         dialog = tk.Toplevel(self.parent.root)
@@ -1048,7 +1408,16 @@ class UIManager:
             messagebox.showinfo("Information", "$EXTERNAL_NET is automatically defined by AWS Network Firewall as the inverse of $HOME_NET and cannot be edited.")
             return
         
+        # Get var_type from table, but infer actual type from definition if it hasn't been used yet
         var_type = values[1].lower().replace(' ', '_')
+        definition = self.parent.variables.get(var_name, "")
+        
+        # If variable has a definition but shows as "IP Set", check if it's actually a port definition
+        if var_type == "ip_set" and definition and var_name.startswith('$'):
+            # Try to infer if this is actually a port set by checking the definition format
+            if self._looks_like_port_definition(definition):
+                var_type = "port_set"
+        
         self.show_variable_dialog("Edit Variable", var_name, var_type)
     
     def delete_variable(self):
@@ -1090,9 +1459,52 @@ class UIManager:
             messagebox.showinfo("Information", "$EXTERNAL_NET is automatically defined by AWS Network Firewall as the inverse of $HOME_NET and cannot be edited.")
             return
         
-        # Determine variable type and call edit dialog
+        # Get var_type from table, but infer actual type from definition if it hasn't been used yet
         var_type = values[1].lower().replace(' ', '_')
+        definition = self.parent.variables.get(var_name, "")
+        
+        # If variable has a definition but shows as "IP Set", check if it's actually a port definition
+        if var_type == "ip_set" and definition and var_name.startswith('$'):
+            # Try to infer if this is actually a port set by checking the definition format
+            if self._looks_like_port_definition(definition):
+                var_type = "port_set"
+        
         self.show_variable_dialog("Edit Variable", var_name, var_type)
+    
+    def _looks_like_port_definition(self, definition):
+        """Check if a definition string looks like port numbers/ranges rather than CIDR blocks
+        
+        Args:
+            definition: The definition string to check
+            
+        Returns:
+            bool: True if it looks like ports, False if it looks like CIDR or is ambiguous
+        """
+        if not definition or not definition.strip():
+            return False
+        
+        # Check if it passes port validation
+        if self.parent.validate_port_list(definition):
+            # Now check if it would also pass CIDR validation (ambiguous)
+            # If it passes CIDR validation too, it's ambiguous - default to False (CIDR)
+            if self.parent.validate_cidr_list(definition):
+                # Ambiguous - could be either. Check for port-specific patterns
+                # Port ranges with colons, or brackets indicate ports
+                if ':' in definition or '[' in definition:
+                    return True
+                # Single small numbers (1-1024) are more likely ports
+                try:
+                    num = int(definition.strip())
+                    if 1 <= num <= 1024:
+                        return True
+                except ValueError:
+                    pass
+                return False  # Ambiguous, default to CIDR
+            else:
+                # Passes port validation but not CIDR - it's a port
+                return True
+        
+        return False
     
     def show_variable_dialog(self, title, var_name=None, var_type=None):
         """Show dialog for adding/editing variables"""
@@ -1112,7 +1524,7 @@ class UIManager:
         if var_type == "ip_set":
             hint_text = "Must start with $ (e.g., $HOME_NET)"
             definition_label = "CIDR Definition:"
-            definition_hint = "e.g., 192.168.1.0/24,10.0.0.0/8"
+            definition_hint = "Single: 192.168.1.0/24 or Multiple: [10.0.0.0/8,172.16.0.0/12]"
             if not var_name:
                 name_var.set("$")
         elif var_type == "port_set":
@@ -1154,15 +1566,12 @@ class UIManager:
                 messagebox.showerror("Error", "Variable name is required.")
                 return
             
-            # Use context-aware validation based on actual usage
+            # Use context-aware validation based on var_type or actual usage
             if definition:  # Only validate if definition is provided
-                # Analyze current variable usage to determine correct validation
-                variable_usage = self.parent.file_manager.analyze_variable_usage(self.parent.rules)
-                determined_type = self.parent.file_manager.get_variable_type_from_usage(name, variable_usage)
-                
-                # Validate based on determined type, not just prefix
-                if determined_type == "Port Set":
-                    # Port Set validation
+                # For new variables, use var_type first; for existing variables, analyze usage
+                # Check var_type parameter first (most reliable for new variables)
+                if var_type == "port_set":
+                    # Port Set validation (AWS Network Firewall requires $ prefix for port variables)
                     if not self.parent.validate_port_list(definition):
                         messagebox.showerror("Port Validation Error", 
                             "Invalid port definition. Port ranges and lists MUST use brackets:\n" +
@@ -1172,25 +1581,28 @@ class UIManager:
                             "• Complex specs: [80:100,!85]\n\n" +
                             "Suricata syntax requires brackets for all port ranges and complex port specifications.")
                         return
-                elif determined_type == "IP Set":
-                    # IP Set validation
+                elif var_type == "ip_set":
+                    # IP Set validation (for explicit ip_set type)
                     if not self.parent.validate_cidr_list(definition):
-                        messagebox.showerror("Error", "Invalid CIDR definition. Use comma-separated CIDR blocks.")
+                        messagebox.showerror("CIDR Validation Error", 
+                            "Invalid CIDR definition. AWS Network Firewall requires brackets for multiple CIDR blocks:\n" +
+                            "• Single CIDR: 192.168.1.0/24\n" +
+                            "• Multiple CIDRs: [192.168.1.0/24,192.168.2.0/24]\n" +
+                            "• With negation: [192.168.1.0/24,!172.16.0.0/12]")
                         return
-                elif determined_type == "Reference":
-                    # Reference Set - minimal validation (just check it's not empty)
+                elif var_type == "reference":
+                    # Reference Set validation
                     if not definition.strip():
                         messagebox.showerror("Error", "Reference ARN is required for reference variables.")
                         return
                 else:
-                    # Fallback validation based on prefix for new variables not yet used in rules
-                    if name.startswith('$'):
-                        # Default to IP Set validation for $ variables not yet used
-                        if not self.parent.validate_cidr_list(definition):
-                            messagebox.showerror("Error", "Invalid CIDR definition. Use comma-separated CIDR blocks.")
-                            return
-                    elif name.startswith('@'):
-                        # Default to Port Set validation for @ variables
+                    # Fallback: Analyze current variable usage to determine correct validation
+                    variable_usage = self.parent.file_manager.analyze_variable_usage(self.parent.rules)
+                    determined_type = self.parent.file_manager.get_variable_type_from_usage(name, variable_usage)
+                    
+                    # Validate based on determined type from usage
+                    if determined_type == "Port Set":
+                        # Port Set validation
                         if not self.parent.validate_port_list(definition):
                             messagebox.showerror("Port Validation Error", 
                                 "Invalid port definition. Port ranges and lists MUST use brackets:\n" +
@@ -1199,6 +1611,16 @@ class UIManager:
                                 "• Multiple ports: [80,443,8080]\n" +
                                 "• Complex specs: [80:100,!85]\n\n" +
                                 "Suricata syntax requires brackets for all port ranges and complex port specifications.")
+                            return
+                    elif determined_type == "Reference":
+                        # Reference Set - minimal validation
+                        if not definition.strip():
+                            messagebox.showerror("Error", "Reference ARN is required for reference variables.")
+                            return
+                    else:
+                        # Default to IP Set validation (determined_type == "IP Set" or other)
+                        if not self.parent.validate_cidr_list(definition):
+                            messagebox.showerror("Error", "Invalid CIDR definition. Use comma-separated CIDR blocks.")
                             return
             
             # Determine if this is adding a new variable or editing existing one
@@ -1214,7 +1636,12 @@ class UIManager:
         ttk.Button(button_frame, text="Save", command=save_variable).pack(side=tk.LEFT, padx=5)
         ttk.Button(button_frame, text="Cancel", command=dialog.destroy).pack(side=tk.LEFT, padx=5)
         
+        # Focus on name entry and position cursor appropriately
         name_entry.focus()
+        
+        # If we pre-filled with "$" for ip_set or port_set, position cursor after it
+        if var_type in ["ip_set", "port_set"] and not var_name:
+            name_entry.icursor(1)  # Position cursor after the "$"
     
     def refresh_history_display(self):
         """Refresh the history display with current tracking data"""
@@ -3003,3 +3430,133 @@ class UIManager:
             # Ensure main window is visible
             self.parent.root.lift()
             self.parent.root.focus_force()
+    
+    def toggle_sigtype_column(self):
+        """Toggle SIG Type column visibility in main rule editor"""
+        is_visible = self.parent.show_sigtype_var.get()
+        
+        if is_visible:
+            # Show the column (110px for longest label "LIKE_IPONLY" = 11 characters)
+            self.tree.column("SigType", width=110, minwidth=110)
+        else:
+            # Hide the column
+            self.tree.column("SigType", width=0, minwidth=0)
+        
+        # Refresh table to populate/clear SIG type data
+        self.parent.refresh_table()
+    
+    def show_sigtype_help(self):
+        """Show dialog explaining Suricata SIG type classification"""
+        dialog = tk.Toplevel(self.parent.root)
+        dialog.title("About Suricata SIG Types")
+        dialog.geometry("750x650")
+        dialog.transient(self.parent.root)
+        dialog.grab_set()
+        dialog.resizable(False, False)
+        
+        # Center the dialog
+        dialog.geometry("+%d+%d" % (
+            self.parent.root.winfo_rootx() + 100,
+            self.parent.root.winfo_rooty() + 50
+        ))
+        
+        # Main frame
+        main_frame = ttk.Frame(dialog)
+        main_frame.pack(fill=tk.BOTH, expand=True, padx=20, pady=20)
+        
+        # Create scrollable text widget
+        text_frame = ttk.Frame(main_frame)
+        text_frame.pack(fill=tk.BOTH, expand=True)
+        
+        text_widget = tk.Text(text_frame, wrap=tk.WORD, font=("TkDefaultFont", 10),
+                             state=tk.DISABLED, bg=dialog.cget('bg'))
+        scrollbar = ttk.Scrollbar(text_frame, orient=tk.VERTICAL, command=text_widget.yview)
+        text_widget.configure(yscrollcommand=scrollbar.set)
+        
+        text_widget.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        
+        # Configure text tags
+        text_widget.tag_configure("title", font=("TkDefaultFont", 14, "bold"))
+        text_widget.tag_configure("section", font=("TkDefaultFont", 11, "bold"), spacing1=10)
+        text_widget.tag_configure("type", font=("Consolas", 10, "bold"))
+        text_widget.tag_configure("body", font=("TkDefaultFont", 10))
+        text_widget.tag_configure("note", font=("TkDefaultFont", 9, "italic"), foreground="#666666")
+        text_widget.tag_configure("link", foreground="blue", underline=True)
+        
+        # Insert content
+        text_widget.config(state=tk.NORMAL)
+        
+        text_widget.insert(tk.END, "Suricata Rule Type Classification\n", "title")
+        text_widget.insert(tk.END, "\n")
+        text_widget.insert(tk.END, "AWS Network Firewall processes rules using a multi-tier model.\n", "body")
+        text_widget.insert(tk.END, "Within each tier, rules are evaluated in strict file order (top to bottom).\n\n", "body")
+        
+        text_widget.insert(tk.END, "AWS Network Firewall Processing Order:\n", "section")
+        text_widget.insert(tk.END, "─" * 50 + "\n", "body")
+        
+        text_widget.insert(tk.END, "TIER 1: IP-Only (Processed First)\n", "section")
+        tier1_types = [
+            ("  IPONLY", "Basic IP matching (no keywords)"),
+            ("  LIKE_IPONLY", "IP-only with negated addresses"),
+        ]
+        for type_label, description in tier1_types:
+            text_widget.insert(tk.END, type_label, "type")
+            text_widget.insert(tk.END, f" - {description}\n", "body")
+        
+        text_widget.insert(tk.END, "\n")
+        text_widget.insert(tk.END, "TIER 2: Packet-Level (Processed Second)\n", "section")
+        tier2_types = [
+            ("  DEONLY", "Decoder events (broken/invalid packets)"),
+            ("  PKT", "Flow keywords (flow:established, flowbits:isset)"),
+            ("  PKT_STREAM", "Anchored content (content with startswith/depth)"),
+            ("  STREAM", "Unanchored content matching"),
+        ]
+        for type_label, description in tier2_types:
+            text_widget.insert(tk.END, type_label, "type")
+            text_widget.insert(tk.END, f" - {description}\n", "body")
+        
+        text_widget.insert(tk.END, "\n")
+        text_widget.insert(tk.END, "TIER 3: Application-Layer (Processed Last)\n", "section")
+        tier3_types = [
+            ("  PDONLY", "Protocol detection (app-layer-protocol:)"),
+            ("  APPLAYER", "Application protocol field (http, tls, dns)"),
+            ("  APP_TX", "Application transaction (http.host, tls.sni)"),
+        ]
+        for type_label, description in tier3_types:
+            text_widget.insert(tk.END, type_label, "type")
+            text_widget.insert(tk.END, f" - {description}\n", "body")
+        
+        text_widget.insert(tk.END, "\n")
+        text_widget.insert(tk.END, "Key Insights:\n", "section")
+        text_widget.insert(tk.END, "─" * 50 + "\n", "body")
+        text_widget.insert(tk.END, "• IPONLY rules process before APP_TX rules regardless of file position\n", "body")
+        text_widget.insert(tk.END, "• This can cause unexpected shadowing and conflicts\n", "body")
+        text_widget.insert(tk.END, "• Use 'Review Rules' to detect protocol layering conflicts\n", "body")
+        text_widget.insert(tk.END, "• Add flow keywords to IPONLY rules to elevate them to PKT type\n\n", "body")
+        
+        text_widget.insert(tk.END, "For complete details, see:\n", "body")
+        
+        # Add clickable link
+        link_start = text_widget.index(tk.INSERT)
+        text_widget.insert(tk.END, "https://docs.suricata.io/en/latest/rules/rule-types.html\n", "link")
+        link_end = text_widget.index(tk.INSERT)
+        text_widget.tag_add("clickable_link", link_start, link_end)
+        
+        # Bind link click
+        def on_link_click(event):
+            import webbrowser
+            webbrowser.open("https://docs.suricata.io/en/latest/rules/rule-types.html")
+        
+        text_widget.tag_bind("clickable_link", "<Button-1>", on_link_click)
+        text_widget.tag_bind("clickable_link", "<Enter>", 
+                            lambda e: text_widget.config(cursor="hand2"))
+        text_widget.tag_bind("clickable_link", "<Leave>", 
+                            lambda e: text_widget.config(cursor=""))
+        
+        text_widget.config(state=tk.DISABLED)
+        
+        # OK button
+        button_frame = ttk.Frame(main_frame)
+        button_frame.pack(fill=tk.X, pady=(15, 0))
+        ttk.Button(button_frame, text="OK", command=dialog.destroy).pack(side=tk.RIGHT)

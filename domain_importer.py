@@ -104,9 +104,15 @@ class DomainImporter:
                 insert_index = None
                 insertion_text = "Rules will be appended to end"
             else:
-                # Real rule selected - insert at this position
-                insert_index = self.parent.tree.index(selected_item)
-                insertion_text = f"Rules will be inserted at line {insert_index + 1}"
+                # Real rule selected - get ACTUAL line number from tree (critical when filters active)
+                values = self.parent.tree.item(selected_item, 'values')
+                if values and values[0]:
+                    # Convert 1-based line number to 0-based index
+                    insert_index = int(values[0]) - 1
+                    insertion_text = f"Rules will be inserted at line {insert_index + 1}"
+                else:
+                    messagebox.showerror("Error", "Could not determine insert position.")
+                    return False
         
         dialog = tk.Toplevel(self.parent.root)
         dialog.title("Bulk Domain Import")
@@ -891,9 +897,15 @@ class DomainImporter:
             messagebox.showwarning("Warning", "Please select a position to insert the domain rules.")
             return
         
-        # Get the index of selected item
+        # Get the actual line number from tree (important when filters are active)
         selected_item = selection[0]
-        insert_index = self.parent.tree.index(selected_item)
+        values = self.parent.tree.item(selected_item, 'values')
+        if values and values[0]:
+            # Convert 1-based line number to 0-based index
+            insert_index = int(values[0]) - 1
+        else:
+            messagebox.showerror("Error", "Could not determine insert position.")
+            return
         
         dialog = tk.Toplevel(self.parent.root)
         dialog.title("Insert Domain Rule")

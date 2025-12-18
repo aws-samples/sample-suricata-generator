@@ -282,7 +282,11 @@ class FileManager:
                         if not has_rule_vars:
                             rule_variables = "    rule_variables {\n"
                             has_rule_vars = True
-                        cidrs = [f'"{cidr.strip()}"' for cidr in var_definition.split(',') if cidr.strip()]
+                        # Strip brackets if present before splitting
+                        clean_def = var_definition.strip()
+                        if clean_def.startswith('[') and clean_def.endswith(']'):
+                            clean_def = clean_def[1:-1]
+                        cidrs = [f'"{cidr.strip()}"' for cidr in clean_def.split(',') if cidr.strip()]
                         cidr_array = '[' + ', '.join(cidrs) + ']'
                         rule_variables += f"      ip_sets {{\n"
                         rule_variables += f"        key = \"{clean_name}\"\n"
@@ -292,7 +296,11 @@ class FileManager:
                         if not has_rule_vars:
                             rule_variables = "    rule_variables {\n"
                             has_rule_vars = True
-                        ports = [f'"{port.strip()}"' for port in var_definition.split(',') if port.strip()]
+                        # Strip brackets if present before splitting
+                        clean_def = var_definition.strip()
+                        if clean_def.startswith('[') and clean_def.endswith(']'):
+                            clean_def = clean_def[1:-1]
+                        ports = [f'"{port.strip()}"' for port in clean_def.split(',') if port.strip()]
                         port_array = '[' + ', '.join(ports) + ']'
                         rule_variables += f"      port_sets {{\n"
                         rule_variables += f"        key = \"{clean_name}\"\n"
@@ -405,12 +413,20 @@ EOF
                     var_type = self.get_variable_type_from_usage(var_name, variable_usage)
                     
                     if var_type == "IP Set":
-                        cidrs = [cidr.strip() for cidr in var_definition.split(',') if cidr.strip()]
+                        # Strip brackets if present before splitting
+                        clean_def = var_definition.strip()
+                        if clean_def.startswith('[') and clean_def.endswith(']'):
+                            clean_def = clean_def[1:-1]
+                        cidrs = [cidr.strip() for cidr in clean_def.split(',') if cidr.strip()]
                         if "IPSets" not in rule_variables:
                             rule_variables["IPSets"] = {}
                         rule_variables["IPSets"][clean_name] = {"Definition": cidrs}
                     elif var_type == "Port Set":
-                        ports = [port.strip() for port in var_definition.split(',') if port.strip()]
+                        # Strip brackets if present before splitting
+                        clean_def = var_definition.strip()
+                        if clean_def.startswith('[') and clean_def.endswith(']'):
+                            clean_def = clean_def[1:-1]
+                        ports = [port.strip() for port in clean_def.split(',') if port.strip()]
                         if "PortSets" not in rule_variables:
                             rule_variables["PortSets"] = {}
                         rule_variables["PortSets"][clean_name] = {"Definition": ports}

@@ -15,6 +15,7 @@ from stateful_rule_importer import StatefulRuleImporter
 from search_manager import SearchManager
 from ui_manager import UIManager
 from flow_tester import FlowTester
+from rule_filter import RuleFilter
 from constants import SuricataConstants
 from version import get_main_version
 from security_validator import security_validator, validate_rule_input, validate_file_operation
@@ -47,6 +48,7 @@ class SuricataRuleGenerator:
         self.stateful_rule_importer = StatefulRuleImporter(self)  # Stateful rule group import functionality
         self.search_manager = SearchManager(self)  # Search functionality manager
         self.ui_manager = UIManager(self)  # UI components manager
+        self.rule_filter = RuleFilter()  # Rule filtering manager
         
         # Load user configuration
         self.load_config()
@@ -108,8 +110,8 @@ class SuricataRuleGenerator:
         for var in detected_vars:
             if var not in self.variables:
                 if var == '$HOME_NET':
-                    # Default to RFC1918 private address space
-                    self.variables[var] = "10.0.0.0/8,172.16.0.0/12,192.168.0.0/16"
+                    # Default to RFC1918 private address space (brackets required for multiple CIDRs)
+                    self.variables[var] = "[10.0.0.0/8,172.16.0.0/12,192.168.0.0/16]"
                 else:
                     # Leave empty for user to define
                     self.variables[var] = ""
@@ -132,6 +134,13 @@ class SuricataRuleGenerator:
         # Add variables to table with usage-based type detection
         for var, definition in sorted(self.variables.items()):
             var_type = self.file_manager.get_variable_type_from_usage(var, variable_usage)
+            
+            # If variable has a definition but shows as "IP Set", check if it's actually a port definition
+            if var_type == "IP Set" and definition and var.startswith('$'):
+                # Try to infer if this is actually a port set by checking the definition format
+                if self.ui_manager._looks_like_port_definition(definition):
+                    var_type = "Port Set"
+            
             if var == '$EXTERNAL_NET':
                 # Grey out $EXTERNAL_NET and show it's auto-defined
                 display_definition = "(auto-defined by AWS Network Firewall)"
@@ -147,22 +156,45 @@ class SuricataRuleGenerator:
     
     
     def validate_cidr_list(self, cidr_list):
-        """Validate comma-separated CIDR list with support for negation
+        """Validate CIDR list with bracket requirement for multiple values
         
-        Accepts formats like: 192.168.1.0/24,10.0.0.0/8,!172.16.0.0/12
-        Negation (!) is supported for exclusion patterns.
+        AWS Network Firewall requires brackets for multiple CIDR blocks.
+        Accepts formats like: 
+        - Single CIDR: 192.168.1.0/24
+        - Multiple CIDRs: [192.168.1.0/24,192.168.2.0/24]
+        - With negation: [192.168.1.0/24,!172.16.0.0/12]
         
         Args:
-            cidr_list: Comma-separated string of CIDR blocks
+            cidr_list: CIDR specification string
         
         Returns:
-            bool: True if all CIDR blocks are valid
+            bool: True if format and CIDR blocks are valid
         """
         if not cidr_list.strip():
             return True  # Empty is valid
         
-        cidrs = [cidr.strip() for cidr in cidr_list.split(',')]
+        cidr_spec = cidr_list.strip()
+        
+        # Check if contains comma (multiple values)
+        if ',' in cidr_spec:
+            # Multiple values MUST be enclosed in brackets
+            if not (cidr_spec.startswith('[') and cidr_spec.endswith(']')):
+                return False  # Multiple CIDRs require brackets
+            # Remove brackets and validate contents
+            inner_content = cidr_spec[1:-1].strip()
+            cidrs = [cidr.strip() for cidr in inner_content.split(',')]
+        elif cidr_spec.startswith('[') and cidr_spec.endswith(']'):
+            # Bracketed single value is also valid
+            inner_content = cidr_spec[1:-1].strip()
+            cidrs = [inner_content]
+        else:
+            # Single CIDR without brackets
+            cidrs = [cidr_spec]
+        
+        # Validate each CIDR block
         for cidr in cidrs:
+            if not cidr:
+                return False  # Empty CIDR not valid
             if cidr.startswith('!'):
                 cidr = cidr[1:]  # Remove negation for validation
             try:
@@ -387,16 +419,20 @@ class SuricataRuleGenerator:
         
         return stats
     
-    def update_status_bar(self):
+    def update_status_bar(self, displayed_count=None):
         """Update status bar with capacity, colored action counts, and warnings
         
         Displays comprehensive status information including:
         - Rule capacity count for AWS Network Firewall planning
-        - Colored action count labels (green/red/purple/blue)
+        - Colored action count labels (green/red/purple/blue) OR filter info if filters active
         - SID range information for uniqueness tracking
         - Undefined variables warnings in orange
         - Search status when active
         - File modification status
+        - Filter status when filters are active
+        
+        Args:
+            displayed_count: Number of rules displayed (for filter info), None if no filtering
         """
         # Cache filtered rules to avoid repeated filtering
         actual_rules = [r for r in self.rules if not getattr(r, 'is_comment', False) and not getattr(r, 'is_blank', False)]
@@ -446,39 +482,68 @@ class SuricataRuleGenerator:
             self.sid_label.pack_forget()
             self.vars_label.pack_forget()
         
-        # Update colored action count labels
-        if capacity > 0:
-            actions = stats['actions']
-            # Show colored labels with counts
-            if actions['pass'] > 0:
-                self.pass_label.config(text=f" | Pass: {actions['pass']}")
-                self.pass_label.pack(side=tk.LEFT, pady=2)
-            else:
-                self.pass_label.pack_forget()
-            
-            if actions['drop'] > 0:
-                self.drop_label.config(text=f" | Drop: {actions['drop']}")
-                self.drop_label.pack(side=tk.LEFT, pady=2)
-            else:
-                self.drop_label.pack_forget()
-            
-            if actions['reject'] > 0:
-                self.reject_label.config(text=f" | Reject: {actions['reject']}")
-                self.reject_label.pack(side=tk.LEFT, pady=2)
-            else:
-                self.reject_label.pack_forget()
-            
-            if actions['alert'] > 0:
-                self.alert_label.config(text=f" | Alert: {actions['alert']}")
-                self.alert_label.pack(side=tk.LEFT, pady=2)
-            else:
-                self.alert_label.pack_forget()
-        else:
-            # Hide all colored labels when no rules
+        # Check if filters are active and handle status bar display accordingly
+        filters_active = self.rule_filter.is_active()
+        
+        if filters_active and displayed_count is not None:
+            # Filters are active - show filter information
+            # Hide action count labels (they'll be replaced by filter info)
             self.pass_label.pack_forget()
             self.drop_label.pack_forget()
             self.reject_label.pack_forget()
             self.alert_label.pack_forget()
+            
+            # Show filter status label with count and description
+            total_rules = len(self.rules)
+            filter_desc = self.rule_filter.get_filter_description()
+            
+            # Create filter status text
+            filter_text = f" | Showing {displayed_count} of {total_rules} rules"
+            if filter_desc:
+                filter_text += f" | Filters: {filter_desc}"
+            
+            # Use filter_label (will be created in ui_manager) with same color as SID label
+            if hasattr(self, 'filter_label'):
+                self.filter_label.config(text=filter_text)
+                self.filter_label.pack(side=tk.LEFT, pady=2)
+        else:
+            # No filters active - show normal action count labels
+            if hasattr(self, 'filter_label'):
+                self.filter_label.pack_forget()
+            
+            # Update colored action count labels
+            if capacity > 0:
+                actions = stats['actions']
+                # Show colored labels with counts
+                if actions['pass'] > 0:
+                    self.pass_label.config(text=f" | Pass: {actions['pass']}")
+                    self.pass_label.pack(side=tk.LEFT, pady=2)
+                else:
+                    self.pass_label.pack_forget()
+                
+                if actions['drop'] > 0:
+                    self.drop_label.config(text=f" | Drop: {actions['drop']}")
+                    self.drop_label.pack(side=tk.LEFT, pady=2)
+                else:
+                    self.drop_label.pack_forget()
+                
+                if actions['reject'] > 0:
+                    self.reject_label.config(text=f" | Reject: {actions['reject']}")
+                    self.reject_label.pack(side=tk.LEFT, pady=2)
+                else:
+                    self.reject_label.pack_forget()
+                
+                if actions['alert'] > 0:
+                    self.alert_label.config(text=f" | Alert: {actions['alert']}")
+                    self.alert_label.pack(side=tk.LEFT, pady=2)
+                else:
+                    self.alert_label.pack_forget()
+            else:
+                # Hide all colored labels when no rules
+                self.pass_label.pack_forget()
+                self.drop_label.pack_forget()
+                self.reject_label.pack_forget()
+                self.alert_label.pack_forget()
         
         # Update IP Set References count label (always show as requested)
         reference_count = stats['reference_sets']
@@ -621,6 +686,7 @@ class SuricataRuleGenerator:
         
         Rebuilds the entire table with color coding and proper formatting.
         Handles comments, blank lines, and regular rules with appropriate styling.
+        Applies active filters to hide non-matching rules.
         
         Args:
             preserve_selection: Whether to restore selection after refresh
@@ -638,21 +704,31 @@ class SuricataRuleGenerator:
         self.tree.delete(*self.tree.get_children())
         self.placeholder_item = None
         
-        # Populate table with current rules
+        # Track displayed count for filter status
+        displayed_count = 0
+        
+        # Populate table with current rules (apply filtering)
         for i, rule in enumerate(self.rules):
             line_num = i + 1
             
+            # Apply filter - skip rules that don't match
+            if not self.rule_filter.matches(rule):
+                continue
+            
+            displayed_count += 1
+            
             # Handle different rule types with appropriate display
+            # IMPORTANT: Always provide 5 values to match column structure (even when SIG Type hidden)
             if getattr(rule, 'is_blank', False):
                 # Blank line - show line number only, all other columns empty
-                values = (line_num, "", "", "")
+                values = (line_num, "", "", "", "")
                 tag = ""
             elif getattr(rule, 'is_comment', False):
                 # Comment line - show in first few columns, comment text in last column
-                values = (line_num, "COMMENT", "", rule.comment_text)
+                values = (line_num, "", "COMMENT", "", rule.comment_text)
                 tag = "comment"
             else:
-                # Regular Suricata rule - Line, Action, Protocol, and combined Rule Data
+                # Regular Suricata rule - Line, SigType, Action, Protocol, and combined Rule Data
                 if rule.original_options:
                     # Use original options to maintain exact formatting
                     options_str = f"({rule.original_options};)" if not rule.original_options.endswith(';') else f"({rule.original_options})"
@@ -670,9 +746,16 @@ class SuricataRuleGenerator:
                 # Format combined rule data: source src_port direction destination dst_port (options)
                 rule_data = f"{rule.src_net} {rule.src_port} {rule.direction} {rule.dst_net} {rule.dst_port} {options_str}"
                 
-                # Populate the 4 columns
+                # Calculate SIG type for this rule (if classification available)
+                sig_type_label = ""
+                if hasattr(self, 'show_sigtype_var') and self.show_sigtype_var.get():
+                    detailed_type = self.rule_analyzer.get_detailed_suricata_rule_type(rule)
+                    sig_type_label = self.rule_analyzer.get_display_label_for_type(detailed_type)
+                
+                # Always use 5-column format to match table structure
                 values = (
                     line_num,
+                    sig_type_label,
                     rule.action,
                     rule.protocol,
                     rule_data
@@ -691,8 +774,8 @@ class SuricataRuleGenerator:
         self.root.update()
         self.root.update_idletasks()
         
-        # Update status bar after table refresh
-        self.update_status_bar()
+        # Update status bar after table refresh (pass displayed_count for filter info)
+        self.update_status_bar(displayed_count=displayed_count)
     
     def move_rule_up(self):
         """Move selected rule up by one position"""
@@ -701,7 +784,15 @@ class SuricataRuleGenerator:
             messagebox.showwarning("Warning", "Please select a rule to move.")
             return
         
-        rule_index = self.tree.index(selection[0])
+        # Get ACTUAL line number from tree (critical when filters active)
+        selected_item = selection[0]
+        values = self.tree.item(selected_item, 'values')
+        if values and values[0]:
+            rule_index = int(values[0]) - 1  # Convert 1-based to 0-based
+        else:
+            messagebox.showerror("Error", "Could not determine rule position.")
+            return
+        
         if rule_index == 0:
             messagebox.showinfo("Info", "Rule is already at the top.")
             return
@@ -731,7 +822,15 @@ class SuricataRuleGenerator:
             messagebox.showwarning("Warning", "Please select a rule to move.")
             return
         
-        rule_index = self.tree.index(selection[0])
+        # Get ACTUAL line number from tree (critical when filters active)
+        selected_item = selection[0]
+        values = self.tree.item(selected_item, 'values')
+        if values and values[0]:
+            rule_index = int(values[0]) - 1  # Convert 1-based to 0-based
+        else:
+            messagebox.showerror("Error", "Could not determine rule position.")
+            return
+        
         if rule_index >= len(self.rules) - 1:
             messagebox.showinfo("Info", "Rule is already at the bottom.")
             return
@@ -983,9 +1082,15 @@ class SuricataRuleGenerator:
             messagebox.showwarning("Warning", "Please select a position to insert the rule.")
             return
         
-        # Get the index of selected item
+        # Get the actual line number from tree (important when filters are active)
         selected_item = selection[0]
-        insert_index = self.tree.index(selected_item)
+        values = self.tree.item(selected_item, 'values')
+        if values and values[0]:
+            # Convert 1-based line number to 0-based index
+            insert_index = int(values[0]) - 1
+        else:
+            messagebox.showerror("Error", "Could not determine insert position.")
+            return
         
         # Auto-generate SID
         max_sid = max([rule.sid for rule in self.rules], default=99)
@@ -1035,9 +1140,15 @@ class SuricataRuleGenerator:
             messagebox.showwarning("Warning", "Please select a rule to edit.")
             return
         
-        # Get the index of selected item
+        # Get ACTUAL line number from tree (critical when filters active)
         selected_item = selection[0]
-        rule_index = self.tree.index(selected_item)
+        values = self.tree.item(selected_item, 'values')
+        if values and values[0]:
+            rule_index = int(values[0]) - 1  # Convert 1-based to 0-based
+        else:
+            messagebox.showerror("Error", "Could not determine rule position.")
+            return
+        
         rule = self.rules[rule_index]
         
         # Check if this is a comment and handle appropriately
@@ -1131,8 +1242,16 @@ class SuricataRuleGenerator:
             # Save state for undo
             self.save_undo_state()
             
-            # Get indices and capture complete rule details before deletion
-            indices = [self.tree.index(item) for item in selection]
+            # Get ACTUAL indices using line numbers from tree (critical when filters active)
+            indices = []
+            for item in selection:
+                values = self.tree.item(item, 'values')
+                if values and values[0]:
+                    # Convert 1-based line number to 0-based index
+                    actual_index = int(values[0]) - 1
+                    indices.append(actual_index)
+            
+            # Capture complete rule details before deletion
             deleted_rules = []
             for index in indices:
                 if index < len(self.rules):
@@ -1156,7 +1275,7 @@ class SuricataRuleGenerator:
             
             self.refresh_table()
             self.modified = True
-            self.update_status_bar()
+            # Don't call update_status_bar() here - refresh_table() already called it with proper displayed_count
     
     
     def create_rule_from_form(self, show_errors=True) -> Optional[SuricataRule]:
@@ -1357,8 +1476,16 @@ class SuricataRuleGenerator:
             messagebox.showwarning("Warning", "Please select one or more rules to copy.")
             return
         
-        # Get selected rule indices and copy rules
-        indices = [self.tree.index(item) for item in selection]
+        # Get selected rule indices - use line numbers from tree when filters active
+        indices = []
+        for item in selection:
+            # Get the line number from the first column (actual line number in file)
+            values = self.tree.item(item, 'values')
+            if values and values[0]:
+                # Convert 1-based line number to 0-based index
+                actual_index = int(values[0]) - 1
+                indices.append(actual_index)
+        
         internal_rules = []  # Rules with new SIDs for internal clipboard
         original_rules = []  # Rules with original SIDs for system clipboard
         
@@ -1552,10 +1679,16 @@ class SuricataRuleGenerator:
 
     def paste_rules(self):
         """Paste rules from clipboard at selected position or end"""
-        # Determine paste position (preserve existing positioning logic)
+        # Determine paste position using ACTUAL line numbers (critical when filters active)
         selection = self.tree.selection()
         if selection:
-            paste_index = self.tree.index(selection[0]) + 1  # After selected line
+            selected_item = selection[0]
+            values = self.tree.item(selected_item, 'values')
+            if values and values[0]:
+                # Convert 1-based line number to 0-based index, then +1 for "after"
+                paste_index = int(values[0])
+            else:
+                paste_index = len(self.rules)  # Fallback to end if can't determine position
         else:
             paste_index = len(self.rules)  # At end if no selection
         
@@ -2074,6 +2207,9 @@ class SuricataRuleGenerator:
             messagebox.showwarning("Warning", "No rule selected to save changes.")
             return
         
+        # Store line number early (before any operations that might clear selected_rule_index)
+        updated_line_num = self.selected_rule_index + 1
+        
         rule = self.rules[self.selected_rule_index]
         
         if getattr(rule, 'is_comment', False):
@@ -2095,10 +2231,10 @@ class SuricataRuleGenerator:
             
             # Reselect the updated comment
             items = self.tree.get_children()
-            if self.selected_rule_index < len(items):
+            if self.selected_rule_index is not None and self.selected_rule_index < len(items):
                 self.tree.selection_set(items[self.selected_rule_index])
             
-            messagebox.showinfo("Success", f"Comment at line {self.selected_rule_index + 1} updated successfully.")
+            messagebox.showinfo("Success", f"Comment at line {updated_line_num} updated successfully.")
         else:
             # Save rule
             try:
@@ -2200,7 +2336,7 @@ class SuricataRuleGenerator:
                     
                     # Reselect the updated rule
                     items = self.tree.get_children()
-                    if self.selected_rule_index < len(items):
+                    if self.selected_rule_index is not None and self.selected_rule_index < len(items):
                         self.tree.selection_set(items[self.selected_rule_index])
                     
                     messagebox.showinfo("Success", f"Rule at line {self.selected_rule_index + 1} updated successfully.")
@@ -2258,8 +2394,24 @@ class SuricataRuleGenerator:
                 
                 self.add_history_entry('rule_modified', history_details)
                 
+                # Store line number before refresh (for message and reselection)
+                updated_line_num = self.selected_rule_index + 1
+                
                 # Update the rule in the list
                 self.rules[self.selected_rule_index] = updated_rule
+                
+                # Check if rule matches current filters
+                filters_active = self.rule_filter.is_active()
+                rule_matches_filters = self.rule_filter.matches(updated_rule)
+                
+                # If filters are active and updated rule doesn't match, clear filters
+                if filters_active and not rule_matches_filters:
+                    self.ui_manager.clear_filters()
+                    messagebox.showinfo("Success", 
+                        f"Rule at line {updated_line_num} updated successfully.\n\n" +
+                        "Note: Filters were cleared because the updated rule no longer matches the active filter criteria.")
+                    return
+                
                 self.refresh_table()
                 self.modified = True
                 # Auto-detect variables after rule changes
@@ -2268,10 +2420,10 @@ class SuricataRuleGenerator:
                 
                 # Reselect the updated rule
                 items = self.tree.get_children()
-                if self.selected_rule_index < len(items):
+                if self.selected_rule_index is not None and self.selected_rule_index < len(items):
                     self.tree.selection_set(items[self.selected_rule_index])
                 
-                messagebox.showinfo("Success", f"Rule at line {self.selected_rule_index + 1} updated successfully.")
+                messagebox.showinfo("Success", f"Rule at line {updated_line_num} updated successfully.")
                 
             except ValueError:
                 messagebox.showerror("Error", "SID must be a valid number.")
@@ -2468,7 +2620,19 @@ class SuricataRuleGenerator:
             
             # Insert the rule
             self.rules.insert(self.selected_rule_index, new_rule)
-            self.refresh_table(preserve_selection=False)
+            
+            # If filters are active and new rule doesn't match, temporarily clear filters so user can see their new rule
+            filters_were_active = self.rule_filter.is_active()
+            if filters_were_active and not self.rule_filter.matches(new_rule):
+                # Clear filters temporarily
+                self.ui_manager.clear_filters()
+                messagebox.showinfo("Success", 
+                    f"Rule inserted successfully at line {self.selected_rule_index + 1}.\n\n" +
+                    "Note: Filters were cleared because the new rule didn't match the active filter criteria.")
+            else:
+                self.refresh_table(preserve_selection=False)
+                messagebox.showinfo("Success", f"Rule inserted successfully. Click below the last rule to add another.")
+            
             self.modified = True
             # Auto-detect variables after rule insertion
             self.auto_detect_variables()
@@ -2486,8 +2650,6 @@ class SuricataRuleGenerator:
             max_sid = max([rule.sid for rule in self.rules], default=99)
             self.sid_var.set(str(max_sid + 1))
             
-            messagebox.showinfo("Success", f"Rule inserted successfully. Click below the last rule to add another.")
-            
         except ValueError:
             messagebox.showerror("Error", "SID must be a valid number.")
     
@@ -2495,7 +2657,15 @@ class SuricataRuleGenerator:
         """Insert a comment at selected position or end"""
         selection = self.tree.selection()
         if selection:
-            insert_index = self.tree.index(selection[0])
+            # Get the actual line number from tree (important when filters are active)
+            selected_item = selection[0]
+            values = self.tree.item(selected_item, 'values')
+            if values and values[0]:
+                # Convert 1-based line number to 0-based index
+                insert_index = int(values[0]) - 1
+            else:
+                messagebox.showerror("Error", "Could not determine insert position.")
+                return
         else:
             insert_index = len(self.rules)
         
@@ -2701,8 +2871,14 @@ class SuricataRuleGenerator:
         # Save state for undo
         self.save_undo_state()
         
-        # Get selected rule indices
-        indices = [self.tree.index(item) for item in selection]
+        # Get ACTUAL indices using line numbers from tree (critical when filters active)
+        indices = []
+        for item in selection:
+            values = self.tree.item(item, 'values')
+            if values and values[0]:
+                # Convert 1-based line number to 0-based index
+                actual_index = int(values[0]) - 1
+                indices.append(actual_index)
         
         # Track changes for history
         enabled_rules = []
@@ -2862,8 +3038,13 @@ class SuricataRuleGenerator:
         # Determine which rules to work with - selected rules or all rules
         selection = self.tree.selection()
         if selection:
-            # Use selected rules
-            selected_indices = [self.tree.index(item) for item in selection]
+            # Use selected rules - get ACTUAL indices using line numbers (critical when filters active)
+            selected_indices = []
+            for item in selection:
+                values = self.tree.item(item, 'values')
+                if values and values[0]:
+                    selected_indices.append(int(values[0]) - 1)  # Convert 1-based to 0-based
+            
             selected_rules = [self.rules[i] for i in selected_indices if i < len(self.rules)]
             actual_rules = [r for r in selected_rules if not getattr(r, 'is_comment', False) and not getattr(r, 'is_blank', False)]
             scope_default = "selected"
@@ -3491,37 +3672,152 @@ class SuricataRuleGenerator:
             
             self.add_history_entry('advanced_editor_bulk_changes', details)
     
+    def _serialize_rule(self, rule):
+        """Convert SuricataRule to JSON-serializable dict"""
+        return {
+            'is_blank': getattr(rule, 'is_blank', False),
+            'is_comment': getattr(rule, 'is_comment', False),
+            'comment_text': getattr(rule, 'comment_text', ''),
+            'action': getattr(rule, 'action', ''),
+            'protocol': getattr(rule, 'protocol', ''),
+            'src_net': getattr(rule, 'src_net', ''),
+            'src_port': getattr(rule, 'src_port', ''),
+            'direction': getattr(rule, 'direction', ''),
+            'dst_net': getattr(rule, 'dst_net', ''),
+            'dst_port': getattr(rule, 'dst_port', ''),
+            'message': getattr(rule, 'message', ''),
+            'content': getattr(rule, 'content', ''),
+            'sid': getattr(rule, 'sid', 0),
+            'rev': getattr(rule, 'rev', 1),
+            'original_options': getattr(rule, 'original_options', '')
+        }
+    
+    def _deserialize_rule(self, rule_dict):
+        """Convert JSON dict back to SuricataRule"""
+        rule = SuricataRule()
+        rule.is_blank = rule_dict.get('is_blank', False)
+        rule.is_comment = rule_dict.get('is_comment', False)
+        rule.comment_text = rule_dict.get('comment_text', '')
+        rule.action = rule_dict.get('action', '')
+        rule.protocol = rule_dict.get('protocol', '')
+        rule.src_net = rule_dict.get('src_net', '')
+        rule.src_port = rule_dict.get('src_port', '')
+        rule.direction = rule_dict.get('direction', '')
+        rule.dst_net = rule_dict.get('dst_net', '')
+        rule.dst_port = rule_dict.get('dst_port', '')
+        rule.message = rule_dict.get('message', '')
+        rule.content = rule_dict.get('content', '')
+        rule.sid = rule_dict.get('sid', 0)
+        rule.rev = rule_dict.get('rev', 1)
+        rule.original_options = rule_dict.get('original_options', '')
+        return rule
+    
     def show_advanced_editor(self):
-        """Show the Advanced Editor for text-based rule editing"""
-        from advanced_editor import AdvancedEditor
+        """Show the Advanced Editor (wxPython/Scintilla) via subprocess
+        
+        Launches advanced_editor.py as a separate process with wxPython/Scintilla.
+        Includes graceful degradation for users without wxPython installed.
+        """
+        import subprocess
+        import sys
+        import tempfile
+        import os
+        import json
+        
+        # Check if wxPython is available by checking advanced_editor.py
+        editor_path = os.path.join(os.path.dirname(__file__), 'advanced_editor.py')
+        if not os.path.exists(editor_path):
+            messagebox.showerror("Error", "Advanced editor file not found.")
+            return
         
         # Save original state before opening editor
         original_rules = self.rules.copy()
         
-        # Launch the Advanced Editor with reference to main app for validation methods
-        editor = AdvancedEditor(self.root, self.rules, self.variables, main_app=self)
+        # Create temp files for data exchange
+        temp_dir = tempfile.gettempdir()
+        input_file = os.path.join(temp_dir, f'suricata_editor_input_{os.getpid()}.json')
+        output_file = os.path.join(temp_dir, f'suricata_editor_output_{os.getpid()}.json')
         
-        # If user clicked OK, update the main window
-        if editor.result:
-            # Save state for undo
-            self.save_undo_state()
+        # Serialize rules and variables to JSON
+        editor_data = {
+            'rules': [self._serialize_rule(r) for r in self.rules],
+            'variables': self.variables.copy(),
+            'current_file': self.current_file,
+            'tracking_enabled': self.tracking_enabled
+        }
+        
+        try:
+            # Write input data
+            with open(input_file, 'w', encoding='utf-8') as f:
+                json.dump(editor_data, f, indent=2)
             
-            # Analyze changes made in Advanced Editor
-            change_summary = self.analyze_advanced_editor_changes(original_rules, editor.result)
+            # Launch advanced editor as subprocess
+            result = subprocess.run(
+                [sys.executable, editor_path, input_file, output_file],
+                capture_output=True,
+                text=True
+            )
             
-            # Add history entry based on change magnitude
-            if change_summary:
-                self.add_advanced_editor_history(change_summary)
+            # Graceful degradation: Check for wxPython not installed error
+            if 'wxPython not installed' in result.stderr or 'wxPython not installed' in result.stdout:
+                messagebox.showerror(
+                    "Advanced Editor Unavailable",
+                    "The Advanced Editor requires wxPython for code folding support.\n\n"
+                    "Install with: pip install wxPython\n\n"
+                    "See README.md for platform-specific installation instructions."
+                )
+                return
             
-            # Update rules and variables
-            self.rules = editor.result
-            self.variables = editor.variables.copy()
+            if result.returncode != 0:
+                # Editor was cancelled or had error
+                if result.returncode == 1:
+                    # User clicked Cancel - this is normal
+                    return
+                else:
+                    messagebox.showwarning(
+                        "Advanced Editor",
+                        "Editor encountered an error or was cancelled."
+                    )
+                    return
             
-            # Refresh UI
-            self.refresh_table()
-            self.auto_detect_variables()
-            self.modified = True
-            self.update_status_bar()
+            # Read result if editor completed successfully
+            if os.path.exists(output_file):
+                with open(output_file, 'r', encoding='utf-8') as f:
+                    result_data = json.load(f)
+                
+                if result_data.get('ok'):
+                    # Deserialize rules from result
+                    edited_rules = [self._deserialize_rule(r) for r in result_data['rules']]
+                    
+                    # Analyze changes for history tracking
+                    change_summary = self.analyze_advanced_editor_changes(original_rules, edited_rules)
+                    if change_summary:
+                        self.add_advanced_editor_history(change_summary)
+                    
+                    # Update rules and variables
+                    self.rules = edited_rules
+                    self.variables = result_data['variables'].copy()
+                    
+                    # Refresh UI
+                    self.refresh_table()
+                    self.auto_detect_variables()
+                    self.modified = True
+                    self.update_status_bar()
+        
+        except Exception as e:
+            messagebox.showerror(
+                "Advanced Editor Error",
+                f"Failed to launch Advanced Editor:\n\n{str(e)}"
+            )
+        
+        finally:
+            # Cleanup temp files
+            for temp_file in [input_file, output_file]:
+                if os.path.exists(temp_file):
+                    try:
+                        os.remove(temp_file)
+                    except:
+                        pass  # Best effort cleanup
     
     def show_about(self):
         """Show About dialog with version information and release notes from RELEASE_NOTES.md"""

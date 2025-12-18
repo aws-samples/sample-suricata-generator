@@ -1,5 +1,283 @@
 # Release Notes
 
+## Version 1.23.1 - December 17, 2025
+
+### Rules Analysis Engine Enhancement (v1.10.0) - AWS Network Firewall Compliance
+- **Three New AWS-Specific Validation Checks**: Enhanced rule analyzer with comprehensive AWS Network Firewall limitations and caveats validation
+  - **Unsupported Keywords Detection (CRITICAL)**: Identifies keywords not supported by AWS Network Firewall
+    - **Datasets**: Flags `dataset` and `datarep` keywords
+    - **IP Reputation**: Detects `iprep:` keyword usage
+    - **File Extraction**: Identifies file keywords (`filestore`, `filemagic:`, `filename:`, `fileext:`, `filesize:`, `filemd5:`, `filesha1:`, `filesha256:`) - Note: `file.data` and `file.name` ARE supported
+    - **Thresholding**: Catches `threshold:` and `detection_filter:` keywords
+    - **Impact**: AWS will reject rules containing these keywords when creating/updating rule groups
+  - **PCRE Restrictions Validation (CRITICAL)**: Validates proper usage of `pcre` keyword
+    - **AWS Requirement**: `pcre` only allowed with companion keywords: `content:`, `tls.sni`, `http.host`, or `dns.query`
+    - **Detection**: Flags `pcre` usage without any allowed companions
+    - **Impact**: AWS will reject rules violating this restriction
+  - **Priority Keyword Detection (WARNING)**: Identifies unsupported `priority:` keyword usage (for NFW strict rule ordering)
+    - **AWS Behavior**: Strict evaluation order (file order) means `priority` keyword is ignored
+    - **Recommendation**: Remove `priority` keyword and rely on file position for rule precedence
+- **Documentation Reference**: All checks reference official AWS Network Firewall limitations documentation
+  - Source: https://docs.aws.amazon.com/network-firewall/latest/developerguide/suricata-limitations-caveats.html
+- **Enhanced Reports**: Three new dedicated sections in both text and HTML analysis reports
+  - "🚨 AWS UNSUPPORTED KEYWORDS - CRITICAL"
+  - "🚨 AWS PCRE RESTRICTIONS - CRITICAL"  
+  - "⚠️ AWS PRIORITY KEYWORD - WARNING"
+- **Comprehensive Coverage**: Analyzer now validates against all major AWS Network Firewall restrictions listed in AWS documentation
+
+### Technical Implementation
+- **Three New Methods**: Added `check_unsupported_keywords()`, `check_pcre_restrictions()`, and `check_priority_strict_order()` to RuleAnalyzer class
+- **Conflict Categories**: Added three new categories to conflicts dictionary: 'unsupported_keywords', 'pcre_restrictions', 'priority_strict_order'
+- **Report Integration**: Enhanced both `generate_analysis_report()` and `generate_html_report()` with AWS-specific validation sections
+- **Validation Timing**: All checks run after existing conflict detection but before report generation
+
+### User Impact
+- **Pre-Deployment Validation**: Catches AWS-specific syntax errors before attempting to deploy to AWS Network Firewall
+- **Clear Remediation**: Specific line numbers and actionable suggestions for each violation
+- **Deployment Success**: Prevents rule group creation failures due to unsupported features
+- **Time Savings**: Identifies compatibility issues during development rather than at deployment time
+
+---
+
+## Version 1.23.0 - December 16, 2025
+
+### Major Enhancement: Advanced Editor Migration to wxPython/Scintilla
+- **Professional Code Editor Experience**: Upgraded Advanced Editor from tkinter to wxPython with Scintilla component for native code folding and enhanced text editing capabilities
+  - **Native Code Folding**: New collapsible code sections for grouping related rules and comments
+    - Click +/- icons in the left margin to expand/collapse rule groups
+    - Groups automatically detected between blank lines
+    - Supports collapsing comments, rules, or mixed comment+rule groups
+    - Visual tree structure with fold markers
+  - **Enhanced Text Editing**: Leverages Scintilla's professional editor component used by modern IDEs
+    - Superior text rendering and performance
+    - Better cursor handling and selection behavior
+    - Improved undo/redo functionality
+    - Smooth scrolling and zooming (Ctrl+MouseWheel)
+  - **Improved Validation Display**: Better visual indicators for errors and warnings
+    - Red squiggles for errors with semi-transparent red background highlights
+    - Orange squiggles for warnings with semi-transparent orange background highlights
+    - Enhanced tooltip system for better error information display
+  - **Optional Dependency**: wxPython is optional - main program works perfectly without it
+    - If wxPython not installed, Advanced Editor shows helpful error message with installation instructions
+    - All other features (rule editing, analysis, export, flow testing) work normally
+    - Users can install wxPython anytime: `pip install wxPython`
+- **Same Powerful Features**: All existing Advanced Editor capabilities preserved
+  - Real-time syntax validation
+  - Smart auto-complete with content keyword suggestions
+  - Find and Replace with field-specific filtering
+  - Auto-close brackets/quotes
+  - Smart comment toggle
+  - Keyboard shortcuts (Ctrl+F, Ctrl+G, Ctrl+/, F3)
+- **Backward Compatibility**: Files work identically between versions - no format changes
+
+### Technical Implementation
+- **New Dependency**: Added wxPython (optional) for wxPython/Scintilla editor component
+- **Graceful Degradation**: Main application has zero wxPython imports - only advanced_editor.py uses it
+- **Subprocess Architecture**: Advanced Editor launches as separate subprocess for clean isolation
+- **Error Handling**: Comprehensive error detection and user-friendly messages if wxPython missing
+
+### User Impact
+- **Better Organization**: Code folding makes working with large rule files significantly easier
+- **Professional Experience**: Editor quality matches expectations from modern IDEs
+- **Seamless Upgrade**: Existing users continue working normally - code folding is immediately available
+- **No Breaking Changes**: Main program unchanged - Advanced Editor remains an optional power tool
+- **Easy Installation**: Clear documentation and error messages guide users through wxPython installation if needed
+
+---
+
+## Version 1.22.1 - December 14, 2025
+
+### Enhancement: Blank Line Insertion
+- **Enter Key Blank Line Insertion**: Added ability to insert blank lines using the Enter key for improved rule organization
+  - **Simple Workflow**: Select any line in the rules table and press Enter to insert a blank line at that position
+  - **Automatic Shifting**: All subsequent lines automatically shift down to maintain proper line numbering
+  - **Filter Protection**: Feature only available when no filters are active to ensure predictable line numbering
+    - Clear informative message shown if user attempts to insert blank line with active filters
+    - User directed to clear filters first before inserting blank lines
+  - **Focus-Aware**: Only activates when rules table has focus (won't interfere with text entry in editor fields)
+  - **Undo Support**: Full Ctrl+Z support - blank line insertion can be undone
+  - **File Modification Tracking**: Properly marks file as modified when blank line inserted
+  - **Navigation Enhancement**: After insertion, selection automatically moves to line after inserted blank line
+- **Consistent with Existing Features**: Complements existing comment insertion and rule insertion functionality
+- **Professional Quality**: Seamless integration with existing table management, filtering system, and undo functionality
+
+### Technical Implementation
+- **UI Manager**: Added `on_enter_key()` method with comprehensive filter checking and line insertion logic
+- **Import Addition**: Added `from suricata_rule import SuricataRule` to ui_manager.py
+- **Key Binding**: Registered `<Return>` key binding in setup_ui() method
+- **Filter Detection**: Uses existing `rule_filter.is_active()` method to check filter state
+- **Blank Line Creation**: Creates SuricataRule object with `is_blank = True` attribute
+- **Integration**: Works seamlessly with existing blank line handling in file save/load operations
+
+### User Impact
+- **Improved Organization**: Easy way to add visual separation between rule sections
+- **Keyboard Efficiency**: No need to use Insert Comment button for simple spacing
+- **Predictable Behavior**: Clear rules about when feature is available (no filters active)
+- **Professional Workflow**: Standard Enter key behavior familiar from text editors
+
+---
+
+## Version 1.22.0 - December 14, 2025
+
+### Major New Feature: Rule Filtering and Hiding
+- **Non-Destructive Rule Filtering**: New capability to temporarily hide rules from the main table view based on multiple criteria without deleting them
+  - **Filter by Action**: Show/hide rules based on action type (Pass, Drop, Reject, Alert) with individual checkboxes
+  - **Filter by Protocol**: Select specific protocols to display using multi-select dropdown (TCP, UDP, HTTP, TLS, DNS, etc.)
+  - **Filter by SID Range**: Filter rules within or outside a specific SID range
+    - Enter "From" and "To" SID values to define range
+    - "Exclude" checkbox inverts filter to hide rules in range and show rules outside range
+  - **Filter by Variable**: Show only rules using specific network variables ($HOME_NET, @ALLOW_LIST, etc.)
+    - Dropdown auto-populated with variables used in current file
+    - Updates dynamically as rules are edited
+  - **Collapsible Filter Bar**: Space-efficient design starts collapsed by default
+    - Click to expand and access all filter controls
+    - Shows active filter summary when collapsed
+    - Two-line layout when expanded (~45px) with minimal impact on visible rules
+  - **Real-Time Filtering**: Changes apply instantly for Actions/Protocol with Apply button for SID/Variable filters
+  - **Clear Status Indication**: Status bar shows "Showing X of Y rules" with active filter details
+  - **Smart Filter Clearing**: Filters automatically clear when edited rules don't match current filter criteria
+- **Large Rule Set Management**: Essential for working with files containing 100+ rules, improving navigation and focus
+- **Professional Quality**: Filter bar preserves original line numbers, handles blank lines intelligently, and includes comprehensive validation
+
+### Technical Implementation
+- **New Module**: Created `rule_filter.py` with RuleFilter class providing core filtering logic
+  - `matches()` method validates rules against all active filter criteria
+  - `get_used_variables()` dynamically extracts variables from current rule set
+  - `is_active()` and `get_filter_description()` for status tracking
+- **UI Integration**: Enhanced `ui_manager.py` with collapsible filter bar controls
+- **Main Application**: Integrated filter instance in `suricata_generator.py` with filtered table refresh logic
+- **Index Mapping Fix**: Corrected critical bug where tree position was used instead of actual line numbers when filters active
+
+### User Impact
+- **Improved Navigation**: Focus on relevant rules when editing large rule sets
+- **Troubleshooting Aid**: Isolate specific rule types for debugging
+- **Workflow Efficiency**: Reduce cognitive load by hiding irrelevant rules temporarily
+- **Zero Data Loss**: Filtered rules remain in file and are saved/exported normally
+
+---
+
+## Version 1.21.0 - December 11, 2025
+
+### Major Enhancement: Unified Find and Replace
+- **Unified Find and Replace Functionality**: Consolidated search and replace features across both main program and Advanced Editor with consistent behavior
+  - **Main Program Enhancement**: Upgraded search-only dialog to full Find and Replace capability
+    - Dialog title changed from "Enhanced Search" to "Find and Replace"
+    - Added Replace, Replace All, and Find Next buttons
+    - Supports field-specific replacement (e.g., replace only in Message field)
+  - **Advanced Editor Enhancement**: Added "Include comments" checkbox to match main program functionality
+    - Previously only available in main program's search
+    - Now both dialogs have identical options for consistent experience
+  - **Dynamic Filter Updates**: Real-time responsiveness to filter changes during active search
+    - Change action filters (Pass, Drop, Reject, Alert) mid-search and results update automatically
+    - Switch field selection and see results refresh immediately
+    - Toggle case sensitivity or other options on-the-fly
+    - No need to close and reopen dialog to refine search
+  - **Identical User Experience**: Both dialogs now titled "Find and Replace" with matching layout and options
+  - **Smart Field Filtering**: When specific fields selected (Message, Content, etc.), comments are appropriately excluded from results
+
+### Technical Implementation
+- **search_manager.py**: Added complete replace functionality with `replace_current()`, `replace_all()`, and `_replace_in_rule()` methods
+- **advanced_editor.py**: Enhanced with "Include comments" checkbox and dynamic filter detection in all callback functions
+- **Filter Detection**: Smart comparison logic detects checkbox changes and triggers automatic re-search
+- **Proper Initialization**: Fixed dropdown initialization to display "All fields" by default in both contexts
+
+### User Impact
+- **Powerful Replace Operations**: Find and replace text across all rule fields or specific fields
+- **Real-Time Control**: Dynamically adjust search filters without restarting search
+- **Consistent Experience**: Same functionality whether working in main program or Advanced Editor
+- **Improved Productivity**: Bulk text replacements with regex, case sensitivity, and whole word options
+
+---
+
+## Version 1.20.1 - December 7, 2025
+
+### Bug Fix: Port Set Variable Validation
+- **Fixed Port Set Validation Error**: Corrected critical bug where IP Set (CIDR) validation was incorrectly being applied to Port Set variables
+  - **Root Cause**: Validation logic was checking variable usage analysis before checking the explicit `var_type` parameter, causing new Port Sets to default to IP Set validation
+  - **Impact**: Users attempting to add Port Set variables received "Invalid CIDR definition" error instead of proper port validation
+  - **Three-Part Fix**:
+    1. **Add New Port Sets**: Modified validation to check `var_type` parameter first, ensuring immediate port validation
+    2. **Edit Unused Port Sets**: Added intelligent type detection that examines definition format to identify port patterns (colons, brackets, port numbers 1-1024)
+    3. **Variables Table Display**: Enhanced display logic to show correct "Port Set" type even when variable hasn't been used in rules yet
+  - **Helper Method**: Added `_looks_like_port_definition()` to distinguish port specifications from CIDR blocks
+  - **User Experience**: Improved cursor positioning in variable dialogs - cursor now positioned after "$" for immediate typing
+- **Validation Now Works Correctly**: Port Sets validate port numbers/ranges with brackets, IP Sets validate CIDR blocks
+- **Technical Implementation**: Modified `show_variable_dialog()`, `edit_variable()`, `on_variable_double_click()` in ui_manager.py and `refresh_variables_table()` in suricata_generator.py
+
+### User Impact
+- **Working Port Sets**: Users can now successfully create and edit Port Set variables without false CIDR validation errors
+- **Correct Type Display**: Variables table shows accurate "Port Set" or "IP Set" classification
+- **Better UX**: Cursor positioning improvement makes variable creation more efficient
+
+---
+
+## Version 1.20.0 - December 5, 2025
+
+### New Feature: Suricata SIG Type Classification For Rules
+- **Full 10-Type Classification Display**: New educational feature shows Suricata's internal rule type classification
+  - **Main Table Integration**: Optional SIG Type column displays between Line and Action columns (75px width)
+    - Toggle visibility via Tools → Show SIG Type Classification
+    - Displays abbreviated labels: DE-Only, IP-Only, Like-IP, PD-Only, Packet, Pkt-Strm, Stream, App-Lyr, App-TX
+    - Hidden by default with no state persistence between sessions
+  - **Advanced Editor Display**: Status bar shows full SIG_TYPE_* name when editing rules
+    - Format: "Rule 4/42 | SIG_TYPE_PKT | Modified"
+    - Works at any cursor position within a rule line
+  - **Educational Help Dialog**: Help → About SIG Types explains processing order and rule type definitions
+    - Detailed descriptions of all 9 active types (DE-Only through App-TX)
+    - Processing order explanation (1-9, where 1 processes first)
+    - Key insights about protocol layering conflicts
+    - Clickable link to official Suricata documentation
+  - **10 Official Types Supported**:
+    1. **DE-Only** (Decoder Events) - Rules with decode-event keyword or pkthdr protocol
+    2. **IP-Only** (Basic IP) - Simple IP/protocol rules without keywords
+    3. **Like-IP** (Negated IP) - IP rules with negated addresses (!, [!10.0.0.0/8])
+    4. **PD-Only** (Protocol Detection) - Rules with app-layer-protocol keyword
+    5. **Packet** (Flow) - Rules with flow keywords (flow:established, flowbits:isset)
+    6. **Pkt-Strm** (Packet-Stream) - Content with anchoring (startswith, depth)
+    7. **Stream** (Stream) - Unanchored content matching
+    8. **App-Lyr** (Application Layer) - Application protocol field (http, tls, dns)
+    9. **App-TX** (Application Transaction) - Sticky buffers (http.host, tls.sni)
+- **Hybrid Architecture for Compatibility**: Maintains backward compatibility while providing detailed classification
+  - **Display**: Full 10-type classification for educational purposes
+  - **Conflict Detection**: Continues using proven simplified 3-tier system (IPONLY, PKT, APPLAYER)
+  - **Test Flow Compatible**: No changes to flow testing logic - maps 10 types to 3 tiers internally
+  - **Zero Breaking Changes**: All existing functionality preserved
+- **Fast Performance**: Classification calculation adds < 0.001 seconds per rule
+  - 100 rules: Imperceptible delay
+  - 1000 rules: < 0.1 seconds
+  - No progress bars needed
+- **Understanding Protocol Layering**: Helps users understand why IP-Only rules process before App-TX rules
+  - Explains unexpected shadowing conflicts
+  - Shows how to elevate IP-Only rules to Packet type by adding flow keywords
+  - Links directly to 'Review Rules' feature for detecting conflicts
+
+### Technical Implementation
+- **Classification Logic** (`rule_analyzer.py`): Four new methods implementing comprehensive type detection
+  - `get_detailed_suricata_rule_type()` - Determines one of 10 types using keyword analysis
+  - `_has_negated_addresses()` - Detects negated network specifications
+  - `map_detailed_to_simplified()` - Maps 10 types to 3-tier system
+  - `get_display_label_for_type()` - Returns abbreviated display labels
+- **UI Changes** (`ui_manager.py`): New menu items and toggle functionality
+  - Updated table structure from 4 to 5 columns
+  - Added Tools menu checkbox for visibility toggle
+  - Added Help menu item with comprehensive educational dialog
+- **Main Application** (`suricata_generator.py`): Conditional display logic
+  - Always uses 5-column structure (prevents display bugs)
+  - Calculates SIG type only when column visible
+  - Proper handling for blank lines and comments
+- **Advanced Editor** (`advanced_editor.py`): Status bar enhancement
+  - Parses full current line for classification
+  - Displays full SIG_TYPE_* constant name
+  - Robust error handling for parse failures
+
+### User Impact
+- **Educational Tool**: Helps users understand Suricata's internal processing order
+- **Protocol Layering Insight**: Explains why certain conflicts occur and how to fix them
+- **Zero Overhead**: Feature is opt-in with no performance impact when disabled
+- **Professional Documentation**: Direct link to official Suricata documentation for deeper learning
+
+---
+
 ## Version 1.19.4 - December 1, 2025
 
 ### Rules Analysis Engine Bug Fix (v1.9.3) - Asymmetric Flow Policy False Positives

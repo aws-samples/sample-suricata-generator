@@ -1,6 +1,6 @@
 {
-  "version": "1.0.0",
-  "last_updated": "2025-11-22",
+  "version": "1.1.0",
+  "last_updated": "2025-12-15",
   "description": "AWS Network Firewall Suricata Content Keywords",
   "note": "This file contains keywords verified to work with AWS Network Firewall. Users can add new keywords as AWS/Suricata adds features.",
   "keywords": [
@@ -252,6 +252,38 @@
         "ssl_state:client_hello;",
         "ssl_state:server_hello;",
         "ssl_state:client_hello|server_hello;"
+      ]
+    },
+    {
+      "name": "ssl_version",
+      "syntax": "ssl_version:<version>[,<version>]",
+      "values": [
+        "sslv2",
+        "sslv3",
+        "tls1.0",
+        "tls1.1",
+        "tls1.2",
+        "tls1.3",
+        "!sslv2",
+        "!sslv3",
+        "!tls1.0",
+        "!tls1.1"
+      ],
+      "multi_value": true,
+      "description": "Match version of SSL/TLS record. Multiple versions can be specified with commas. Can be prefixed with ! to negate (match if version is different than all listed versions)",
+      "category": "tls",
+      "example": "ssl_version:tls1.2",
+      "examples": [
+        "ssl_version:tls1.2;",
+        "ssl_version:sslv2,sslv3;",
+        "ssl_version:!tls1.0,tls1.1;",
+        "ssl_version:tls1.2,tls1.3;"
+      ],
+      "notes": [
+        "Matches the SSL/TLS record version, not negotiated version",
+        "Multiple versions can be comma-separated",
+        "Negation (!) matches if version differs from all listed versions",
+        "Negation does not match on undetermined versions"
       ]
     },
     {

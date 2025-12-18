@@ -1,10 +1,10 @@
 # Suricata Rule Generator for AWS Network Firewall
 
-A GUI application for creating, editing, and managing Suricata rules specifically designed for AWS Network Firewall deployments.
+A GUI application for creating, editing, and managing Suricata rules specifically designed for AWS Network Firewall deployments using strict rule ordering.
 
 ## Overview
 
-This application provides an intuitive graphical interface for generating Suricata rules with features tailored for AWS Network Firewall use cases. It supports individual rule creation, bulk domain rule generation, and comprehensive rule management with inline editing capabilities.  It also includes an advanced editor with IDE like capabilities for those that prefer more direct control *(New in v1.19.0)*.
+This application provides an intuitive graphical interface for generating Suricata rules with features tailored for AWS Network Firewall use cases. It supports individual rule creation, bulk domain rule generation, and comprehensive rule management with inline editing capabilities. It also includes a professional advanced editor with native code folding, IDE-like capabilities, and real-time syntax validation using wxPython/Scintilla for power users who prefer direct control *(New in v1.19.0, Enhanced with Scintilla in v1.23.0)*.
 
 ## Screenshot
 
@@ -21,11 +21,13 @@ This application provides an intuitive graphical interface for generating Surica
 - [Installation](#installation)
 - [Creating a Standalone Executable (Optional)](#creating-a-standalone-executable-optional)
 - [Basic Usage](#basic-usage)
+- [Rule Filtering](#rule-filtering)
 - [Advanced Usage](#advanced-usage)
 - [Rule Format](#rule-format)
 - [Network Field Validation](#network-field-validation)
 - [Variable Management](#variable-management)
 - [SID Management](#sid-management)
+- [SIG Type Classification](#sig-type-classification)
 - [File Format](#file-format)
 - [Rule Conflict Analysis](#rule-conflict-analysis)
 - [Tips](#tips)
@@ -79,27 +81,30 @@ python3 suricata_generator.py
 ## Features
 
 - **Visual Rule Management**: Color-coded table display with line numbers
+- **Rule Filtering**: *(New in v1.22.0)* Temporarily hide rules based on action, protocol, SID range, or variables without deleting them
+- **SIG Type Classification**: *(New in v1.20.0)* Educational display showing how Suricata classifies each rule's processing type
 - **Tabbed Interface**: Rule Editor and Rule Variables tabs for organized workflow
 - **Inline Editing**: Bottom panel editor for modifying rules
-- **Advanced Editor**: *(New in v1.19.0)* IDE-style text editor with auto-complete, syntax validation, and find/replace
+- **Advanced Editor**: *(Enhanced with Scintilla in v1.23.0)* Professional IDE-style editor with native code folding, auto-complete, and real-time validation
 - **Variable Management**: Auto-detection and management of network variables ($HOME_NET, @PORT_SETS)
 - **Infrastructure Export**: Generate Terraform (.tf) and CloudFormation (.cft) templates
-- **Copy/Paste Functionality**: Copy rules with Ctrl+C/V and right-click context menus
+- **Copy/Paste Functionality**: Intelligent dual-clipboard system with Ctrl+C/V and right-click context menus
 - **Toggle Selection**: Click selected rules again to deselect for improved workflow experience
 - **Bulk Domain Import**: Generate multiple rules from domain lists with automatic domain consolidation
+- **AWS Rule Group Import**: *(New in v1.18.7)* Import existing stateful rule groups from AWS Network Firewall
 - **Rule Validation**: Network field validation and SID uniqueness checking
-- **File Operations**: Open, save, and manage .suricata rule files
+- **File Operations**: Open, save, and manage .suricata rule files with companion .var files
 - **Comment Support**: Add and edit comment lines with proper formatting
 - **Undo Functionality**: Revert changes with Ctrl+Z
 - **Rule Movement**: Reorder rules with up/down controls
 - **AWS Template Loading**: Dynamic fetching of latest AWS best practices rules template
 - **Click-to-Insert**: Click below last rule to add new entries
 - **Keyboard Navigation**: Down arrow and End key navigates to placeholder row
-- **Rule Conflict Analysis**: Comprehensive shadow detection and conflict reporting
-- **Enhanced Search Functionality**: Comprehensive field-specific search with advanced filtering options
+- **Rule Conflict Analysis**: *(Enhanced in v1.23.1)* Comprehensive shadow detection, AWS compliance validation, and conflict reporting
+- **Enhanced Search & Replace**: *(Unified in v1.21.0)* Field-specific search with find/replace capabilities and advanced filtering options
 - **Enhanced Analysis Reports**: Professional HTML/PDF export with timestamps and version info
 - **Rule Statistics**: Real-time action counts (Pass/Drop/Reject/Alert) in colored status bar
-- **Protocol/Port Validation**: Subtle warnings for unusual protocol/port combinations
+- **Protocol/Port Validation**: Intelligent warnings for unusual protocol/port combinations
 - **Persistent Variables**: Automatic save/load of variable definitions via companion .var files
 - **Status Bar Enhancements**: SID ranges, undefined variables warnings, and search status
 - **SID Management**: Bulk SID renumbering with conflict detection and resolution strategies
@@ -107,9 +112,17 @@ python3 suricata_generator.py
 
 ## Requirements
 
+### Core Requirements (Required)
 - Python 3.6 or higher
 - tkinter (usually included with Python)
 - Standard Python libraries: re, os, ipaddress, typing
+
+### Optional Dependencies
+- **wxPython** (for Advanced Editor with code folding)
+  - Only required if you want to use the Advanced Editor feature (Tools > Advanced Editor)
+  - The main application works perfectly without it - all core features remain available
+  - Install with: `pip install wxPython`
+  - See [Advanced Editor Installation](#advanced-editor-installation) for platform-specific instructions
 
 ---
 
@@ -290,6 +303,111 @@ python3 suricata_generator.py
 ```cmd
 python suricata_generator.py
 ```
+
+---
+
+## Advanced Editor Installation
+
+> 💻 **Optional Enhancement** - Install wxPython for the Advanced Editor with code folding support.
+
+The Advanced Editor feature uses wxPython/Scintilla for professional code editing capabilities including native code folding. **This is completely optional** - the main application works perfectly without it.
+
+### Do I Need wxPython?
+
+**No** - The main Suricata Rule Generator works without wxPython. You can:
+- ✅ Create and edit rules using the GUI editor
+- ✅ Use all features: analysis, export, flow testing, domain import
+- ✅ Manage variables and perform SID management
+- ✅ Everything except the Advanced Editor (Tools > Advanced Editor)
+
+**Yes** - Install wxPython if you want to use the Advanced Editor for:
+- 📁 **Code Folding**: Collapse/expand rule groups for better organization
+- 💼 **Professional Editing**: Scintilla-based editor used by modern editors
+- 🔍 **Enhanced Validation**: Better visual indicators and tooltips
+
+### Installation Instructions by Platform
+
+#### Windows
+```cmd
+pip install wxPython
+```
+
+**Troubleshooting Windows:**
+- If pip fails, ensure Python was added to PATH during installation
+- Try: `python -m pip install wxPython`
+- May take several minutes to install (wxPython is a large package)
+
+#### macOS
+
+**Using pip (Recommended):**
+```bash
+pip3 install wxPython
+```
+
+**Troubleshooting macOS:**
+- Installation may take 10-15 minutes as it compiles native components
+- If build fails, you may need Xcode Command Line Tools:
+  ```bash
+  xcode-select --install
+  ```
+- Alternative: Download pre-built wheel from [wxPython Downloads](https://wxpython.org/pages/downloads/)
+
+#### Linux (Ubuntu/Debian)
+
+**Install system dependencies first:**
+```bash
+sudo apt update
+sudo apt install python3-wxgtk4.0
+```
+
+**Or install via pip:**
+```bash
+# Install build dependencies
+sudo apt install libgtk-3-dev libwebkit2gtk-4.0-dev
+
+# Install wxPython
+pip3 install wxPython
+```
+
+#### Linux (CentOS/RHEL/Fedora)
+
+```bash
+# Fedora
+sudo dnf install python3-wxpython4
+
+# Or via pip (requires development tools)
+sudo dnf install gtk3-devel webkit2gtk3-devel
+pip3 install wxPython
+```
+
+### Verifying Installation
+
+After installing wxPython, verify it's working:
+
+```bash
+python3 -c "import wx; print('wxPython version:', wx.version())"
+```
+
+If this prints the wxPython version number, the Advanced Editor is ready to use!
+
+### Testing the Advanced Editor
+
+1. Launch the Suricata Rule Generator
+2. Open or create some rules
+3. Click **Tools > Advanced Editor** (or press Ctrl+E)
+4. The Advanced Editor should open with code folding support
+
+### If Installation Fails
+
+**Don't worry!** The main application works perfectly without wxPython:
+- Use the regular GUI editor in the main application
+- All features work except the Advanced Editor
+- You can install wxPython later anytime
+
+**Need help?**
+- Check [wxPython installation guide](https://wxpython.org/pages/downloads/)
+- Search for platform-specific troubleshooting on the wxPython forums
+- The error message when clicking Advanced Editor provides installation instructions
 
 ### Troubleshooting
 
@@ -613,6 +731,90 @@ Rules are color-coded in the table by action type:
 
 ---
 
+## Rule Filtering
+
+> 🎯 **Focus on relevant rules** by temporarily hiding rules without deleting them - essential for large rule sets!
+
+The rule filtering feature provides non-destructive filtering to temporarily hide rules from the main table view based on multiple criteria:
+
+### Accessing the Filter Bar
+- **Collapsible Design**: Filter bar appears above the rules table, collapsed by default
+- **Click to Expand**: Click the collapsed filter bar to access all filtering controls
+- **Two-Line Layout**: When expanded, displays action checkboxes on first line and additional controls on second line (~45px total)
+
+### Filter by Action
+- **Individual Checkboxes**: Show/hide rules based on action type
+  - ☑️ Pass, Drop, Reject, Alert
+  - ☑️ Comments (show/hide comment lines)
+- **Instant Filtering**: Changes apply immediately when checkboxes are toggled
+
+### Filter by Protocol
+- **Multi-Select Dropdown**: Select one or multiple protocols to display
+  - Supports all 26 protocols (TCP, UDP, HTTP, TLS, DNS, etc.)
+  - Shows "All Protocols" when no filter active
+  - Displays count when multiple selected (e.g., "3 Protocols")
+- **Instant Updates**: Protocol filter applies immediately upon selection
+
+### Filter by SID Range
+- **Range Specification**: Enter "From" and "To" SID values to define range
+- **Exclude Mode**: Check "Exclude" checkbox to invert the filter
+  - Unchecked: Show only rules IN the specified range
+  - Checked: Show only rules OUTSIDE the range (hide rules in range)
+- **Use Cases**: 
+  - Isolate custom rules (e.g., SID 1000-1999)
+  - Hide imported rules (e.g., exclude SID 1-999)
+- **Apply Button**: Click "Apply" to activate SID range filter
+
+### Filter by Variable
+- **Auto-Populated Dropdown**: Shows only variables used in current file
+  - Examples: $HOME_NET, $EXTERNAL_NET, @ALLOW_LIST
+  - Displays "All" when no filter active
+- **Dynamic Updates**: Dropdown refreshes when filter bar is expanded
+- **Apply Button**: Click "Apply" to activate variable filter
+
+### Filter Status Indication
+- **Status Bar Updates**: Shows "Showing X of Y rules" when filters are active
+- **Filter Description**: Displays active filter criteria (e.g., "Filters: Action=Pass,Drop | Protocol=TLS")
+- **Visual Feedback**: Filter bar highlighted when filters are active
+- **Original Line Numbers**: Preserved even when rules are filtered (helps identify rules in original file)
+
+### Smart Filter Clearing
+- **Auto-Clear on Edit**: Filters automatically clear when edited/inserted rules don't match current filter criteria
+  - Prevents confusion when modified rules "disappear" from filtered view
+  - Clear notification message explains why filters were cleared
+- **Manual Clear**: "Clear All" button resets all filters to default (show all)
+
+### Key Benefits
+- 📊 **Large Rule Set Management**: Essential for files with 100+ rules
+- 🎯 **Improved Focus**: Hide irrelevant rules while working on specific sections
+- 🔍 **Troubleshooting**: Isolate specific rule types for debugging
+- 💡 **Non-Destructive**: Filtered rules remain in file and are saved/exported normally
+- ⚡ **Real-Time Updates**: Changes apply instantly (Actions/Protocol) or via Apply button (SID/Variable)
+
+### Workflow Examples
+
+**Example 1: Review TLS Rules**
+1. Click filter bar to expand
+2. Select "TLS" from Protocol dropdown
+3. Table instantly shows only TLS rules
+4. Edit rules as needed
+5. Click "Clear All" to see full rule set again
+
+**Example 2: Hide Imported Rules**
+1. Click filter bar to expand
+2. Enter "1" in SID From, "999" in SID To
+3. Check "Exclude" checkbox
+4. Click "Apply"
+5. Only rules with SID 1000+ are displayed (imported rules hidden)
+
+**Example 3: Find Rules Using $HOME_NET**
+1. Click filter bar to expand
+2. Select "$HOME_NET" from Variable dropdown
+3. Click "Apply"
+4. Only rules using $HOME_NET are displayed
+
+---
+
 ## Advanced Usage
 
 ### 📦 Bulk Domain Import
@@ -742,7 +944,7 @@ For complete AWS CLI documentation, see: [AWS CLI describe-rule-group reference]
   - Visual Highlighting: Yellow background for matches
 - **Navigation**: F3 for next, Shift+F3 for previous, Escape to close
 
-### 📊 Change Tracking
+###  Change Tracking
 
 > 📝 **Need an audit trail?** Enable Change Tracking to log all operations with timestamps and detailed history.
 
@@ -756,16 +958,23 @@ For complete AWS CLI documentation, see: [AWS CLI describe-rule-group reference]
 - **Operation Tracking**: Logs rule additions, modifications, deletions, moves, and bulk operations
 - **Auto-Detection**: Automatically enables tracking when opening files with existing history
 
-### 💻 Advanced Editor *(New in v1.19.0)*
+### 💻 Advanced Editor *(New in v1.19.0, Enhanced with Scintilla in v1.23.0)*
 
-The Advanced Editor provides a powerful IDE-style text interface for users who prefer direct rule editing:
+The Advanced Editor provides a powerful IDE-style text interface with native code folding using wxPython/Scintilla:
 
 ![Advanced Editor](images/advanced_editor.png)
 
 #### Accessing the Advanced Editor
 - **Tools > Advanced Editor** (Ctrl+E)
-- **Modal Window**: 1000x700 resizable with line numbers and status bar
+- **Modal Window**: 1000x700 resizable with line numbers, fold margin, and status bar
 - **Scope**: Edits all rules with variables displayed as-is (e.g., $HOME_NET)
+- **Requirements**: wxPython (automatically prompted to install if missing)
+
+#### Code Folding *(New Feature)*
+- **Rule Groups**: Blank lines separate rules into foldable groups
+- **Comment Blocks**: Consecutive comments (2+) can be collapsed together
+- **Box-Style Markers**: Click +/- icons in fold margin to expand/collapse sections
+- **Large File Management**: Essential for organizing complex rule sets with 100+ rules
 
 #### Real-Time Syntax Validation
 - **Two-Level System**: Red underlines for errors, orange for warnings
@@ -936,6 +1145,101 @@ The Rule Variables tab provides comprehensive variable management:
 - ✅ **Valid Range**: 1-999999999
 - 🤖 **Auto-Generation**: Application auto-generates next available SID for new rules
 - ⚠️ **Duplicate Prevention**: Built-in validation prevents conflicts
+
+---
+
+## SIG Type Classification
+
+> 🎓 **Understanding Rule Processing** - Learn how Suricata classifies and processes different rule types.
+
+The application includes comprehensive SIG type classification to help users understand how Suricata internally processes their rules. This educational feature reveals the rule type that Suricata assigns to each rule, which determines processing order and performance characteristics.
+
+### What are SIG Types?
+
+Suricata internally classifies each rule into one of 10 official SIG types based on the keywords and protocol used. These types determine:
+- **Processing Order**: Rules process in type order (not just file order)
+- **Performance Characteristics**: Different types have different performance impacts
+- **Protocol Layering**: Understanding why some rules may shadow others unexpectedly
+
+### Accessing SIG Type Information
+
+#### Main Application Display *(New in v1.20.0)*
+- **Tools > Show SIG Type Classification**: Toggle visibility of SIG Type column in rules table
+- **Optional Column**: Appears between Line and Action columns when enabled
+- **Abbreviated Labels**: Shows compact labels (IPONLY, PKT, APP_TX, etc.)
+- **Hidden by Default**: Column hidden by default to avoid cluttering the interface
+
+#### Advanced Editor Display *(New in v1.20.0)*
+- **Status Bar**: Shows full SIG type name when cursor is on a rule line
+- **Format**: "Rule 5/42 | SIG_TYPE_APP_TX | Modified"
+- **Real-Time**: Updates as you move between rules
+- **Always Visible**: Displayed automatically (no toggle needed)
+
+#### Educational Help
+- **Help > About SIG Types**: Comprehensive guide explaining all 10 types
+- **Processing Order**: Shows which types process first (1-9, where 1 is highest priority)
+- **Examples**: Real-world examples of each type with explanations
+- **Documentation Link**: Direct link to official Suricata documentation
+
+### The 10 Official SIG Types
+
+Per [Suricata Documentation](https://docs.suricata.io/en/latest/rules/rule-types.html):
+
+1. **SIG_TYPE_DEONLY** (Decoder Events) - Rules with decode-event keyword
+2. **SIG_TYPE_IPONLY** (IP Only) - Basic IP/protocol rules with no keywords
+3. **SIG_TYPE_LIKE_IPONLY** (Like IP Only) - IP rules with negated addresses
+4. **SIG_TYPE_PDONLY** (Protocol Detection) - Rules with app-layer-protocol keyword
+5. **SIG_TYPE_PKT** (Packet) - Rules with flow keywords (flow:established, flowbits)
+6. **SIG_TYPE_PKT_STREAM** (Packet-Stream) - Content with anchoring (startswith, depth)
+7. **SIG_TYPE_STREAM** (Stream) - Unanchored content matching
+8. **SIG_TYPE_APPLAYER** (Application Layer) - Application protocol field (http, tls, dns)
+9. **SIG_TYPE_APP_TX** (Application Transaction) - Sticky buffers (http.host, tls.sni, ja3.hash)
+10. **SIG_TYPE_NOT_SET** (Not Set) - Error/unknown state
+
+### Classification Examples
+
+```
+# SIG_TYPE_IPONLY - Basic rule, no keywords
+pass tcp any any -> any any (msg:"Basic TCP"; sid:100; rev:1;)
+
+# SIG_TYPE_PKT - Has flow keyword
+pass tcp any any -> any any (msg:"Flow keyword"; flow:to_server; sid:101; rev:1;)
+
+# SIG_TYPE_APPLAYER - App-layer protocol
+pass tls any any -> any any (msg:"TLS protocol"; sid:102; rev:1;)
+
+# SIG_TYPE_APP_TX - Sticky buffer keyword
+pass tls any any -> any any (tls.sni; content:"example.com"; msg:"TLS SNI"; sid:103; rev:1;)
+```
+
+### Why SIG Types Matter
+
+**Protocol Layering Conflicts:**
+- IP-only rules (SIG_TYPE_IPONLY) process before application layer rules (SIG_TYPE_APPLAYER)
+- This can cause unexpected shadowing even when file order suggests otherwise
+- Understanding SIG types helps diagnose why conflicts occur
+
+**Performance Optimization:**
+- Application transaction rules (SIG_TYPE_APP_TX) are most specific and efficient
+- IP-only rules (SIG_TYPE_IPONLY) are least specific and process all traffic
+- Using appropriate SIG types improves firewall performance
+
+**Rule Development:**
+- See exactly how Suricata will process your rules
+- Understand which keywords elevate rules to higher processing tiers
+- Make informed decisions about keyword usage
+
+### Integration with Analysis
+
+The SIG type classification integrates with the Rule Conflict Analysis feature:
+- **Protocol Layering Section**: Analysis reports show SIG types involved in conflicts
+- **Educational Value**: Helps users understand why conflicts are flagged
+- **Fix Guidance**: Suggests adding keywords to elevate rules to appropriate types
+
+### Implementation Quality
+
+✅ **Complete** - Implements all 10 official SIG types from Suricata documentation
+✅ **Consistent** - Same logic used in main program and advanced editor
 
 ---
 
@@ -1256,6 +1560,7 @@ The application follows a modular architecture pattern with specialized managers
 - **UI Manager** (`ui_manager.py`): Complete user interface management and event handling
 - **Advanced Editor** (`advanced_editor.py`): *(New in v1.19.0)* IDE-style text editor with auto-complete, validation, and find/replace
 - **Search Manager** (`search_manager.py`): Advanced search capabilities with filtering and navigation
+- **Rule Filter** (`rule_filter.py`): *(New in v1.22.0)* Non-destructive rule filtering by action, protocol, SID range, and variables
 - **File Manager** (`file_manager.py`): All file operations, exports, and companion file management
 - **Domain Importer** (`domain_importer.py`): Bulk domain processing and AWS template integration
 - **Stateful Rule Importer** (`stateful_rule_importer.py`): Converts exported stateful rule groups to Suricata format
@@ -1283,7 +1588,7 @@ The Security Validator module provides protection against:
 
 ## Version
 
-Current version: 1.19.1
+Current version: 1.23.1
 
 ## Support
 

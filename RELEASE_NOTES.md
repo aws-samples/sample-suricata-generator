@@ -1,5 +1,27 @@
 # Release Notes
 
+## Version 1.24.4 - December 24, 2025
+
+### Bug Fix: MacOS Template Dialog Display
+- **Fixed Missing Buttons on MacOS**: Resolved UI issue where Cancel and Apply buttons were not visible in the template preview dialog on MacOS
+  - **Root Cause**: Template preview dialog window height (700x500) was too short for MacOS to display all content including buttons at the bottom
+  - **Impact**: Mac users could not see or click Cancel/Apply buttons in the final window of File | Insert Rules From Template feature
+  - **Solution**: Increased window height from 500px to 650px (+150px) and made window resizable
+  - **Platform Compatibility**: Fix ensures consistent experience across Windows, MacOS, and Linux
+  - **User Control**: Resizable window allows users to adjust size based on their display preferences
+
+### Technical Implementation
+- Modified `show_template_preview_dialog()` method in `suricata_generator.py`
+- Changed window geometry from "700x500" to "700x650"
+- Changed resizable setting from `(False, False)` to `(True, True)`
+
+### User Impact
+- **MacOS Usability**: Mac users can now see and interact with all template dialog buttons
+- **Flexibility**: Resizable window accommodates different screen sizes and user preferences
+- **Cross-Platform Consistency**: Template feature now works reliably on all operating systems
+
+---
+
 ## Version 1.24.3 - December 24, 2025
 
 ### AWS Quota Compliance Validation

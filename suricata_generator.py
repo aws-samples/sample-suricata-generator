@@ -5536,10 +5536,10 @@ class SuricataRuleGenerator:
         icon = template.get('icon', '')
         dialog_title = f"{icon} {template['name']}" if icon else template['name']
         dialog.title(dialog_title)
-        dialog.geometry("700x500")
+        dialog.geometry("700x650")
         dialog.transient(self.root)
         dialog.grab_set()
-        dialog.resizable(False, False)
+        dialog.resizable(True, True)
         
         # Center the dialog
         dialog.geometry("+%d+%d" % (self.root.winfo_rootx() + 150, self.root.winfo_rooty() + 100))

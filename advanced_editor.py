@@ -1418,13 +1418,23 @@ class AdvancedEditorWx(wx.Dialog):
         
         # Source Network (third section)
         if word_count == 2 or (word_count == 3 and not text_before.endswith(' ')):
+            # Start with common values
             suggestions = ['any', '$HOME_NET', '$EXTERNAL_NET']
-            suggestions.extend([var for var in self.variables.keys() if var.startswith(('$', '@'))])
-            return suggestions
+            # Add IP set variables (filter out port sets)
+            ip_vars = self._filter_ip_set_variables()
+            # Deduplicate by using dict.fromkeys to preserve order
+            all_suggestions = list(dict.fromkeys(suggestions + ip_vars))
+            return all_suggestions
         
         # Source Port (fourth section)
         if word_count == 3 or (word_count == 4 and not text_before.endswith(' ')):
-            return ['any', '80', '443', '[80,443]', '[8080:8090]']
+            # Start with common port values
+            suggestions = ['any', '80', '443', '[80,443]', '[8080:8090]']
+            # Add port set variables from Rule Variables
+            port_vars = self._filter_port_set_variables()
+            # Deduplicate by using dict.fromkeys to preserve order
+            all_suggestions = list(dict.fromkeys(suggestions + port_vars))
+            return all_suggestions
         
         # Direction (fifth section)
         if word_count == 4 or (word_count == 5 and not text_before.endswith(' ')):
@@ -1432,19 +1442,120 @@ class AdvancedEditorWx(wx.Dialog):
         
         # Destination Network (sixth section)
         if word_count == 5 or (word_count == 6 and not text_before.endswith(' ')):
+            # Start with common values
             suggestions = ['any', '$HOME_NET', '$EXTERNAL_NET']
-            suggestions.extend([var for var in self.variables.keys() if var.startswith(('$', '@'))])
-            return suggestions
+            # Add IP set variables (filter out port sets)
+            ip_vars = self._filter_ip_set_variables()
+            # Deduplicate by using dict.fromkeys to preserve order
+            all_suggestions = list(dict.fromkeys(suggestions + ip_vars))
+            return all_suggestions
         
         # Destination Port (seventh section)
         if word_count == 6 or (word_count == 7 and not text_before.endswith(' ')):
-            return ['any', '80', '443', '[80,443]']
+            # Start with common port values
+            suggestions = ['any', '80', '443', '[80,443]']
+            # Add port set variables from Rule Variables
+            port_vars = self._filter_port_set_variables()
+            # Deduplicate by using dict.fromkeys to preserve order
+            all_suggestions = list(dict.fromkeys(suggestions + port_vars))
+            return all_suggestions
         
         # Content keywords (inside parentheses)
         if '(' in text_before and ')' not in text_before:
             return self.get_content_keyword_suggestions(text_before)
         
         return []
+    
+    def _filter_ip_set_variables(self):
+        """Filter variables to return only IP set variables (exclude port sets)
+        
+        Returns IP/network variables that start with $ or @, excluding those that
+        look like port definitions.
+        """
+        ip_vars = []
+        for var_name, var_data in self.variables.items():
+            # Only include variables with $ or @ prefix
+            if not var_name.startswith(('$', '@')):
+                continue
+            
+            # Get the variable definition (handle both dict and string formats)
+            if isinstance(var_data, dict):
+                definition = var_data.get("definition", "")
+            else:
+                definition = var_data
+            
+            # Skip if it looks like a port definition
+            if definition and self._looks_like_port_definition(definition):
+                continue
+            
+            ip_vars.append(var_name)
+        
+        return sorted(ip_vars)
+    
+    def _filter_port_set_variables(self):
+        """Filter variables to return only port set variables
+        
+        Returns port variables that start with $ and have port-like definitions.
+        Only $ prefix is allowed for port variables per AWS Network Firewall requirements.
+        """
+        port_vars = []
+        for var_name, var_data in self.variables.items():
+            # Port variables must use $ prefix (not @)
+            if not var_name.startswith('$'):
+                continue
+            
+            # Get the variable definition (handle both dict and string formats)
+            if isinstance(var_data, dict):
+                definition = var_data.get("definition", "")
+            else:
+                definition = var_data
+            
+            # Include if it looks like a port definition
+            if definition and self._looks_like_port_definition(definition):
+                port_vars.append(var_name)
+        
+        return sorted(port_vars)
+    
+    def _looks_like_port_definition(self, definition):
+        """Check if a variable definition looks like a port specification
+        
+        Detects patterns like:
+        - Single port: 80
+        - Port list: [80,443,8080]
+        - Port range: [8000:9000]
+        - Complex: [80,443,8000:9000]
+        
+        Args:
+            definition: Variable definition string
+            
+        Returns:
+            bool: True if definition looks like ports
+        """
+        if not definition:
+            return False
+        
+        definition = definition.strip()
+        
+        # Check for bracketed port lists/ranges
+        if definition.startswith('[') and definition.endswith(']'):
+            inner = definition[1:-1].strip()
+            # Check for port patterns: numbers, commas, colons, exclamation
+            if all(c.isdigit() or c in ',: !' for c in inner.replace(' ', '')):
+                return True
+        
+        # Check for single port number
+        if definition.isdigit():
+            port_num = int(definition)
+            if 1 <= port_num <= 65535:
+                return True
+        
+        # Check for simple port range without brackets (less common but valid)
+        if ':' in definition:
+            parts = definition.split(':')
+            if len(parts) == 2 and parts[0].strip().isdigit() and parts[1].strip().isdigit():
+                return True
+        
+        return False
     
     def get_content_keyword_suggestions(self, text_before):
         """Get content keyword suggestions"""
@@ -1464,11 +1575,11 @@ class AdvancedEditorWx(wx.Dialog):
                 if sid_match:
                     used_sids.add(int(sid_match.group(1)))
             
-            next_sid = 100
-            while next_sid in used_sids:
-                next_sid += 1
-                if next_sid > 999999:
-                    break
+            # Find next available SID (max + 1, like main program)
+            if used_sids:
+                next_sid = max(used_sids) + 1
+            else:
+                next_sid = 100
             
             return [f'{next_sid};']  # Include semicolon in suggestion
         

@@ -1,0 +1,2332 @@
+{
+  "version": "1.0",
+  "description": "Rule Templates Library for Suricata Rule Generator",
+  "templates": [
+    {
+      "id": "force_route53_resolver",
+      "name": "Force Route 53 Resolver (Block Direct DNS)",
+      "category": "Protocol Enforcement",
+      "description": "Block all direct DNS traffic to force VPC to use Route 53 resolver",
+      "icon": "🔍",
+      "complexity": "beginner",
+      "template_type": "policy",
+      "test_mode_supported": true,
+      "rules": [
+        {
+          "action": "drop",
+          "protocol": "dns",
+          "src_net": "$HOME_NET",
+          "src_port": "any",
+          "direction": "->",
+          "dst_net": "any",
+          "dst_port": "any",
+          "content": "flow:to_server",
+          "message": "Block direct DNS query (force Route 53 resolver)"
+        }
+      ],
+      "parameters": [],
+      "variables": {
+        "$HOME_NET": "[10.0.0.0/8,172.16.0.0/12,192.168.0.0/16]"
+      },
+      "notes": "Blocks all outbound DNS traffic on any port, forcing the VPC to use Route 53 resolver. Prevents DNS tunneling and ensures AWS-controlled DNS resolution.",
+      "rule_generation": "static"
+    },
+    {
+      "id": "enforce_aws_https",
+      "name": "Enforce HTTPS for AWS Services",
+      "category": "Cloud Security",
+      "description": "Block unencrypted HTTP traffic to AWS service endpoints",
+      "icon": "☁",
+      "complexity": "beginner",
+      "template_type": "policy",
+      "test_mode_supported": true,
+      "rules": [
+        {
+          "action": "drop",
+          "protocol": "http",
+          "src_net": "$HOME_NET",
+          "src_port": "any",
+          "direction": "->",
+          "dst_net": "any",
+          "dst_port": "80",
+          "content": "http.host; content:\".amazonaws.com\"; endswith; flow:to_server",
+          "message": "Block HTTP to AWS services (enforce HTTPS)"
+        }
+      ],
+      "parameters": [],
+      "variables": {
+        "$HOME_NET": "[10.0.0.0/8,172.16.0.0/12,192.168.0.0/16]"
+      },
+      "notes": "Enforces HTTPS-only communication with AWS services. Blocks unencrypted HTTP requests to *.amazonaws.com domains. AWS best practice for API security.",
+      "rule_generation": "static"
+    },
+    {
+      "id": "block_crypto_mining",
+      "name": "Block Cryptocurrency Mining",
+      "category": "Threat Protection",
+      "description": "Block TCP ports used by cryptocurrency mining pools",
+      "icon": "⛏️",
+      "complexity": "beginner",
+      "template_type": "policy",
+      "test_mode_supported": true,
+      "rules": [
+        {
+          "action": "drop",
+          "protocol": "tcp",
+          "src_net": "$HOME_NET",
+          "src_port": "any",
+          "direction": "->",
+          "dst_net": "any",
+          "dst_port": "[3333,4444,5555,8332,8333,9332,9333]",
+          "content": "flow:to_server",
+          "message": "Block cryptocurrency mining pool traffic"
+        }
+      ],
+      "parameters": [],
+      "variables": {
+        "$HOME_NET": "[10.0.0.0/8,172.16.0.0/12,192.168.0.0/16]"
+      },
+      "notes": "Blocks common cryptocurrency mining pool ports. Helps detect cryptojacking malware and prevent unauthorized resource usage.",
+      "rule_generation": "static"
+    },
+    {
+      "id": "block_malware_c2_ports",
+      "name": "Block Malware C2 Ports",
+      "category": "Threat Protection",
+      "description": "Block TCP ports commonly used by malware command & control",
+      "icon": "🦠",
+      "complexity": "beginner",
+      "template_type": "policy",
+      "test_mode_supported": true,
+      "rules": [
+        {
+          "action": "drop",
+          "protocol": "tcp",
+          "src_net": "$HOME_NET",
+          "src_port": "any",
+          "direction": "->",
+          "dst_net": "any",
+          "dst_port": "[1080,4444,5555,6666,7777,8080,8888,9999]",
+          "content": "flow:to_server",
+          "message": "Block malware C2 common ports"
+        }
+      ],
+      "parameters": [],
+      "variables": {
+        "$HOME_NET": "[10.0.0.0/8,172.16.0.0/12,192.168.0.0/16]"
+      },
+      "notes": "Blocks TCP ports frequently used by malware for C2 communications. May impact legitimate applications - test in alert mode first.",
+      "rule_generation": "static"
+    },
+    {
+      "id": "block_direct_to_ip",
+      "name": "Block Direct-to-IP Connections",
+      "category": "Threat Protection",
+      "description": "Block HTTP/HTTPS requests using IP address in SNI/Host header (malware indicator)",
+      "icon": "🚫",
+      "complexity": "intermediate",
+      "template_type": "policy",
+      "test_mode_supported": true,
+      "rules": [
+        {
+          "action": "reject",
+          "protocol": "http",
+          "src_net": "$HOME_NET",
+          "src_port": "any",
+          "direction": "->",
+          "dst_net": "any",
+          "dst_port": "any",
+          "content": "http.host; content:\".\"; pcre:\"/^(?:[0-9]{1,3}\\\\.){3}[0-9]{1,3}$/\"; flow:to_server",
+          "message": "HTTP direct to IP via host header (malware indicator)"
+        },
+        {
+          "action": "reject",
+          "protocol": "tls",
+          "src_net": "$HOME_NET",
+          "src_port": "any",
+          "direction": "->",
+          "dst_net": "any",
+          "dst_port": "443",
+          "content": "tls.sni; content:\".\"; pcre:\"/^(?:[0-9]{1,3}\\\\.){3}[0-9]{1,3}$/\"; flow:to_server",
+          "message": "TLS direct to IP via SNI (malware indicator)"
+        }
+      ],
+      "parameters": [],
+      "variables": {
+        "$HOME_NET": "[10.0.0.0/8,172.16.0.0/12,192.168.0.0/16]"
+      },
+      "notes": "Detects when HTTP Host header or TLS SNI contains an IP address instead of a domain name. This is a common indicator of malware C2 communication or automated attacks.",
+      "rule_generation": "static"
+    },
+    {
+      "id": "enforce_tls_version",
+      "name": "Enforce TLS Version",
+      "category": "Protocol Enforcement",
+      "description": "Block old TLS versions to enforce minimum TLS version",
+      "icon": "🔒",
+      "complexity": "beginner",
+      "template_type": "parameterized",
+      "test_mode_supported": true,
+      "rules": [
+        {
+          "action": "reject",
+          "protocol": "tls",
+          "src_net": "$HOME_NET",
+          "src_port": "any",
+          "direction": "->",
+          "dst_net": "any",
+          "dst_port": "any",
+          "content": "ssl_version:{VERSION_LIST}; flow:to_server",
+          "message": "Block TLS versions: {VERSION_DISPLAY}"
+        }
+      ],
+      "parameters": [
+        {
+          "name": "MIN_VERSION",
+          "type": "radio",
+          "description": "Select minimum TLS version to enforce",
+          "required": true,
+          "options": [
+            {
+              "value": "1.2",
+              "label": "Enforce TLS 1.2+ (block SSLv2, SSLv3, TLS 1.0, TLS 1.1)",
+              "version_list": "sslv2,sslv3,tls1.0,tls1.1",
+              "version_display": "SSLv2, SSLv3, TLS 1.0, TLS 1.1"
+            },
+            {
+              "value": "1.3",
+              "label": "Enforce TLS 1.3+ (block SSLv2, SSLv3, TLS 1.0-1.2)",
+              "version_list": "sslv2,sslv3,tls1.0,tls1.1,tls1.2",
+              "version_display": "SSLv2, SSLv3, TLS 1.0, TLS 1.1, TLS 1.2"
+            }
+          ]
+        }
+      ],
+      "variables": {
+        "$HOME_NET": "[10.0.0.0/8,172.16.0.0/12,192.168.0.0/16]"
+      },
+      "notes": "Uses single optimized rule with ssl_version keyword supporting comma-separated values. More efficient than multiple rules. Consider testing in alert mode before deployment.",
+      "rule_generation": "dynamic"
+    },
+    {
+      "id": "enforce_protocol_port_usage",
+      "name": "Enforce Protocol Port Usage",
+      "category": "Protocol Enforcement",
+      "description": "Prevent protocol tunneling by ensuring protocols use only designated ports",
+      "icon": "🔧",
+      "complexity": "intermediate",
+      "template_type": "parameterized",
+      "test_mode_supported": true,
+      "rules": [
+        {
+          "action": "reject",
+          "protocol": "tcp",
+          "src_net": "$HOME_NET",
+          "src_port": "any",
+          "direction": "->",
+          "dst_net": "any",
+          "dst_port": "{PORT}",
+          "content": "app-layer-protocol:!{PROTOCOL}; flow:to_server",
+          "message": "Egress port {TRANSPORT}/{PORT} but not {PROTOCOL_UPPER}"
+        },
+        {
+          "action": "reject",
+          "protocol": "{PROTOCOL}",
+          "src_net": "$HOME_NET",
+          "src_port": "any",
+          "direction": "->",
+          "dst_net": "any",
+          "dst_port": "!{PORT}",
+          "content": "flow:to_server",
+          "message": "Egress {PROTOCOL_UPPER} but not port {TRANSPORT}/{PORT}"
+        }
+      ],
+      "parameters": [
+        {
+          "name": "PROTOCOLS",
+          "type": "multi_select_protocol",
+          "description": "Select protocols to enforce",
+          "required": true,
+          "min_selections": 1,
+          "options": [
+            {
+              "value": "tls",
+              "label": "TLS (HTTPS)",
+              "protocol": "tls",
+              "port": "443",
+              "transport": "tcp",
+              "protocol_upper": "TLS"
+            },
+            {
+              "value": "http",
+              "label": "HTTP",
+              "protocol": "http",
+              "port": "80",
+              "transport": "tcp",
+              "protocol_upper": "HTTP"
+            },
+            {
+              "value": "dns",
+              "label": "DNS",
+              "protocol": "dns",
+              "port": "53",
+              "transport": "udp",
+              "protocol_upper": "DNS"
+            },
+            {
+              "value": "ssh",
+              "label": "SSH",
+              "protocol": "ssh",
+              "port": "22",
+              "transport": "tcp",
+              "protocol_upper": "SSH"
+            },
+            {
+              "value": "ftp",
+              "label": "FTP",
+              "protocol": "ftp",
+              "port": "21",
+              "transport": "tcp",
+              "protocol_upper": "FTP"
+            },
+            {
+              "value": "smtp",
+              "label": "SMTP",
+              "protocol": "smtp",
+              "port": "25",
+              "transport": "tcp",
+              "protocol_upper": "SMTP"
+            },
+            {
+              "value": "smb",
+              "label": "SMB",
+              "protocol": "smb",
+              "port": "445",
+              "transport": "tcp",
+              "protocol_upper": "SMB"
+            },
+            {
+              "value": "ntp",
+              "label": "NTP",
+              "protocol": "ntp",
+              "port": "123",
+              "transport": "udp",
+              "protocol_upper": "NTP"
+            },
+            {
+              "value": "tftp",
+              "label": "TFTP",
+              "protocol": "tftp",
+              "port": "69",
+              "transport": "udp",
+              "protocol_upper": "TFTP"
+            },
+            {
+              "value": "dhcp",
+              "label": "DHCP",
+              "protocol": "dhcp",
+              "port": "67",
+              "transport": "udp",
+              "protocol_upper": "DHCP"
+            }
+          ]
+        }
+      ],
+      "variables": {
+        "$HOME_NET": "[10.0.0.0/8,172.16.0.0/12,192.168.0.0/16]"
+      },
+      "notes": "Prevents protocol tunneling by enforcing port usage. Generates 2 rules per protocol: (1) Blocks designated port with wrong protocol, (2) Blocks protocol on wrong ports. Both rules work together to enforce proper port/protocol pairing.",
+      "rule_generation": "dynamic"
+    },
+    {
+      "id": "block_file_sharing",
+      "name": "Block File Sharing Protocols",
+      "category": "Protocol Enforcement",
+      "description": "Block file sharing protocols commonly used for data exfiltration",
+      "icon": "📁",
+      "complexity": "beginner",
+      "template_type": "parameterized",
+      "test_mode_supported": true,
+      "rules": [
+        {
+          "action": "drop",
+          "protocol": "{PROTOCOL}",
+          "src_net": "$HOME_NET",
+          "src_port": "any",
+          "direction": "->",
+          "dst_net": "any",
+          "dst_port": "any",
+          "content": "flow:to_server",
+          "message": "Block {PROTOCOL_UPPER} file sharing"
+        }
+      ],
+      "parameters": [
+        {
+          "name": "PROTOCOLS",
+          "type": "multi_select_protocol",
+          "description": "Select protocols to block",
+          "required": true,
+          "min_selections": 1,
+          "options": [
+            {
+              "value": "smb",
+              "label": "SMB (Windows File Sharing)",
+              "protocol": "smb",
+              "port": "445",
+              "transport": "tcp",
+              "protocol_upper": "SMB"
+            },
+            {
+              "value": "ftp",
+              "label": "FTP (File Transfer Protocol)",
+              "protocol": "ftp",
+              "port": "21",
+              "transport": "tcp",
+              "protocol_upper": "FTP"
+            },
+            {
+              "value": "tftp",
+              "label": "TFTP (Trivial File Transfer)",
+              "protocol": "tftp",
+              "port": "69",
+              "transport": "udp",
+              "protocol_upper": "TFTP"
+            }
+          ]
+        }
+      ],
+      "variables": {
+        "$HOME_NET": "[10.0.0.0/8,172.16.0.0/12,192.168.0.0/16]"
+      },
+      "notes": "Blocks file sharing protocols on any port (catches non-standard port usage for evasion detection). Generates one rule per selected protocol. SMB commonly used by ransomware for lateral movement. Protocol detection works regardless of port number.",
+      "rule_generation": "dynamic"
+    },
+    {
+      "id": "block_high_risk_ports",
+      "name": "Block High-Risk Destination Ports",
+      "category": "Threat Protection",
+      "description": "Block selected high-risk outbound ports commonly used by ransomware and malware",
+      "icon": "⚠️",
+      "complexity": "beginner",
+      "template_type": "parameterized",
+      "test_mode_supported": true,
+      "rules": [
+        {
+          "action": "drop",
+          "protocol": "tcp",
+          "src_net": "$HOME_NET",
+          "src_port": "any",
+          "direction": "->",
+          "dst_net": "any",
+          "dst_port": "[{PORT_LIST}]",
+          "content": "flow:to_server",
+          "message": "Block high-risk destination ports"
+        }
+      ],
+      "parameters": [
+        {
+          "name": "PORTS",
+          "type": "multi_select_port",
+          "description": "Select ports to block",
+          "required": true,
+          "min_selections": 1,
+          "options": [
+            {
+              "value": "53",
+              "label": "DNS (53)",
+              "description": "DNS tunneling",
+              "default_checked": true
+            },
+            {
+              "value": "135",
+              "label": "RPC (135)",
+              "description": "Windows RPC lateral movement",
+              "default_checked": true
+            },
+            {
+              "value": "139",
+              "label": "NetBIOS (139)",
+              "description": "NetBIOS lateral movement",
+              "default_checked": true
+            },
+            {
+              "value": "389",
+              "label": "LDAP (389)",
+              "description": "Domain recon/attacks",
+              "default_checked": true
+            },
+            {
+              "value": "445",
+              "label": "SMB (445)",
+              "description": "Ransomware spread",
+              "default_checked": true
+            },
+            {
+              "value": "1389",
+              "label": "LDAP Alt (1389)",
+              "description": "Alternative LDAP",
+              "default_checked": true
+            },
+            {
+              "value": "3389",
+              "label": "RDP (3389)",
+              "description": "Brute force target",
+              "default_checked": true
+            },
+            {
+              "value": "4444",
+              "label": "Metasploit (4444)",
+              "description": "C2 traffic",
+              "default_checked": true
+            }
+          ]
+        }
+      ],
+      "variables": {
+        "$HOME_NET": "[10.0.0.0/8,172.16.0.0/12,192.168.0.0/16]"
+      },
+      "notes": "Blocks high-risk ports in a single rule with bracketed port list. All ports default to checked. Commonly used by ransomware for lateral movement and C2.",
+      "rule_generation": "dynamic"
+    },
+    {
+      "id": "geographic_country_control",
+      "name": "Geographic Country Control",
+      "category": "Geographic Control",
+      "description": "Block or allow traffic based on destination country (GeoIP filtering)",
+      "icon": "🌍",
+      "complexity": "intermediate",
+      "template_type": "parameterized",
+      "test_mode_supported": true,
+      "rules": [
+        {
+          "action": "{ACTION}",
+          "protocol": "ip",
+          "src_net": "{SRC_NET}",
+          "src_port": "any",
+          "direction": "->",
+          "dst_net": "{DST_NET}",
+          "dst_port": "any",
+          "content": "geoip:{GEOIP_DIRECTION},{GEOIP_COUNTRIES}; metadata:geo {COUNTRY_CODE}; flow:to_server",
+          "message": "{ACTION_MSG} {DIRECTION_MSG} {COUNTRY_NAME} ({COUNTRY_CODE})"
+        }
+      ],
+      "parameters": [
+        {
+          "name": "MODE",
+          "type": "radio",
+          "description": "Select control mode",
+          "required": true,
+          "options": [
+            {
+              "value": "block",
+              "label": "Block Mode (deny-list selected countries)",
+              "action": "drop",
+              "action_msg": "Block",
+              "geoip_countries": "{COUNTRY_CODE}"
+            },
+            {
+              "value": "allow",
+              "label": "Allow Mode (allow-list selected countries only)",
+              "action": "drop",
+              "action_msg": "Block all countries except",
+              "geoip_countries": "!{COUNTRY_CODE}"
+            }
+          ]
+        },
+        {
+          "name": "DIRECTION",
+          "type": "radio",
+          "description": "Select traffic direction to control",
+          "required": true,
+          "options": [
+            {
+              "value": "egress",
+              "label": "Egress (outbound from $HOME_NET to country)",
+              "geoip_direction": "dst",
+              "src_net": "$HOME_NET",
+              "dst_net": "any",
+              "direction_msg": "egress traffic to"
+            },
+            {
+              "value": "ingress",
+              "label": "Ingress (inbound from country to $HOME_NET)",
+              "geoip_direction": "src",
+              "src_net": "any",
+              "dst_net": "$HOME_NET",
+              "direction_msg": "ingress traffic from"
+            },
+            {
+              "value": "both",
+              "label": "Both directions (any traffic involving country)",
+              "geoip_direction": "any",
+              "src_net": "any",
+              "dst_net": "any",
+              "direction_msg": "any traffic involving"
+            }
+          ]
+        },
+        {
+          "name": "COUNTRIES",
+          "type": "multi_select_country",
+          "description": "Select countries to control",
+          "required": true,
+          "min_selections": 1,
+          "options": [
+            {
+              "value": "AF",
+              "label": "Afghanistan",
+              "region": "Asia"
+            },
+            {
+              "value": "AM",
+              "label": "Armenia",
+              "region": "Asia"
+            },
+            {
+              "value": "AZ",
+              "label": "Azerbaijan",
+              "region": "Asia"
+            },
+            {
+              "value": "BH",
+              "label": "Bahrain",
+              "region": "Asia"
+            },
+            {
+              "value": "BD",
+              "label": "Bangladesh",
+              "region": "Asia"
+            },
+            {
+              "value": "BT",
+              "label": "Bhutan",
+              "region": "Asia"
+            },
+            {
+              "value": "BN",
+              "label": "Brunei",
+              "region": "Asia"
+            },
+            {
+              "value": "KH",
+              "label": "Cambodia",
+              "region": "Asia"
+            },
+            {
+              "value": "CN",
+              "label": "China",
+              "region": "Asia"
+            },
+            {
+              "value": "GE",
+              "label": "Georgia",
+              "region": "Asia"
+            },
+            {
+              "value": "HK",
+              "label": "Hong Kong",
+              "region": "Asia"
+            },
+            {
+              "value": "IN",
+              "label": "India",
+              "region": "Asia"
+            },
+            {
+              "value": "ID",
+              "label": "Indonesia",
+              "region": "Asia"
+            },
+            {
+              "value": "JP",
+              "label": "Japan",
+              "region": "Asia"
+            },
+            {
+              "value": "KZ",
+              "label": "Kazakhstan",
+              "region": "Asia"
+            },
+            {
+              "value": "KW",
+              "label": "Kuwait",
+              "region": "Asia"
+            },
+            {
+              "value": "KG",
+              "label": "Kyrgyzstan",
+              "region": "Asia"
+            },
+            {
+              "value": "LA",
+              "label": "Laos",
+              "region": "Asia"
+            },
+            {
+              "value": "MO",
+              "label": "Macau",
+              "region": "Asia"
+            },
+            {
+              "value": "MY",
+              "label": "Malaysia",
+              "region": "Asia"
+            },
+            {
+              "value": "MV",
+              "label": "Maldives",
+              "region": "Asia"
+            },
+            {
+              "value": "MN",
+              "label": "Mongolia",
+              "region": "Asia"
+            },
+            {
+              "value": "MM",
+              "label": "Myanmar",
+              "region": "Asia"
+            },
+            {
+              "value": "NP",
+              "label": "Nepal",
+              "region": "Asia"
+            },
+            {
+              "value": "KP",
+              "label": "North Korea",
+              "region": "Asia"
+            },
+            {
+              "value": "OM",
+              "label": "Oman",
+              "region": "Asia"
+            },
+            {
+              "value": "PK",
+              "label": "Pakistan",
+              "region": "Asia"
+            },
+            {
+              "value": "PS",
+              "label": "Palestine",
+              "region": "Asia"
+            },
+            {
+              "value": "PH",
+              "label": "Philippines",
+              "region": "Asia"
+            },
+            {
+              "value": "QA",
+              "label": "Qatar",
+              "region": "Asia"
+            },
+            {
+              "value": "SG",
+              "label": "Singapore",
+              "region": "Asia"
+            },
+            {
+              "value": "KR",
+              "label": "South Korea",
+              "region": "Asia"
+            },
+            {
+              "value": "LK",
+              "label": "Sri Lanka",
+              "region": "Asia"
+            },
+            {
+              "value": "TW",
+              "label": "Taiwan",
+              "region": "Asia"
+            },
+            {
+              "value": "TJ",
+              "label": "Tajikistan",
+              "region": "Asia"
+            },
+            {
+              "value": "TH",
+              "label": "Thailand",
+              "region": "Asia"
+            },
+            {
+              "value": "TL",
+              "label": "Timor-Leste",
+              "region": "Asia"
+            },
+            {
+              "value": "TM",
+              "label": "Turkmenistan",
+              "region": "Asia"
+            },
+            {
+              "value": "UZ",
+              "label": "Uzbekistan",
+              "region": "Asia"
+            },
+            {
+              "value": "VN",
+              "label": "Vietnam",
+              "region": "Asia"
+            },
+            {
+              "value": "YE",
+              "label": "Yemen",
+              "region": "Asia"
+            },
+            {
+              "value": "AI",
+              "label": "Anguilla",
+              "region": "Americas"
+            },
+            {
+              "value": "AG",
+              "label": "Antigua and Barbuda",
+              "region": "Americas"
+            },
+            {
+              "value": "AR",
+              "label": "Argentina",
+              "region": "Americas"
+            },
+            {
+              "value": "AW",
+              "label": "Aruba",
+              "region": "Americas"
+            },
+            {
+              "value": "BS",
+              "label": "Bahamas",
+              "region": "Americas"
+            },
+            {
+              "value": "BB",
+              "label": "Barbados",
+              "region": "Americas"
+            },
+            {
+              "value": "BZ",
+              "label": "Belize",
+              "region": "Americas"
+            },
+            {
+              "value": "BM",
+              "label": "Bermuda",
+              "region": "Americas"
+            },
+            {
+              "value": "BO",
+              "label": "Bolivia",
+              "region": "Americas"
+            },
+            {
+              "value": "BR",
+              "label": "Brazil",
+              "region": "Americas"
+            },
+            {
+              "value": "VG",
+              "label": "British Virgin Islands",
+              "region": "Americas"
+            },
+            {
+              "value": "CA",
+              "label": "Canada",
+              "region": "Americas"
+            },
+            {
+              "value": "KY",
+              "label": "Cayman Islands",
+              "region": "Americas"
+            },
+            {
+              "value": "CL",
+              "label": "Chile",
+              "region": "Americas"
+            },
+            {
+              "value": "CO",
+              "label": "Colombia",
+              "region": "Americas"
+            },
+            {
+              "value": "CR",
+              "label": "Costa Rica",
+              "region": "Americas"
+            },
+            {
+              "value": "CU",
+              "label": "Cuba",
+              "region": "Americas"
+            },
+            {
+              "value": "CW",
+              "label": "Curacao",
+              "region": "Americas"
+            },
+            {
+              "value": "DM",
+              "label": "Dominica",
+              "region": "Americas"
+            },
+            {
+              "value": "DO",
+              "label": "Dominican Republic",
+              "region": "Americas"
+            },
+            {
+              "value": "EC",
+              "label": "Ecuador",
+              "region": "Americas"
+            },
+            {
+              "value": "SV",
+              "label": "El Salvador",
+              "region": "Americas"
+            },
+            {
+              "value": "FK",
+              "label": "Falkland Islands",
+              "region": "Americas"
+            },
+            {
+              "value": "GF",
+              "label": "French Guiana",
+              "region": "Americas"
+            },
+            {
+              "value": "GL",
+              "label": "Greenland",
+              "region": "Americas"
+            },
+            {
+              "value": "GD",
+              "label": "Grenada",
+              "region": "Americas"
+            },
+            {
+              "value": "GP",
+              "label": "Guadeloupe",
+              "region": "Americas"
+            },
+            {
+              "value": "GT",
+              "label": "Guatemala",
+              "region": "Americas"
+            },
+            {
+              "value": "GY",
+              "label": "Guyana",
+              "region": "Americas"
+            },
+            {
+              "value": "HT",
+              "label": "Haiti",
+              "region": "Americas"
+            },
+            {
+              "value": "HN",
+              "label": "Honduras",
+              "region": "Americas"
+            },
+            {
+              "value": "JM",
+              "label": "Jamaica",
+              "region": "Americas"
+            },
+            {
+              "value": "MQ",
+              "label": "Martinique",
+              "region": "Americas"
+            },
+            {
+              "value": "MX",
+              "label": "Mexico",
+              "region": "Americas"
+            },
+            {
+              "value": "MS",
+              "label": "Montserrat",
+              "region": "Americas"
+            },
+            {
+              "value": "NI",
+              "label": "Nicaragua",
+              "region": "Americas"
+            },
+            {
+              "value": "PA",
+              "label": "Panama",
+              "region": "Americas"
+            },
+            {
+              "value": "PY",
+              "label": "Paraguay",
+              "region": "Americas"
+            },
+            {
+              "value": "PE",
+              "label": "Peru",
+              "region": "Americas"
+            },
+            {
+              "value": "PR",
+              "label": "Puerto Rico",
+              "region": "Americas"
+            },
+            {
+              "value": "BL",
+              "label": "Saint Barthelemy",
+              "region": "Americas"
+            },
+            {
+              "value": "KN",
+              "label": "Saint Kitts and Nevis",
+              "region": "Americas"
+            },
+            {
+              "value": "LC",
+              "label": "Saint Lucia",
+              "region": "Americas"
+            },
+            {
+              "value": "MF",
+              "label": "Saint Martin",
+              "region": "Americas"
+            },
+            {
+              "value": "PM",
+              "label": "Saint Pierre and Miquelon",
+              "region": "Americas"
+            },
+            {
+              "value": "VC",
+              "label": "Saint Vincent and Grenadines",
+              "region": "Americas"
+            },
+            {
+              "value": "SR",
+              "label": "Suriname",
+              "region": "Americas"
+            },
+            {
+              "value": "TT",
+              "label": "Trinidad and Tobago",
+              "region": "Americas"
+            },
+            {
+              "value": "TC",
+              "label": "Turks and Caicos Islands",
+              "region": "Americas"
+            },
+            {
+              "value": "US",
+              "label": "United States",
+              "region": "Americas"
+            },
+            {
+              "value": "UY",
+              "label": "Uruguay",
+              "region": "Americas"
+            },
+            {
+              "value": "VE",
+              "label": "Venezuela",
+              "region": "Americas"
+            },
+            {
+              "value": "VI",
+              "label": "Virgin Islands (US)",
+              "region": "Americas"
+            },
+            {
+              "value": "DZ",
+              "label": "Algeria",
+              "region": "Africa"
+            },
+            {
+              "value": "AO",
+              "label": "Angola",
+              "region": "Africa"
+            },
+            {
+              "value": "BJ",
+              "label": "Benin",
+              "region": "Africa"
+            },
+            {
+              "value": "BW",
+              "label": "Botswana",
+              "region": "Africa"
+            },
+            {
+              "value": "BF",
+              "label": "Burkina Faso",
+              "region": "Africa"
+            },
+            {
+              "value": "BI",
+              "label": "Burundi",
+              "region": "Africa"
+            },
+            {
+              "value": "CM",
+              "label": "Cameroon",
+              "region": "Africa"
+            },
+            {
+              "value": "CV",
+              "label": "Cape Verde",
+              "region": "Africa"
+            },
+            {
+              "value": "CF",
+              "label": "Central African Republic",
+              "region": "Africa"
+            },
+            {
+              "value": "TD",
+              "label": "Chad",
+              "region": "Africa"
+            },
+            {
+              "value": "KM",
+              "label": "Comoros",
+              "region": "Africa"
+            },
+            {
+              "value": "CG",
+              "label": "Congo",
+              "region": "Africa"
+            },
+            {
+              "value": "CD",
+              "label": "Congo (DRC)",
+              "region": "Africa"
+            },
+            {
+              "value": "CI",
+              "label": "Cote d'Ivoire",
+              "region": "Africa"
+            },
+            {
+              "value": "DJ",
+              "label": "Djibouti",
+              "region": "Africa"
+            },
+            {
+              "value": "EG",
+              "label": "Egypt",
+              "region": "Africa"
+            },
+            {
+              "value": "GQ",
+              "label": "Equatorial Guinea",
+              "region": "Africa"
+            },
+            {
+              "value": "ER",
+              "label": "Eritrea",
+              "region": "Africa"
+            },
+            {
+              "value": "ET",
+              "label": "Ethiopia",
+              "region": "Africa"
+            },
+            {
+              "value": "GA",
+              "label": "Gabon",
+              "region": "Africa"
+            },
+            {
+              "value": "GM",
+              "label": "Gambia",
+              "region": "Africa"
+            },
+            {
+              "value": "GH",
+              "label": "Ghana",
+              "region": "Africa"
+            },
+            {
+              "value": "GN",
+              "label": "Guinea",
+              "region": "Africa"
+            },
+            {
+              "value": "GW",
+              "label": "Guinea-Bissau",
+              "region": "Africa"
+            },
+            {
+              "value": "KE",
+              "label": "Kenya",
+              "region": "Africa"
+            },
+            {
+              "value": "LS",
+              "label": "Lesotho",
+              "region": "Africa"
+            },
+            {
+              "value": "LR",
+              "label": "Liberia",
+              "region": "Africa"
+            },
+            {
+              "value": "LY",
+              "label": "Libya",
+              "region": "Africa"
+            },
+            {
+              "value": "MG",
+              "label": "Madagascar",
+              "region": "Africa"
+            },
+            {
+              "value": "MW",
+              "label": "Malawi",
+              "region": "Africa"
+            },
+            {
+              "value": "ML",
+              "label": "Mali",
+              "region": "Africa"
+            },
+            {
+              "value": "MR",
+              "label": "Mauritania",
+              "region": "Africa"
+            },
+            {
+              "value": "MU",
+              "label": "Mauritius",
+              "region": "Africa"
+            },
+            {
+              "value": "YT",
+              "label": "Mayotte",
+              "region": "Africa"
+            },
+            {
+              "value": "MA",
+              "label": "Morocco",
+              "region": "Africa"
+            },
+            {
+              "value": "MZ",
+              "label": "Mozambique",
+              "region": "Africa"
+            },
+            {
+              "value": "NA",
+              "label": "Namibia",
+              "region": "Africa"
+            },
+            {
+              "value": "NE",
+              "label": "Niger",
+              "region": "Africa"
+            },
+            {
+              "value": "NG",
+              "label": "Nigeria",
+              "region": "Africa"
+            },
+            {
+              "value": "RE",
+              "label": "Reunion",
+              "region": "Africa"
+            },
+            {
+              "value": "RW",
+              "label": "Rwanda",
+              "region": "Africa"
+            },
+            {
+              "value": "SH",
+              "label": "Saint Helena",
+              "region": "Africa"
+            },
+            {
+              "value": "ST",
+              "label": "Sao Tome and Principe",
+              "region": "Africa"
+            },
+            {
+              "value": "SN",
+              "label": "Senegal",
+              "region": "Africa"
+            },
+            {
+              "value": "SC",
+              "label": "Seychelles",
+              "region": "Africa"
+            },
+            {
+              "value": "SL",
+              "label": "Sierra Leone",
+              "region": "Africa"
+            },
+            {
+              "value": "SO",
+              "label": "Somalia",
+              "region": "Africa"
+            },
+            {
+              "value": "ZA",
+              "label": "South Africa",
+              "region": "Africa"
+            },
+            {
+              "value": "SS",
+              "label": "South Sudan",
+              "region": "Africa"
+            },
+            {
+              "value": "SD",
+              "label": "Sudan",
+              "region": "Africa"
+            },
+            {
+              "value": "SZ",
+              "label": "Swaziland",
+              "region": "Africa"
+            },
+            {
+              "value": "TZ",
+              "label": "Tanzania",
+              "region": "Africa"
+            },
+            {
+              "value": "TG",
+              "label": "Togo",
+              "region": "Africa"
+            },
+            {
+              "value": "TN",
+              "label": "Tunisia",
+              "region": "Africa"
+            },
+            {
+              "value": "UG",
+              "label": "Uganda",
+              "region": "Africa"
+            },
+            {
+              "value": "EH",
+              "label": "Western Sahara",
+              "region": "Africa"
+            },
+            {
+              "value": "ZM",
+              "label": "Zambia",
+              "region": "Africa"
+            },
+            {
+              "value": "ZW",
+              "label": "Zimbabwe",
+              "region": "Africa"
+            },
+            {
+              "value": "CY",
+              "label": "Cyprus",
+              "region": "Middle East"
+            },
+            {
+              "value": "IR",
+              "label": "Iran",
+              "region": "Middle East"
+            },
+            {
+              "value": "IQ",
+              "label": "Iraq",
+              "region": "Middle East"
+            },
+            {
+              "value": "IL",
+              "label": "Israel",
+              "region": "Middle East"
+            },
+            {
+              "value": "JO",
+              "label": "Jordan",
+              "region": "Middle East"
+            },
+            {
+              "value": "LB",
+              "label": "Lebanon",
+              "region": "Middle East"
+            },
+            {
+              "value": "SA",
+              "label": "Saudi Arabia",
+              "region": "Middle East"
+            },
+            {
+              "value": "SY",
+              "label": "Syria",
+              "region": "Middle East"
+            },
+            {
+              "value": "TR",
+              "label": "Turkey",
+              "region": "Middle East"
+            },
+            {
+              "value": "AE",
+              "label": "United Arab Emirates",
+              "region": "Middle East"
+            },
+            {
+              "value": "AX",
+              "label": "Aland Islands",
+              "region": "Europe"
+            },
+            {
+              "value": "AL",
+              "label": "Albania",
+              "region": "Europe"
+            },
+            {
+              "value": "AD",
+              "label": "Andorra",
+              "region": "Europe"
+            },
+            {
+              "value": "AT",
+              "label": "Austria",
+              "region": "Europe"
+            },
+            {
+              "value": "BY",
+              "label": "Belarus",
+              "region": "Europe"
+            },
+            {
+              "value": "BE",
+              "label": "Belgium",
+              "region": "Europe"
+            },
+            {
+              "value": "BA",
+              "label": "Bosnia and Herzegovina",
+              "region": "Europe"
+            },
+            {
+              "value": "BG",
+              "label": "Bulgaria",
+              "region": "Europe"
+            },
+            {
+              "value": "HR",
+              "label": "Croatia",
+              "region": "Europe"
+            },
+            {
+              "value": "CZ",
+              "label": "Czech Republic",
+              "region": "Europe"
+            },
+            {
+              "value": "DK",
+              "label": "Denmark",
+              "region": "Europe"
+            },
+            {
+              "value": "EE",
+              "label": "Estonia",
+              "region": "Europe"
+            },
+            {
+              "value": "FO",
+              "label": "Faroe Islands",
+              "region": "Europe"
+            },
+            {
+              "value": "FI",
+              "label": "Finland",
+              "region": "Europe"
+            },
+            {
+              "value": "FR",
+              "label": "France",
+              "region": "Europe"
+            },
+            {
+              "value": "DE",
+              "label": "Germany",
+              "region": "Europe"
+            },
+            {
+              "value": "GI",
+              "label": "Gibraltar",
+              "region": "Europe"
+            },
+            {
+              "value": "GR",
+              "label": "Greece",
+              "region": "Europe"
+            },
+            {
+              "value": "GG",
+              "label": "Guernsey",
+              "region": "Europe"
+            },
+            {
+              "value": "HU",
+              "label": "Hungary",
+              "region": "Europe"
+            },
+            {
+              "value": "IS",
+              "label": "Iceland",
+              "region": "Europe"
+            },
+            {
+              "value": "IE",
+              "label": "Ireland",
+              "region": "Europe"
+            },
+            {
+              "value": "IM",
+              "label": "Isle of Man",
+              "region": "Europe"
+            },
+            {
+              "value": "IT",
+              "label": "Italy",
+              "region": "Europe"
+            },
+            {
+              "value": "JE",
+              "label": "Jersey",
+              "region": "Europe"
+            },
+            {
+              "value": "XK",
+              "label": "Kosovo",
+              "region": "Europe"
+            },
+            {
+              "value": "LV",
+              "label": "Latvia",
+              "region": "Europe"
+            },
+            {
+              "value": "LI",
+              "label": "Liechtenstein",
+              "region": "Europe"
+            },
+            {
+              "value": "LT",
+              "label": "Lithuania",
+              "region": "Europe"
+            },
+            {
+              "value": "LU",
+              "label": "Luxembourg",
+              "region": "Europe"
+            },
+            {
+              "value": "MK",
+              "label": "Macedonia",
+              "region": "Europe"
+            },
+            {
+              "value": "MT",
+              "label": "Malta",
+              "region": "Europe"
+            },
+            {
+              "value": "MD",
+              "label": "Moldova",
+              "region": "Europe"
+            },
+            {
+              "value": "MC",
+              "label": "Monaco",
+              "region": "Europe"
+            },
+            {
+              "value": "ME",
+              "label": "Montenegro",
+              "region": "Europe"
+            },
+            {
+              "value": "NL",
+              "label": "Netherlands",
+              "region": "Europe"
+            },
+            {
+              "value": "NO",
+              "label": "Norway",
+              "region": "Europe"
+            },
+            {
+              "value": "PL",
+              "label": "Poland",
+              "region": "Europe"
+            },
+            {
+              "value": "PT",
+              "label": "Portugal",
+              "region": "Europe"
+            },
+            {
+              "value": "RO",
+              "label": "Romania",
+              "region": "Europe"
+            },
+            {
+              "value": "RU",
+              "label": "Russia",
+              "region": "Europe"
+            },
+            {
+              "value": "SM",
+              "label": "San Marino",
+              "region": "Europe"
+            },
+            {
+              "value": "RS",
+              "label": "Serbia",
+              "region": "Europe"
+            },
+            {
+              "value": "SK",
+              "label": "Slovakia",
+              "region": "Europe"
+            },
+            {
+              "value": "SI",
+              "label": "Slovenia",
+              "region": "Europe"
+            },
+            {
+              "value": "ES",
+              "label": "Spain",
+              "region": "Europe"
+            },
+            {
+              "value": "SJ",
+              "label": "Svalbard and Jan Mayen",
+              "region": "Europe"
+            },
+            {
+              "value": "SE",
+              "label": "Sweden",
+              "region": "Europe"
+            },
+            {
+              "value": "CH",
+              "label": "Switzerland",
+              "region": "Europe"
+            },
+            {
+              "value": "UA",
+              "label": "Ukraine",
+              "region": "Europe"
+            },
+            {
+              "value": "GB",
+              "label": "United Kingdom",
+              "region": "Europe"
+            },
+            {
+              "value": "VA",
+              "label": "Vatican City",
+              "region": "Europe"
+            },
+            {
+              "value": "AS",
+              "label": "American Samoa",
+              "region": "Oceania"
+            },
+            {
+              "value": "AU",
+              "label": "Australia",
+              "region": "Oceania"
+            },
+            {
+              "value": "CK",
+              "label": "Cook Islands",
+              "region": "Oceania"
+            },
+            {
+              "value": "FJ",
+              "label": "Fiji",
+              "region": "Oceania"
+            },
+            {
+              "value": "PF",
+              "label": "French Polynesia",
+              "region": "Oceania"
+            },
+            {
+              "value": "GU",
+              "label": "Guam",
+              "region": "Oceania"
+            },
+            {
+              "value": "KI",
+              "label": "Kiribati",
+              "region": "Oceania"
+            },
+            {
+              "value": "MH",
+              "label": "Marshall Islands",
+              "region": "Oceania"
+            },
+            {
+              "value": "FM",
+              "label": "Micronesia",
+              "region": "Oceania"
+            },
+            {
+              "value": "NR",
+              "label": "Nauru",
+              "region": "Oceania"
+            },
+            {
+              "value": "NC",
+              "label": "New Caledonia",
+              "region": "Oceania"
+            },
+            {
+              "value": "NZ",
+              "label": "New Zealand",
+              "region": "Oceania"
+            },
+            {
+              "value": "NU",
+              "label": "Niue",
+              "region": "Oceania"
+            },
+            {
+              "value": "NF",
+              "label": "Norfolk Island",
+              "region": "Oceania"
+            },
+            {
+              "value": "MP",
+              "label": "Northern Mariana Islands",
+              "region": "Oceania"
+            },
+            {
+              "value": "PW",
+              "label": "Palau",
+              "region": "Oceania"
+            },
+            {
+              "value": "PG",
+              "label": "Papua New Guinea",
+              "region": "Oceania"
+            },
+            {
+              "value": "PN",
+              "label": "Pitcairn Islands",
+              "region": "Oceania"
+            },
+            {
+              "value": "WS",
+              "label": "Samoa",
+              "region": "Oceania"
+            },
+            {
+              "value": "SB",
+              "label": "Solomon Islands",
+              "region": "Oceania"
+            },
+            {
+              "value": "TK",
+              "label": "Tokelau",
+              "region": "Oceania"
+            },
+            {
+              "value": "TO",
+              "label": "Tonga",
+              "region": "Oceania"
+            },
+            {
+              "value": "TV",
+              "label": "Tuvalu",
+              "region": "Oceania"
+            },
+            {
+              "value": "VU",
+              "label": "Vanuatu",
+              "region": "Oceania"
+            },
+            {
+              "value": "WF",
+              "label": "Wallis and Futuna",
+              "region": "Oceania"
+            }
+          ]
+        }
+      ],
+      "variables": {
+        "$HOME_NET": "[10.0.0.0/8,172.16.0.0/12,192.168.0.0/16]"
+      },
+      "notes": "Block mode: Generates 1 rule per country (deny-list). Allow mode: Generates 1 single rule with all countries (allow-list). Supports egress, ingress, or both directions via geoip:dst, geoip:src, or geoip:any.",
+      "rule_generation": "conditional"
+    },
+    {
+      "id": "ja3_fingerprint_control",
+      "name": "JA3 Fingerprint Control",
+      "category": "Application Control",
+      "description": "Allow, alert, block, or reject traffic based on JA3 TLS fingerprint",
+      "icon": "🔐",
+      "complexity": "intermediate",
+      "template_type": "parameterized",
+      "test_mode_supported": true,
+      "rules": [
+        {
+          "action": "{ACTION}",
+          "protocol": "tls",
+          "src_net": "$HOME_NET",
+          "src_port": "any",
+          "direction": "->",
+          "dst_net": "any",
+          "dst_port": "any",
+          "content": "ja3.hash; content:\"{HASH}\"; flow:to_server",
+          "message": "{ACTION_MSG} JA3 fingerprint {HASH}"
+        }
+      ],
+      "parameters": [
+        {
+          "name": "ACTION_TYPE",
+          "type": "radio",
+          "required": true,
+          "description": "Select action for matching traffic",
+          "options": [
+            {
+              "value": "pass",
+              "label": "Allow (whitelist trusted applications)",
+              "action": "pass",
+              "action_msg": "Allow"
+            },
+            {
+              "value": "alert",
+              "label": "Alert (log but don't block)",
+              "action": "alert",
+              "action_msg": "Alert on"
+            },
+            {
+              "value": "drop",
+              "label": "Block (silently drop)",
+              "action": "drop",
+              "action_msg": "Block"
+            },
+            {
+              "value": "reject",
+              "label": "Reject (actively refuse)",
+              "action": "reject",
+              "action_msg": "Reject"
+            }
+          ]
+        },
+        {
+          "name": "HASH",
+          "type": "text_input",
+          "required": true,
+          "label": "JA3 Hash (32 hex characters)",
+          "description": "Enter JA3 TLS fingerprint hash",
+          "placeholder": "27e9c7cc45ae47dc50f51400db8a4099",
+          "pattern": "^[a-f0-9]{32}$",
+          "validation_message": "JA3 hash must be exactly 32 hexadecimal characters",
+          "min_length": 32,
+          "max_length": 32
+        }
+      ],
+      "variables": {
+        "$HOME_NET": "[10.0.0.0/8,172.16.0.0/12,192.168.0.0/16]"
+      },
+      "notes": "Use ja3er.com or pcaps to fingerprint applications. Example: Curl 7.79.1 = 27e9c7cc45ae47dc50f51400db8a4099",
+      "rule_generation": "dynamic"
+    },
+    {
+      "id": "block_file_extensions",
+      "name": "Block File Extensions",
+      "category": "HTTP Security",
+      "description": "⚠️ WORKS BEST WITH TLS DECRYPTION: Block file transfers by extension (both downloads and uploads). Without TLS decryption configured, this template will only inspect unencrypted HTTP traffic (~5% of modern web traffic) and will be largely ineffective.",
+      "icon": "📎",
+      "complexity": "beginner",
+      "template_type": "parameterized",
+      "test_mode_supported": true,
+      "rules": [
+        {
+          "action": "drop",
+          "protocol": "http",
+          "src_net": "$HOME_NET",
+          "src_port": "any",
+          "direction": "->",
+          "dst_net": "any",
+          "dst_port": "any",
+          "content": "flow:to_server; file.name; content:\".{EXTENSION}\"; endswith; nocase",
+          "message": "Block {EXTENSION_TYPE} file transfer (.{EXTENSION})"
+        }
+      ],
+      "parameters": [
+        {
+          "name": "EXTENSIONS",
+          "type": "multi_select_extension",
+          "description": "Select file extensions to block",
+          "required": true,
+          "min_selections": 1,
+          "options": [
+            {
+              "value": "exe",
+              "label": "Executable (.exe)",
+              "extension": "exe",
+              "extension_type": "executable",
+              "default_checked": false
+            },
+            {
+              "value": "dll",
+              "label": "Dynamic Library (.dll)",
+              "extension": "dll",
+              "extension_type": "executable",
+              "default_checked": false
+            },
+            {
+              "value": "bat",
+              "label": "Batch Script (.bat)",
+              "extension": "bat",
+              "extension_type": "script",
+              "default_checked": false
+            },
+            {
+              "value": "cmd",
+              "label": "Command Script (.cmd)",
+              "extension": "cmd",
+              "extension_type": "script",
+              "default_checked": false
+            },
+            {
+              "value": "ps1",
+              "label": "PowerShell Script (.ps1)",
+              "extension": "ps1",
+              "extension_type": "script",
+              "default_checked": false
+            },
+            {
+              "value": "vbs",
+              "label": "VBScript (.vbs)",
+              "extension": "vbs",
+              "extension_type": "script",
+              "default_checked": false
+            },
+            {
+              "value": "js",
+              "label": "JavaScript (.js)",
+              "extension": "js",
+              "extension_type": "script",
+              "default_checked": false
+            },
+            {
+              "value": "msi",
+              "label": "Windows Installer (.msi)",
+              "extension": "msi",
+              "extension_type": "installer",
+              "default_checked": false
+            },
+            {
+              "value": "scr",
+              "label": "Screensaver (.scr)",
+              "extension": "scr",
+              "extension_type": "executable",
+              "default_checked": false
+            },
+            {
+              "value": "zip",
+              "label": "ZIP Archive (.zip)",
+              "extension": "zip",
+              "extension_type": "archive",
+              "default_checked": false
+            },
+            {
+              "value": "rar",
+              "label": "RAR Archive (.rar)",
+              "extension": "rar",
+              "extension_type": "archive",
+              "default_checked": false
+            },
+            {
+              "value": "7z",
+              "label": "7-Zip Archive (.7z)",
+              "extension": "7z",
+              "extension_type": "archive",
+              "default_checked": false
+            },
+            {
+              "value": "jar",
+              "label": "Java Archive (.jar)",
+              "extension": "jar",
+              "extension_type": "executable",
+              "default_checked": false
+            },
+            {
+              "value": "docm",
+              "label": "Macro-Enabled Word (.docm)",
+              "extension": "docm",
+              "extension_type": "document",
+              "default_checked": false
+            },
+            {
+              "value": "xlsm",
+              "label": "Macro-Enabled Excel (.xlsm)",
+              "extension": "xlsm",
+              "extension_type": "document",
+              "default_checked": false
+            }
+          ]
+        }
+      ],
+      "variables": {
+        "$HOME_NET": "[10.0.0.0/8,172.16.0.0/12,192.168.0.0/16]"
+      },
+      "notes": "⚠️ WORKS BEST WITH TLS DECRYPTION: For maximum effectiveness, configure AWS Network Firewall TLS decryption. Without it, only unencrypted HTTP traffic will be inspected (~5% of modern web traffic). Configure TLS inspection: https://docs.aws.amazon.com/network-firewall/latest/developerguide/tls-inspection-configurations.html\n\nBlocks file transfers in both directions (downloads and uploads). Prevents malware downloads (executables, scripts) and data exfiltration (archives, documents). Generates 1 rule per selected extension. Attackers may attempt bypass by renaming extensions, but this catches most automated threats and opportunistic attacks. Consider using 'alert' mode initially to assess impact on legitimate traffic.",
+      "rule_generation": "dynamic"
+    },
+    {
+      "id": "http_method_control",
+      "name": "HTTP Method Control",
+      "category": "HTTP Security",
+      "description": "⚠️ WORKS BEST WITH TLS DECRYPTION: Block dangerous HTTP methods (PUT, DELETE, CONNECT, etc.). Without TLS decryption, this only inspects unencrypted HTTP traffic (~5% of modern APIs/web traffic) and will miss encrypted HTTPS requests.",
+      "icon": "🚦",
+      "complexity": "beginner",
+      "template_type": "parameterized",
+      "test_mode_supported": true,
+      "rules": [
+        {
+          "action": "drop",
+          "protocol": "http",
+          "src_net": "$HOME_NET",
+          "src_port": "any",
+          "direction": "->",
+          "dst_net": "any",
+          "dst_port": "any",
+          "content": "flow:to_server; http.method; content:\"{METHOD}\"",
+          "message": "Block HTTP method {METHOD}"
+        }
+      ],
+      "parameters": [
+        {
+          "name": "METHODS",
+          "type": "multi_select_method",
+          "description": "Select HTTP methods to block",
+          "required": true,
+          "min_selections": 1,
+          "options": [
+            {
+              "value": "PUT",
+              "label": "PUT",
+              "method": "PUT",
+              "description": "Upload/modify resources",
+              "default_checked": false
+            },
+            {
+              "value": "DELETE",
+              "label": "DELETE",
+              "method": "DELETE",
+              "description": "Delete resources",
+              "default_checked": false
+            },
+            {
+              "value": "CONNECT",
+              "label": "CONNECT",
+              "method": "CONNECT",
+              "description": "HTTP tunneling",
+              "default_checked": false
+            },
+            {
+              "value": "TRACE",
+              "label": "TRACE",
+              "method": "TRACE",
+              "description": "Debug method (XST attacks)",
+              "default_checked": false
+            },
+            {
+              "value": "OPTIONS",
+              "label": "OPTIONS",
+              "method": "OPTIONS",
+              "description": "Request capabilities",
+              "default_checked": false
+            },
+            {
+              "value": "PATCH",
+              "label": "PATCH",
+              "method": "PATCH",
+              "description": "Partial modifications",
+              "default_checked": false
+            }
+          ]
+        }
+      ],
+      "variables": {
+        "$HOME_NET": "[10.0.0.0/8,172.16.0.0/12,192.168.0.0/16]"
+      },
+      "notes": "⚠️ WORKS BEST WITH TLS DECRYPTION: For maximum effectiveness, configure AWS Network Firewall TLS decryption. Without it, only unencrypted HTTP APIs will be inspected. Configure TLS inspection: https://docs.aws.amazon.com/network-firewall/latest/developerguide/tls-inspection-configurations.html\n\nBlocks dangerous HTTP methods commonly used in web attacks and protocol abuse. PUT/DELETE enable WebDAV exploits and unauthorized API modifications. CONNECT enables HTTP tunneling for C2 communications. TRACE enables XST (Cross-Site Tracing) attacks. Generates 1 rule per selected method. Note: Blocking PUT/PATCH/DELETE may impact legitimate REST APIs - test thoroughly. OPTIONS is generally safe but may break CORS preflight requests.",
+      "rule_generation": "dynamic"
+    },
+    {
+      "id": "default_block",
+      "name": "Default Block Rules",
+      "category": "Default Deny",
+      "description": "Comprehensive default deny ruleset for both egress and ingress traffic. These rules replace the \"Drop All\" or \"Drop Established\" default actions on the firewall policy.",
+      "icon": "🚪",
+      "complexity": "advanced",
+      "template_type": "policy",
+      "test_mode_supported": true,
+      "insertion_point": "dual",
+      "top_rules": [
+        {
+          "action": "pass",
+          "protocol": "tcp",
+          "src_net": "$HOME_NET",
+          "src_port": "any",
+          "direction": "->",
+          "dst_net": "any",
+          "dst_port": "any",
+          "content": "flow:not_established, to_server",
+          "message": "Allow TCP 3-way handshake setup by $HOME_NET clients",
+          "sid": 202501021
+        },
+        {
+          "action": "pass",
+          "protocol": "tcp",
+          "src_net": "any",
+          "src_port": "any",
+          "direction": "->",
+          "dst_net": "$HOME_NET",
+          "dst_port": "any",
+          "content": "flow:not_established, to_client",
+          "message": "Allow TCP 3-way handshake responses",
+          "sid": 202501022
+        },
+        {
+          "action": "alert",
+          "protocol": "tls",
+          "src_net": "$HOME_NET",
+          "src_port": "any",
+          "direction": "->",
+          "dst_net": "any",
+          "dst_port": "any",
+          "content": "ja3.hash; content:!\"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\"; noalert; flow:to_server",
+          "message": "Enable JA3 hash logging for TLS rules",
+          "sid": 202501024
+        },
+        {
+          "action": "alert",
+          "protocol": "tls",
+          "src_net": "any",
+          "src_port": "any",
+          "direction": "->",
+          "dst_net": "$HOME_NET",
+          "dst_port": "any",
+          "content": "ja3s.hash; content:!\"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\"; noalert; flow:to_client",
+          "message": "Enable JA3S hash logging for TLS rules",
+          "sid": 202501025
+        }
+      ],
+      "rules": [
+        {
+          "is_blank": true
+        },
+        {
+          "is_comment": true,
+          "comment_text": "# Egress Default Block Rules"
+        },
+        {
+          "action": "reject",
+          "protocol": "tls",
+          "src_net": "$HOME_NET",
+          "src_port": "any",
+          "direction": "->",
+          "dst_net": "any",
+          "dst_port": "any",
+          "content": "ssl_state:client_hello; ja4.hash; content:\"_\"; flowbits:set,blocked; flow:to_server",
+          "message": "Default Egress HTTPS Reject",
+          "sid": 999991
+        },
+        {
+          "action": "alert",
+          "protocol": "tls",
+          "src_net": "$HOME_NET",
+          "src_port": "any",
+          "direction": "->",
+          "dst_net": "any",
+          "dst_port": "any",
+          "content": "flowbits:isnotset,blocked; flowbits:set,X25519Kyber768; noalert; flow:to_server",
+          "message": "X25519Kyber768",
+          "sid": 999993
+        },
+        {
+          "action": "reject",
+          "protocol": "http",
+          "src_net": "$HOME_NET",
+          "src_port": "any",
+          "direction": "->",
+          "dst_net": "any",
+          "dst_port": "any",
+          "content": "flowbits:set,blocked; flow:to_server",
+          "message": "Default Egress HTTP Reject",
+          "sid": 999992
+        },
+        {
+          "action": "reject",
+          "protocol": "tcp",
+          "src_net": "$HOME_NET",
+          "src_port": "any",
+          "direction": "->",
+          "dst_net": "any",
+          "dst_port": "any",
+          "content": "flowbits:isnotset,blocked; flowbits:isnotset,X25519Kyber768; flow:to_server",
+          "message": "Default Egress TCP Reject",
+          "sid": 999994
+        },
+        {
+          "action": "drop",
+          "protocol": "udp",
+          "src_net": "$HOME_NET",
+          "src_port": "any",
+          "direction": "->",
+          "dst_net": "any",
+          "dst_port": "any",
+          "content": "flow:to_server",
+          "message": "Default Egress UDP Drop",
+          "sid": 999995
+        },
+        {
+          "action": "drop",
+          "protocol": "icmp",
+          "src_net": "$HOME_NET",
+          "src_port": "any",
+          "direction": "->",
+          "dst_net": "any",
+          "dst_port": "any",
+          "content": "flow:to_server",
+          "message": "Default Egress ICMP Drop",
+          "sid": 999996
+        },
+        {
+          "action": "drop",
+          "protocol": "ip",
+          "src_net": "$HOME_NET",
+          "src_port": "any",
+          "direction": "->",
+          "dst_net": "any",
+          "dst_port": "any",
+          "content": "ip_proto:!TCP; ip_proto:!UDP; ip_proto:!ICMP; flow:to_server",
+          "message": "Default Egress All Other IP Drop",
+          "sid": 999997
+        },
+        {
+          "is_comment": true,
+          "comment_text": "# Ingress Default Block Rules in case ingress traffic lands on this firewall"
+        },
+        {
+          "is_comment": true,
+          "comment_text": "# You may want to silence these rules by putting \"noalert\" on them to save on logging costs"
+        },
+        {
+          "action": "drop",
+          "protocol": "tls",
+          "src_net": "any",
+          "src_port": "any",
+          "direction": "->",
+          "dst_net": "$HOME_NET",
+          "dst_port": "any",
+          "content": "ssl_state:client_hello; ja4.hash; content:\"_\"; flowbits:set,blocked; flow:to_server",
+          "message": "Default Ingress HTTPS Drop",
+          "sid": 999999
+        },
+        {
+          "action": "alert",
+          "protocol": "tls",
+          "src_net": "any",
+          "src_port": "any",
+          "direction": "->",
+          "dst_net": "$HOME_NET",
+          "dst_port": "any",
+          "content": "flowbits:isnotset,blocked; flowbits:set,X25519Kyber768; noalert; flow:to_server",
+          "message": "X25519Kyber768",
+          "sid": 9999910
+        },
+        {
+          "action": "drop",
+          "protocol": "http",
+          "src_net": "any",
+          "src_port": "any",
+          "direction": "->",
+          "dst_net": "$HOME_NET",
+          "dst_port": "any",
+          "content": "flowbits:set,blocked; flow:to_server",
+          "message": "Default Ingress HTTP Drop",
+          "sid": 9999911
+        },
+        {
+          "action": "drop",
+          "protocol": "tcp",
+          "src_net": "any",
+          "src_port": "any",
+          "direction": "->",
+          "dst_net": "$HOME_NET",
+          "dst_port": "any",
+          "content": "flowbits:isnotset,blocked; flowbits:isnotset,X25519Kyber768; flow:to_server",
+          "message": "Default Ingress TCP Drop",
+          "sid": 9999912
+        },
+        {
+          "action": "drop",
+          "protocol": "udp",
+          "src_net": "any",
+          "src_port": "any",
+          "direction": "->",
+          "dst_net": "$HOME_NET",
+          "dst_port": "any",
+          "content": "flow:to_server",
+          "message": "Default Ingress UDP Drop",
+          "sid": 9999913
+        },
+        {
+          "action": "drop",
+          "protocol": "icmp",
+          "src_net": "any",
+          "src_port": "any",
+          "direction": "->",
+          "dst_net": "$HOME_NET",
+          "dst_port": "any",
+          "content": "flow:to_server",
+          "message": "Default Ingress ICMP Drop",
+          "sid": 9999914
+        },
+        {
+          "action": "drop",
+          "protocol": "ip",
+          "src_net": "any",
+          "src_port": "any",
+          "direction": "->",
+          "dst_net": "$HOME_NET",
+          "dst_port": "any",
+          "content": "ip_proto:!TCP; ip_proto:!UDP; ip_proto:!ICMP; flow:to_server",
+          "message": "Default Ingress All Other IP Drop",
+          "sid": 9999915
+        }
+      ],
+      "parameters": [],
+      "variables": {
+        "$HOME_NET": "[10.0.0.0/8,172.16.0.0/12,192.168.0.0/16]"
+      },
+      "notes": "Comprehensive default deny for both egress and ingress traffic. Uses flowbits coordination. MUST be at END of ruleset. Use specific allow/pass rules before these. Replaces firewall policy default actions (Drop All or Drop Established).",
+      "rule_generation": "static",
+      "sid_range": "999991-999997, 999999, 9999910-9999915"
+    }
+  ]
+}

@@ -107,7 +107,23 @@ class FileManager:
         
         # Variable validation
         used_vars = self.scan_rules_for_variables(rules)
-        undefined_vars = [var for var in used_vars if var not in variables or not variables[var].strip()]
+        
+        # Handle both old format (string) and new format (dict) for validation
+        undefined_vars = []
+        for var in used_vars:
+            if var not in variables:
+                undefined_vars.append(var)
+            else:
+                var_data = variables[var]
+                # Handle both old format (string) and new format (dict with definition/description)
+                if isinstance(var_data, dict):
+                    var_definition = var_data.get("definition", "")
+                else:
+                    var_definition = var_data  # Legacy format
+                
+                if not var_definition.strip():
+                    undefined_vars.append(var)
+        
         undefined_vars = [var for var in undefined_vars if var != '$EXTERNAL_NET']
         
         if undefined_vars:
@@ -147,7 +163,15 @@ class FileManager:
             raise Exception(f"Failed to save file {filename}: {str(e)}")
     
     def load_variables_file(self, suricata_filename: str) -> dict:
-        """Load companion .var file if it exists"""
+        """Load companion .var file if it exists
+        
+        Supports both legacy format (string values) and new format (dict with definition/description).
+        Legacy format: {"$VAR": "value"}
+        New format: {"$VAR": {"definition": "value", "description": "text"}}
+        
+        Returns:
+            dict: Variables in new format with definition and description
+        """
         var_filename = suricata_filename.replace('.suricata', '.var')
         if not var_filename.endswith('.var'):
             var_filename += '.var'
@@ -155,7 +179,32 @@ class FileManager:
         if os.path.exists(var_filename):
             try:
                 with open(var_filename, 'r', encoding='utf-8') as f:
-                    return json.load(f)
+                    raw_data = json.load(f)
+                
+                # Convert to new format if needed (backward compatibility)
+                variables = {}
+                for name, value in raw_data.items():
+                    if isinstance(value, str):
+                        # Legacy format: string value
+                        variables[name] = {
+                            "definition": value,
+                            "description": ""
+                        }
+                    elif isinstance(value, dict):
+                        # New format: dict with definition and optional description
+                        variables[name] = {
+                            "definition": value.get("definition", ""),
+                            "description": value.get("description", "")
+                        }
+                    else:
+                        # Unknown format, treat as empty
+                        variables[name] = {
+                            "definition": "",
+                            "description": ""
+                        }
+                
+                return variables
+                
             except FileNotFoundError:
                 pass  # Variable file doesn't exist
             except PermissionError:
@@ -167,7 +216,14 @@ class FileManager:
         return {}
     
     def save_variables_file(self, suricata_filename: str, variables: dict):
-        """Save companion .var file with variable definitions"""
+        """Save companion .var file with variable definitions
+        
+        Always saves in new format with definition and description fields.
+        Maintains backward compatibility by supporting reading of old format.
+        
+        Args:
+            variables: Dict with structure {name: {"definition": str, "description": str}}
+        """
         if not variables:
             return
         
@@ -176,6 +232,8 @@ class FileManager:
             var_filename += '.var'
         
         try:
+            # Save in new format with definition and description
+            # Variables should already be in the new format from load_variables_file
             with open(var_filename, 'w', encoding='utf-8') as f:
                 json.dump(variables, f, indent=2)
         except PermissionError:
@@ -273,7 +331,13 @@ class FileManager:
         if variables:
             has_rule_vars = False
             
-            for var_name, var_definition in variables.items():
+            for var_name, var_data in variables.items():
+                # Handle both old format (string) and new format (dict with definition/description)
+                if isinstance(var_data, dict):
+                    var_definition = var_data.get("definition", "")
+                else:
+                    var_definition = var_data  # Legacy format
+                
                 if var_definition.strip():
                     clean_name = var_name.lstrip('$@')
                     var_type = self.get_variable_type_from_usage(var_name, variable_usage)
@@ -407,7 +471,13 @@ EOF
             rule_variables = {}
             reference_sets = {}
             
-            for var_name, var_definition in variables.items():
+            for var_name, var_data in variables.items():
+                # Handle both old format (string) and new format (dict with definition/description)
+                if isinstance(var_data, dict):
+                    var_definition = var_data.get("definition", "")
+                else:
+                    var_definition = var_data  # Legacy format
+                
                 if var_definition.strip():
                     clean_name = var_name.lstrip('$@')
                     var_type = self.get_variable_type_from_usage(var_name, variable_usage)

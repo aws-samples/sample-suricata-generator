@@ -563,11 +563,16 @@ class FlowTester:
         if 'not_established' in content:
             return flow_state == 'handshake'
         
-        # Rules with flow:established or flow:to_server/to_client only match established TCP connections
-        # These should NOT match connectionless protocols (ICMP, UDP, IP) even when flow_state='all'
-        if 'established' in content or 'to_server' in content or 'to_client' in content:
-            # Only match if we're specifically in the 'established' phase (not 'all')
+        # Rules with flow:established only match established connections
+        if 'established' in content:
+            # Only match if we're specifically in the 'established' phase
             return flow_state == 'established'
+        
+        # Rules with flow:to_server/to_client match both 'established' and 'all' states
+        # For connectionless protocols (ICMP, UDP), these keywords just indicate direction
+        if 'to_server' in content or 'to_client' in content:
+            # Match both 'established' (for TCP) and 'all' (for connectionless protocols)
+            return flow_state in ['established', 'all']
         
         # Other flow keywords match all states
         return True
@@ -737,9 +742,10 @@ class FlowTester:
         except ValueError:
             return False
         
-        # If flow port is 'any', it matches any rule port
+        # If flow port is 'any' (connectionless protocols like ICMP don't have ports),
+        # only match if rule port is also 'any'
         if flow_port_num is None:
-            return True
+            return rule_port.lower() == 'any'
         
         # Split by comma for port lists
         port_specs = [spec.strip() for spec in rule_port.split(',')]
@@ -811,6 +817,9 @@ class FlowTester:
         
         protocol = protocol.lower()
         
+        # Check if the provided domain is actually an IP address
+        domain_is_ip = self._is_ip_address(parsed_url['domain'])
+        
         # Check TLS keywords
         if protocol in ['tls', 'https']:
             # Special case: Rules designed to detect "No SNI" (direct-to-IP) connections
@@ -825,16 +834,24 @@ class FlowTester:
             # Check tls.sni keyword for domain matching
             if 'tls.sni' in content:
                 sni_match = self._extract_keyword_value(content, 'tls.sni')
-                if sni_match and not self._matches_pattern(parsed_url['domain'], sni_match):
-                    return False
+                if sni_match:
+                    # Skip TLD-checking rules when domain is actually an IP address
+                    if domain_is_ip and self._is_tld_checking_rule(sni_match):
+                        return False
+                    if not self._matches_pattern(parsed_url['domain'], sni_match):
+                        return False
         
         # Check HTTP keywords
         if protocol == 'http':
             # Check http.host keyword
             if 'http.host' in content:
                 host_match = self._extract_keyword_value(content, 'http.host')
-                if host_match and not self._matches_pattern(parsed_url['domain'], host_match):
-                    return False
+                if host_match:
+                    # Skip TLD-checking rules when host is actually an IP address
+                    if domain_is_ip and self._is_tld_checking_rule(host_match):
+                        return False
+                    if not self._matches_pattern(parsed_url['domain'], host_match):
+                        return False
             
             # Check http.uri keyword
             if 'http.uri' in content:
@@ -1027,6 +1044,55 @@ class FlowTester:
         
         return False
     
+    def _is_ip_address(self, value: str) -> bool:
+        """Check if a string is an IP address
+        
+        Args:
+            value: String to check (e.g., "192.168.1.1" or "www.example.com")
+            
+        Returns:
+            True if value is a valid IP address
+        """
+        try:
+            ipaddress.ip_address(value)
+            return True
+        except ValueError:
+            return False
+    
+    def _is_tld_checking_rule(self, pattern_info: Dict) -> bool:
+        """Check if a pattern is for TLD checking (domain suffix validation)
+        
+        TLD-checking rules look for domain endings like .com, .org, .ru, etc.
+        These rules should NOT match when the host/SNI is an IP address.
+        
+        Args:
+            pattern_info: Pattern dictionary with 'value', 'modifiers', and optionally 'pcre_pattern'
+            
+        Returns:
+            True if this appears to be a TLD-checking pattern
+        """
+        if not pattern_info:
+            return False
+        
+        modifiers = pattern_info.get('modifiers', [])
+        pcre_pattern = pattern_info.get('pcre_pattern', '')
+        
+        # Check for pcre patterns that look for TLD suffixes
+        # Common pattern: negative lookahead checking for specific TLDs
+        # Example: /^(?!.*\.(com|org|net|io|edu|aws)$).*/i
+        if pcre_pattern and ('lookahead' in pcre_pattern or '?!' in pcre_pattern):
+            # This is likely checking for absence of certain TLDs
+            return True
+        
+        # Check for endswith modifier with TLD patterns (e.g., content:".ru"; endswith;)
+        if 'endswith' in modifiers:
+            value = pattern_info.get('value', '')
+            # Check if the pattern looks like a TLD (starts with dot and has 2-4 letters)
+            if value.startswith('.') and len(value) <= 5 and value[1:].isalpha():
+                return True
+        
+        return False
+    
     def _extract_keyword_value(self, content: str, keyword: str) -> Optional[Dict]:
         """Extract the value and modifiers for a specific keyword from rule content
         
@@ -1038,6 +1104,7 @@ class FlowTester:
             Dictionary with 'value' and 'modifiers' (startswith, endswith, etc.) or None
         """
         # Look for pattern like: tls.sni; content:"example.com"; startswith; endswith;
+        # Or: http.host; content:"."; pcre:"/pattern/";
         
         # Find the keyword
         idx = content.find(keyword)
@@ -1047,13 +1114,15 @@ class FlowTester:
         # Look for content:" after the keyword
         rest = content[idx:]
         content_match = re.search(r'content:\s*"([^"]+)"', rest)
+        
         if not content_match:
-            # Try pcre pattern
+            # No content, try pcre pattern only
             pcre_match = re.search(r'pcre:\s*"([^"]+)"', rest)
             if pcre_match:
                 pattern = pcre_match.group(1)
+                # Clean up regex anchors for basic matching
                 pattern = pattern.replace('.*', '').replace('.+', '').replace('^', '').replace('$', '')
-                return {'value': pattern, 'modifiers': []} if pattern else None
+                return {'value': pattern, 'modifiers': ['pcre'], 'pcre_pattern': pcre_match.group(1)} if pattern else None
             return None
         
         value = content_match.group(1)
@@ -1071,6 +1140,12 @@ class FlowTester:
         if 'dotprefix' in after_content:
             modifiers.append('dotprefix')
         
+        # Check if there's also a pcre pattern after the content (common pattern: fast content + precise pcre)
+        pcre_match = re.search(r'pcre:\s*"([^"]+)"', after_content)
+        if pcre_match:
+            modifiers.append('pcre')
+            return {'value': value, 'modifiers': modifiers, 'pcre_pattern': pcre_match.group(1)}
+        
         return {'value': value, 'modifiers': modifiers}
     
     def _matches_pattern(self, value: str, pattern_info) -> bool:
@@ -1087,19 +1162,42 @@ class FlowTester:
         if isinstance(pattern_info, str):
             pattern = pattern_info
             modifiers = []
+            pcre_pattern = None
         elif isinstance(pattern_info, dict):
             pattern = pattern_info.get('value', '')
             modifiers = pattern_info.get('modifiers', [])
+            pcre_pattern = pattern_info.get('pcre_pattern', None)
         else:
             return True
         
-        if not pattern:
+        if not pattern and not pcre_pattern:
             return True
         
         value = value.lower()
         pattern = pattern.lower()
         
-        # Handle modifiers
+        # If pcre pattern exists, it takes precedence over simple content matching
+        # The content is just a fast-pattern optimization, the pcre does the real validation
+        if 'pcre' in modifiers and pcre_pattern:
+            # Clean up pcre delimiters and flags
+            # Pattern format: /regex/flags or "regex"
+            cleaned_pattern = pcre_pattern.strip()
+            if cleaned_pattern.startswith('/'):
+                # Extract pattern between / / and ignore flags
+                parts = cleaned_pattern.split('/')
+                if len(parts) >= 2:
+                    cleaned_pattern = parts[1]
+            
+            # Try to match the pcre pattern
+            try:
+                # Convert Suricata pcre syntax to Python regex
+                # Handle common Suricata patterns
+                return bool(re.search(cleaned_pattern, value, re.IGNORECASE))
+            except re.error:
+                # If pcre pattern is invalid, fall back to content matching
+                pass
+        
+        # Handle standard modifiers
         if 'startswith' in modifiers and 'endswith' in modifiers:
             # Both startswith and endswith = exact match
             return value == pattern

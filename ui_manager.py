@@ -67,6 +67,8 @@ class UIManager:
         file_menu.add_command(label="Import Domain List", command=self.parent.domain_importer.import_domains)
         file_menu.add_command(label="Import Stateful Rule Group", command=self.parent.stateful_rule_importer.import_standard_rule_group)
         file_menu.add_separator()
+        file_menu.add_command(label="Insert Rules From Template", command=self.parent.show_template_dialog)
+        file_menu.add_separator()
         file_menu.add_command(label="Exit", command=self.parent.on_closing)
         
         # Edit menu - undo functionality and search
@@ -713,17 +715,19 @@ class UIManager:
         table_frame = ttk.Frame(variables_tab)
         table_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
         
-        # Variables table
-        columns = ("Variable", "Type", "Definition")
+        # Variables table with Description column
+        columns = ("Variable", "Type", "Definition", "Description")
         self.variables_tree = ttk.Treeview(table_frame, columns=columns, show="headings", height=6)
         
         self.variables_tree.heading("Variable", text="Variable")
         self.variables_tree.heading("Type", text="Type")
         self.variables_tree.heading("Definition", text="Definition")
+        self.variables_tree.heading("Description", text="Description")
         
         self.variables_tree.column("Variable", width=120, stretch=False)
         self.variables_tree.column("Type", width=80, stretch=False)
-        self.variables_tree.column("Definition", width=250, stretch=True)
+        self.variables_tree.column("Definition", width=200, stretch=False)
+        self.variables_tree.column("Description", width=300, stretch=True)
         
         # Scrollbar for variables table
         var_scrollbar = ttk.Scrollbar(table_frame, orient=tk.VERTICAL, command=self.variables_tree.yview)
@@ -742,6 +746,7 @@ class UIManager:
         ttk.Button(var_buttons_frame, text="Add IP Set ($)", command=lambda: self.add_variable("ip_set")).pack(side=tk.LEFT, padx=(0, 5))
         ttk.Button(var_buttons_frame, text="Add Port Set ($)", command=lambda: self.add_variable("port_set")).pack(side=tk.LEFT, padx=(0, 5))
         ttk.Button(var_buttons_frame, text="Add Reference", command=lambda: self.add_variable("reference")).pack(side=tk.LEFT, padx=(0, 5))
+        ttk.Button(var_buttons_frame, text="Add Common Ports", command=self.show_add_common_ports_dialog).pack(side=tk.LEFT, padx=(10, 5))
         ttk.Button(var_buttons_frame, text="Edit", command=self.edit_variable).pack(side=tk.LEFT, padx=(10, 5))
         ttk.Button(var_buttons_frame, text="Delete", command=self.delete_variable).pack(side=tk.LEFT, padx=(0, 5))
         
@@ -861,8 +866,15 @@ class UIManager:
                 
                 # Show appropriate editor based on rule type
                 if getattr(rule, 'is_blank', False):
-                    # Blank line - no editor fields needed
-                    self.hide_all_editor_fields()
+                    # Blank line - set up editor for replacing this blank line with a new rule
+                    self.show_rule_editor()
+                    # Keep selected_rule_index at current blank line position to replace it
+                    # (actual_rule_index is already set above to the blank line's position)
+                    # Populate with default values for new rule
+                    self.parent.set_default_editor_values()
+                    # Auto-generate next available SID
+                    max_sid = max([r.sid for r in self.parent.rules if not getattr(r, 'is_comment', False) and not getattr(r, 'is_blank', False)], default=99)
+                    self.sid_var.set(str(max_sid + 1))
                 elif getattr(rule, 'is_comment', False):
                     # Comment line - show comment editor only
                     self.show_comment_editor()
@@ -1475,11 +1487,15 @@ class UIManager:
         """Check if a definition string looks like port numbers/ranges rather than CIDR blocks
         
         Args:
-            definition: The definition string to check
+            definition: The definition string or dict to check
             
         Returns:
             bool: True if it looks like ports, False if it looks like CIDR or is ambiguous
         """
+        # Handle new dict format (extract definition string)
+        if isinstance(definition, dict):
+            definition = definition.get("definition", "")
+        
         if not definition or not definition.strip():
             return False
         
@@ -1507,17 +1523,17 @@ class UIManager:
         return False
     
     def show_variable_dialog(self, title, var_name=None, var_type=None):
-        """Show dialog for adding/editing variables"""
+        """Show dialog for adding/editing variables with description field"""
         dialog = tk.Toplevel(self.parent.root)
         dialog.title(title)
-        dialog.geometry("450x220")
+        dialog.geometry("550x320")
         dialog.transient(self.parent.root)
         dialog.grab_set()
         
         # Variable name with prefix hint
         ttk.Label(dialog, text="Variable Name:").pack(pady=5)
         name_var = tk.StringVar(value=var_name or "")
-        name_entry = ttk.Entry(dialog, textvariable=name_var, width=30)
+        name_entry = ttk.Entry(dialog, textvariable=name_var, width=40)
         name_entry.pack(pady=5)
         
         # Show prefix hint based on type and existing variable name
@@ -1529,9 +1545,9 @@ class UIManager:
                 name_var.set("$")
         elif var_type == "port_set":
             # AWS Network Firewall requires port variables to use $ prefix only
-            hint_text = "Must start with $ (e.g., $WEB_PORTS, $SRC_PORTS)"
+            hint_text = "Must start with $ (e.g., $WEB, $SRC_PORTS)"
             definition_label = "Port Definition:"
-            definition_hint = "e.g., 80,443,8080:8090"
+            definition_hint = "e.g., [80,443] or [8080:8090]"
             if not var_name:
                 name_var.set("$")
         elif var_type == "reference":
@@ -1547,12 +1563,31 @@ class UIManager:
         
         # Definition
         ttk.Label(dialog, text=definition_label).pack(pady=5)
-        definition_var = tk.StringVar(value=self.parent.variables.get(var_name, "") if var_name else "")
-        definition_entry = ttk.Entry(dialog, textvariable=definition_var, width=50)
+        
+        # Get existing variable data (handle both old and new formats)
+        existing_data = self.parent.variables.get(var_name, {}) if var_name else {}
+        if isinstance(existing_data, dict):
+            existing_def = existing_data.get("definition", "")
+            existing_desc = existing_data.get("description", "")
+        else:
+            # Legacy format
+            existing_def = existing_data
+            existing_desc = ""
+        
+        definition_var = tk.StringVar(value=existing_def)
+        definition_entry = ttk.Entry(dialog, textvariable=definition_var, width=60)
         definition_entry.pack(pady=5)
         
         if definition_hint:
             ttk.Label(dialog, text=definition_hint, font=("TkDefaultFont", 8)).pack(pady=(0, 10))
+        
+        # Description field (NEW)
+        ttk.Label(dialog, text="Description (optional):").pack(pady=5)
+        description_var = tk.StringVar(value=existing_desc)
+        description_entry = ttk.Entry(dialog, textvariable=description_var, width=60)
+        description_entry.pack(pady=5)
+        ttk.Label(dialog, text="Brief description of what this variable is for", 
+                 font=("TkDefaultFont", 8), foreground="#666666").pack(pady=(0, 10))
         
         # Buttons
         button_frame = ttk.Frame(dialog)
@@ -1561,6 +1596,7 @@ class UIManager:
         def save_variable():
             name = name_var.get().strip()
             definition = definition_var.get().strip()
+            description = description_var.get().strip()
             
             if not name:
                 messagebox.showerror("Error", "Variable name is required.")
@@ -1629,6 +1665,167 @@ class UIManager:
             
             self.parent.variables[name] = definition
             self.parent.add_history_entry(action_type, {'variable': name, 'definition': definition})
+            self.parent.refresh_variables_table()
+            self.parent.update_status_bar()  # Update status bar to reflect variable definition changes
+            dialog.destroy()
+        
+        ttk.Button(button_frame, text="Save", command=save_variable).pack(side=tk.LEFT, padx=5)
+        ttk.Button(button_frame, text="Cancel", command=dialog.destroy).pack(side=tk.LEFT, padx=5)
+        
+        # Focus on name entry and position cursor appropriately
+        name_entry.focus()
+        
+        # If we pre-filled with "$" for ip_set or port_set, position cursor after it
+        if var_type in ["ip_set", "port_set"] and not var_name:
+            name_entry.icursor(1)  # Position cursor after the "$"
+    def show_variable_dialog(self, title, var_name=None, var_type=None):
+        """Show dialog for adding/editing variables with description field"""
+        dialog = tk.Toplevel(self.parent.root)
+        dialog.title(title)
+        dialog.geometry("550x360")
+        dialog.transient(self.parent.root)
+        dialog.grab_set()
+        
+        # Variable name with prefix hint
+        ttk.Label(dialog, text="Variable Name:").pack(pady=5)
+        name_var = tk.StringVar(value=var_name or "")
+        name_entry = ttk.Entry(dialog, textvariable=name_var, width=40)
+        name_entry.pack(pady=5)
+        
+        # Show prefix hint based on type and existing variable name
+        if var_type == "ip_set":
+            hint_text = "Must start with $ (e.g., $HOME_NET)"
+            definition_label = "CIDR Definition:"
+            definition_hint = "Single: 192.168.1.0/24 or Multiple: [10.0.0.0/8,172.16.0.0/12]"
+            if not var_name:
+                name_var.set("$")
+        elif var_type == "port_set":
+            # AWS Network Firewall requires port variables to use $ prefix only
+            hint_text = "Must start with $ (e.g., $WEB, $SRC_PORTS)"
+            definition_label = "Port Definition:"
+            definition_hint = "e.g., [80,443] or [8080:8090]"
+            if not var_name:
+                name_var.set("$")
+        elif var_type == "reference":
+            hint_text = "Reference name (no prefix required)"
+            definition_label = "Reference ARN:"
+            definition_hint = "AWS VPC IP Set Reference ARN"
+        else:
+            hint_text = "$ for IP sets and port sets, or reference name"
+            definition_label = "Definition:"
+            definition_hint = ""
+        
+        ttk.Label(dialog, text=hint_text, font=("TkDefaultFont", 8)).pack(pady=(0, 10))
+        
+        # Definition
+        ttk.Label(dialog, text=definition_label).pack(pady=5)
+        
+        # Get existing variable data (handle both old and new formats)
+        existing_data = self.parent.variables.get(var_name, {}) if var_name else {}
+        if isinstance(existing_data, dict):
+            existing_def = existing_data.get("definition", "")
+            existing_desc = existing_data.get("description", "")
+        else:
+            # Legacy format
+            existing_def = existing_data
+            existing_desc = ""
+        
+        definition_var = tk.StringVar(value=existing_def)
+        definition_entry = ttk.Entry(dialog, textvariable=definition_var, width=60)
+        definition_entry.pack(pady=5)
+        
+        if definition_hint:
+            ttk.Label(dialog, text=definition_hint, font=("TkDefaultFont", 8)).pack(pady=(0, 10))
+        
+        # Description field (NEW)
+        ttk.Label(dialog, text="Description (optional):").pack(pady=5)
+        description_var = tk.StringVar(value=existing_desc)
+        description_entry = ttk.Entry(dialog, textvariable=description_var, width=60)
+        description_entry.pack(pady=5)
+        ttk.Label(dialog, text="Brief description of what this variable is for", 
+                 font=("TkDefaultFont", 8), foreground="#666666").pack(pady=(0, 10))
+        
+        # Buttons
+        button_frame = ttk.Frame(dialog)
+        button_frame.pack(pady=10)
+        
+        def save_variable():
+            name = name_var.get().strip()
+            definition = definition_var.get().strip()
+            description = description_var.get().strip()
+            
+            if not name:
+                messagebox.showerror("Error", "Variable name is required.")
+                return
+            
+            # Use context-aware validation based on var_type or actual usage
+            if definition:  # Only validate if definition is provided
+                # For new variables, use var_type first; for existing variables, analyze usage
+                # Check var_type parameter first (most reliable for new variables)
+                if var_type == "port_set":
+                    # Port Set validation (AWS Network Firewall requires $ prefix for port variables)
+                    if not self.parent.validate_port_list(definition):
+                        messagebox.showerror("Port Validation Error", 
+                            "Invalid port definition. Port ranges and lists MUST use brackets:\n" +
+                            "• Single port: 80\n" +
+                            "• Port range: [8080:8090]\n" +
+                            "• Multiple ports: [80,443,8080]\n" +
+                            "• Complex specs: [80:100,!85]\n\n" +
+                            "Suricata syntax requires brackets for all port ranges and complex port specifications.")
+                        return
+                elif var_type == "ip_set":
+                    # IP Set validation (for explicit ip_set type)
+                    if not self.parent.validate_cidr_list(definition):
+                        messagebox.showerror("CIDR Validation Error", 
+                            "Invalid CIDR definition. AWS Network Firewall requires brackets for multiple CIDR blocks:\n" +
+                            "• Single CIDR: 192.168.1.0/24\n" +
+                            "• Multiple CIDRs: [192.168.1.0/24,192.168.2.0/24]\n" +
+                            "• With negation: [192.168.1.0/24,!172.16.0.0/12]")
+                        return
+                elif var_type == "reference":
+                    # Reference Set validation
+                    if not definition.strip():
+                        messagebox.showerror("Error", "Reference ARN is required for reference variables.")
+                        return
+                else:
+                    # Fallback: Analyze current variable usage to determine correct validation
+                    variable_usage = self.parent.file_manager.analyze_variable_usage(self.parent.rules)
+                    determined_type = self.parent.file_manager.get_variable_type_from_usage(name, variable_usage)
+                    
+                    # Validate based on determined type from usage
+                    if determined_type == "Port Set":
+                        # Port Set validation
+                        if not self.parent.validate_port_list(definition):
+                            messagebox.showerror("Port Validation Error", 
+                                "Invalid port definition. Port ranges and lists MUST use brackets:\n" +
+                                "• Single port: 80\n" +
+                                "• Port range: [8080:8090]\n" +
+                                "• Multiple ports: [80,443,8080]\n" +
+                                "• Complex specs: [80:100,!85]\n\n" +
+                                "Suricata syntax requires brackets for all port ranges and complex port specifications.")
+                            return
+                    elif determined_type == "Reference":
+                        # Reference Set - minimal validation
+                        if not definition.strip():
+                            messagebox.showerror("Error", "Reference ARN is required for reference variables.")
+                            return
+                    else:
+                        # Default to IP Set validation (determined_type == "IP Set" or other)
+                        if not self.parent.validate_cidr_list(definition):
+                            messagebox.showerror("Error", "Invalid CIDR definition. Use comma-separated CIDR blocks.")
+                            return
+            
+            # Determine if this is adding a new variable or editing existing one
+            is_new_variable = var_name is None or var_name not in self.parent.variables
+            action_type = 'variable_added' if is_new_variable else 'variable_modified'
+            
+            # Save in new dict format with definition and description
+            self.parent.variables[name] = {
+                "definition": definition,
+                "description": description
+            }
+            
+            self.parent.add_history_entry(action_type, {'variable': name, 'definition': definition, 'description': description})
             self.parent.refresh_variables_table()
             self.parent.update_status_bar()  # Update status bar to reflect variable definition changes
             dialog.destroy()
@@ -3430,6 +3627,367 @@ class UIManager:
             # Ensure main window is visible
             self.parent.root.lift()
             self.parent.root.focus_force()
+    
+    def show_add_common_ports_dialog(self):
+        """Show dialog for adding common port variables from predefined library
+        
+        Uses a two-panel layout with category dropdown:
+        - Left panel: Category variables with checkboxes
+        - Right panel: Selected variables summary
+        Preserves selections when switching categories for better UX.
+        """
+        import json
+        
+        # Load common ports from JSON file
+        try:
+            script_dir = os.path.dirname(os.path.abspath(__file__))
+            common_ports_file = os.path.join(script_dir, "common_ports.json")
+            
+            with open(common_ports_file, 'r', encoding='utf-8') as f:
+                common_ports_data = json.load(f)
+            
+            # Support both old and new formats for backward compatibility
+            if 'categories' in common_ports_data:
+                # New format with version info
+                common_ports = common_ports_data['categories']
+            else:
+                # Old format (direct categories at top level)
+                common_ports = common_ports_data
+                
+        except FileNotFoundError:
+            messagebox.showerror("File Not Found", 
+                "common_ports.json file not found in program directory.\n\n" +
+                "This file should contain predefined port variable definitions.")
+            return
+        except json.JSONDecodeError as e:
+            messagebox.showerror("JSON Error", 
+                f"Error parsing common_ports.json:\n\n{str(e)}")
+            return
+        except Exception as e:
+            messagebox.showerror("Error", 
+                f"Failed to load common ports:\n\n{str(e)}")
+            return
+        
+        # Create dialog (wider to accommodate two-panel layout)
+        dialog = tk.Toplevel(self.parent.root)
+        dialog.title("Add Common Port Variables")
+        dialog.geometry("1000x600")
+        dialog.transient(self.parent.root)
+        dialog.grab_set()
+        dialog.resizable(True, True)
+        
+        # Center the dialog
+        dialog.geometry("+%d+%d" % (self.parent.root.winfo_rootx() + 50, self.parent.root.winfo_rooty() + 100))
+        
+        # Main frame
+        main_frame = ttk.Frame(dialog)
+        main_frame.pack(fill=tk.BOTH, expand=True, padx=15, pady=15)
+        
+        # Title
+        title_label = ttk.Label(main_frame, text="Add Common Port Variables", 
+                               font=("TkDefaultFont", 12, "bold"))
+        title_label.pack(pady=(0, 5))
+        
+        # Description
+        desc_label = ttk.Label(main_frame, 
+                              text="Select common port variables to add to your Rule Variables. Selections persist across categories.",
+                              font=("TkDefaultFont", 9))
+        desc_label.pack(pady=(0, 15))
+        
+        # Category selector frame
+        selector_frame = ttk.Frame(main_frame)
+        selector_frame.pack(fill=tk.X, pady=(0, 10))
+        
+        ttk.Label(selector_frame, text="Category:", font=("TkDefaultFont", 10, "bold")).pack(side=tk.LEFT, padx=(0, 10))
+        
+        # Category dropdown
+        category_var = tk.StringVar()
+        category_list = sorted(common_ports.keys())
+        category_var.set(category_list[0] if category_list else "")
+        
+        category_combo = ttk.Combobox(selector_frame, textvariable=category_var,
+                                     values=category_list,
+                                     state="readonly", width=30)
+        category_combo.pack(side=tk.LEFT)
+        
+        # Category count label
+        cat_count_label = ttk.Label(selector_frame, text="", font=("TkDefaultFont", 9), foreground="#666666")
+        cat_count_label.pack(side=tk.LEFT, padx=(10, 0))
+        
+        # Two-panel layout
+        panels_frame = ttk.Frame(main_frame)
+        panels_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 15))
+        
+        # LEFT PANEL: Category variables (60% width)
+        left_panel = ttk.LabelFrame(panels_frame, text="Variables in Selected Category")
+        left_panel.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 5))
+        
+        # Create scrollable canvas for left panel
+        left_canvas = tk.Canvas(left_panel)
+        left_v_scrollbar = ttk.Scrollbar(left_panel, orient=tk.VERTICAL, command=left_canvas.yview)
+        left_h_scrollbar = ttk.Scrollbar(left_panel, orient=tk.HORIZONTAL, command=left_canvas.xview)
+        left_content = ttk.Frame(left_canvas)
+        
+        left_content.bind(
+            "<Configure>",
+            lambda e: left_canvas.configure(scrollregion=left_canvas.bbox("all"))
+        )
+        
+        left_canvas.create_window((0, 0), window=left_content, anchor="nw")
+        left_canvas.configure(yscrollcommand=left_v_scrollbar.set, xscrollcommand=left_h_scrollbar.set)
+        
+        # Grid layout for scrollbars
+        left_canvas.grid(row=0, column=0, sticky="nsew", padx=5, pady=5)
+        left_v_scrollbar.grid(row=0, column=1, sticky="ns", pady=5)
+        left_h_scrollbar.grid(row=1, column=0, sticky="ew", padx=5)
+        
+        left_panel.grid_rowconfigure(0, weight=1)
+        left_panel.grid_columnconfigure(0, weight=1)
+        
+        # Enable mousewheel scrolling for left panel
+        def on_left_mousewheel(event):
+            left_canvas.yview_scroll(int(-1*(event.delta/120)), "units")
+        
+        left_canvas.bind("<Enter>", lambda e: left_canvas.bind("<MouseWheel>", on_left_mousewheel))
+        left_canvas.bind("<Leave>", lambda e: left_canvas.unbind("<MouseWheel>"))
+        
+        # RIGHT PANEL: Selected variables summary (40% width)
+        right_panel = ttk.LabelFrame(panels_frame, text="Selected Variables")
+        right_panel.pack(side=tk.RIGHT, fill=tk.BOTH, expand=False, padx=(5, 0))
+        right_panel.config(width=350)
+        
+        # Selected count label
+        selected_count_label = ttk.Label(right_panel, text="0 selected", 
+                                        font=("TkDefaultFont", 9, "bold"), foreground="#1976D2")
+        selected_count_label.pack(pady=(5, 5))
+        
+        # Create scrollable canvas for right panel
+        right_canvas = tk.Canvas(right_panel, width=330)
+        right_scrollbar = ttk.Scrollbar(right_panel, orient=tk.VERTICAL, command=right_canvas.yview)
+        right_content = ttk.Frame(right_canvas)
+        
+        right_content.bind(
+            "<Configure>",
+            lambda e: right_canvas.configure(scrollregion=right_canvas.bbox("all"))
+        )
+        
+        right_canvas.create_window((0, 0), window=right_content, anchor="nw")
+        right_canvas.configure(yscrollcommand=right_scrollbar.set)
+        
+        # Pack right panel components
+        right_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=5, pady=5)
+        right_scrollbar.pack(side=tk.RIGHT, fill=tk.Y, pady=5)
+        
+        # Enable mousewheel scrolling for right panel
+        def on_right_mousewheel(event):
+            right_canvas.yview_scroll(int(-1*(event.delta/120)), "units")
+        
+        right_canvas.bind("<Enter>", lambda e: right_canvas.bind("<MouseWheel>", on_right_mousewheel))
+        right_canvas.bind("<Leave>", lambda e: right_canvas.unbind("<MouseWheel>"))
+        
+        # Global storage for ALL selections across ALL categories
+        selected_vars = {}  # {var_name: {'definition': ..., 'description': ..., 'category': ...}}
+        
+        # Store checkbox variables for current category
+        current_checkboxes = {}
+        
+        def update_selected_panel():
+            """Update the right panel showing all selected variables"""
+            # Clear existing items
+            for widget in right_content.winfo_children():
+                widget.destroy()
+            
+            # Update count
+            count = len(selected_vars)
+            selected_count_label.config(text=f"{count} selected")
+            
+            if not selected_vars:
+                ttk.Label(right_content, text="No variables selected yet",
+                         font=("TkDefaultFont", 9, "italic"), foreground="#666666").pack(padx=10, pady=20)
+                return
+            
+            # Show each selected variable with remove button
+            for var_name in sorted(selected_vars.keys()):
+                var_info = selected_vars[var_name]
+                
+                # Create frame for this variable
+                var_frame = ttk.Frame(right_content)
+                var_frame.pack(fill=tk.X, padx=5, pady=2)
+                
+                # Variable info (name and definition)
+                info_text = f"{var_name}\n{var_info['definition']}"
+                var_label = ttk.Label(var_frame, text=info_text, 
+                                     font=("TkDefaultFont", 8), wraplength=250)
+                var_label.pack(side=tk.LEFT, fill=tk.X, expand=True)
+                
+                # Remove button
+                def make_remove_command(vn):
+                    def remove():
+                        # Remove from selected_vars
+                        del selected_vars[vn]
+                        # Update checkbox if in current category
+                        if vn in current_checkboxes:
+                            current_checkboxes[vn]['var'].set(False)
+                        # Refresh right panel
+                        update_selected_panel()
+                    return remove
+                
+                remove_btn = ttk.Button(var_frame, text="✕", width=3, 
+                                       command=make_remove_command(var_name))
+                remove_btn.pack(side=tk.RIGHT)
+                
+                # Add separator
+                ttk.Separator(right_content, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=2)
+        
+        def populate_category(category_name):
+            """Populate the variables display with the selected category's variables"""
+            # Clear existing checkboxes
+            for widget in left_content.winfo_children():
+                widget.destroy()
+            current_checkboxes.clear()
+            
+            # Get the ports list for this category
+            ports_list = common_ports.get(category_name, [])
+            
+            # Update count label
+            cat_count_label.config(text=f"({len(ports_list)} variables)")
+            
+            if not ports_list:
+                ttk.Label(left_content, text="No variables in this category",
+                         font=("TkDefaultFont", 9, "italic")).pack(padx=10, pady=20)
+                return
+            
+            # Add checkbox for each port variable
+            for port_def in ports_list:
+                var_name = port_def['name']
+                definition = port_def['definition']
+                description = port_def['description']
+                
+                # Check if this variable already exists in Rule Variables
+                already_exists = var_name in self.parent.variables
+                
+                # Check if already selected (from previous category view)
+                is_selected = var_name in selected_vars
+                
+                var = tk.BooleanVar(value=is_selected)
+                current_checkboxes[var_name] = {
+                    'var': var,
+                    'definition': definition,
+                    'description': description,
+                    'category': category_name,
+                    'exists': already_exists
+                }
+                
+                # Format checkbox label
+                label_text = f"{var_name} - {definition} - {description}"
+                if already_exists:
+                    label_text += " (already defined)"
+                
+                # Checkbox with change handler
+                def make_checkbox_handler(vn, cat):
+                    def on_change():
+                        if current_checkboxes[vn]['var'].get():
+                            # Add to selected_vars
+                            selected_vars[vn] = {
+                                'definition': current_checkboxes[vn]['definition'],
+                                'description': current_checkboxes[vn]['description'],
+                                'category': cat
+                            }
+                        else:
+                            # Remove from selected_vars
+                            if vn in selected_vars:
+                                del selected_vars[vn]
+                        # Update right panel
+                        update_selected_panel()
+                    return on_change
+                
+                cb = ttk.Checkbutton(left_content, text=label_text, variable=var,
+                                    command=make_checkbox_handler(var_name, category_name))
+                cb.pack(anchor=tk.W, padx=10, pady=2)
+                
+                # Disable checkbox if variable already exists
+                if already_exists:
+                    cb.config(state="disabled")
+        
+        # Populate initial category
+        if category_list:
+            populate_category(category_list[0])
+        
+        # Bind category change event
+        category_combo.bind('<<ComboboxSelected>>', lambda e: populate_category(category_var.get()))
+        
+        # Initial update of selected panel
+        update_selected_panel()
+        
+        # Buttons
+        button_frame = ttk.Frame(main_frame)
+        button_frame.pack(fill=tk.X, pady=(0, 0))
+        
+        def on_add():
+            """Add selected variables from global selections"""
+            if not selected_vars:
+                messagebox.showwarning("No Selection", "Please select at least one port variable to add.")
+                return
+            
+            # Check for conflicts
+            to_add = []
+            conflicts = []
+            
+            for var_name, var_info in selected_vars.items():
+                if var_name in self.parent.variables:
+                    conflicts.append(var_name)
+                else:
+                    to_add.append({
+                        'name': var_name,
+                        'definition': var_info['definition'],
+                        'description': var_info['description']
+                    })
+            
+            # Show conflict warning if any
+            if conflicts:
+                conflict_msg = "The following variables already exist and will not be added:\n\n"
+                conflict_msg += "\n".join(f"• {var}" for var in conflicts)
+                
+                if to_add:
+                    conflict_msg += f"\n\n{len(to_add)} new variables will be added."
+                    if not messagebox.askyesno("Conflicts Detected", conflict_msg):
+                        return
+                else:
+                    messagebox.showinfo("No Variables Added", "All selected variables already exist.")
+                    return
+            
+            # Add selected variables to parent.variables
+            added_count = 0
+            for var_def in to_add:
+                self.parent.variables[var_def['name']] = {
+                    "definition": var_def['definition'],
+                    "description": var_def['description']
+                }
+                
+                # Add history entry
+                self.parent.add_history_entry('variable_added', {
+                    'variable': var_def['name'],
+                    'definition': var_def['definition'],
+                    'description': var_def['description'],
+                    'source': 'common_ports'
+                })
+                added_count += 1
+            
+            # Refresh variables table
+            self.parent.refresh_variables_table()
+            self.parent.update_status_bar()
+            self.parent.modified = True
+            
+            # Close dialog and show success
+            dialog.destroy()
+            
+            var_text = "variable" if added_count == 1 else "variables"
+            messagebox.showinfo("Variables Added", 
+                f"Successfully added {added_count} port {var_text} to Rule Variables.\n\n" +
+                "You can now use these variables in your rules.")
+        
+        ttk.Button(button_frame, text="Add Selected", command=on_add).pack(side=tk.RIGHT, padx=(5, 0))
+        ttk.Button(button_frame, text="Cancel", command=dialog.destroy).pack(side=tk.RIGHT)
     
     def toggle_sigtype_column(self):
         """Toggle SIG Type column visibility in main rule editor"""

@@ -429,9 +429,15 @@ class DomainImporter:
     def consolidate_domains(self, domains: List[str]) -> Dict:
         """Consolidate domains to their most specific common parent
         
-        Analyzes a list of domains and groups them by finding the most specific parent
-        that covers the maximum number of related domains. Uses a scoring system to
-        prioritize more specific parents over less specific ones.
+        This algorithm reduces rule count by grouping related domains under common parents.
+        For example: ['api.example.com', 'web.example.com', 'mail.example.com'] 
+        consolidates to 'example.com' (1 rule instead of 3).
+        
+        Algorithm Overview:
+        1. Build all possible parent-child relationships
+        2. Group parents by the exact set of children they cover
+        3. Filter out subset groups (keep only maximal groups)
+        4. Select the most specific parent for each maximal group
         
         Args:
             domains: List of domain names to analyze
@@ -453,86 +459,110 @@ class DomainImporter:
         if not domains:
             return {'consolidated_groups': [], 'individual_domains': []}
         
-        # Build parent-child relationships for all domains
+        # PHASE 1: Build parent-child relationships
+        # For each domain, generate all possible parent domains and track which children they cover
+        # Example: 'api.web.example.com' generates parents: 'api.web.example.com', 'web.example.com', 'example.com'
         parent_to_all_children = {}
         
         for domain in domains:
             parts = domain.lower().split('.')
-            # Consider all possible parents including the domain itself
-            # Start from i=0 to include the domain as its own parent (for cases like server.appstate.edu in input)
-            # Only consider parents with 2+ parts (skip TLDs like .com, .org)
-            for i in range(0, len(parts) - 1):  # -1 to skip TLD-only parents, 0 to include domain itself
+            # Generate all possible parent domains by progressively removing subdomains
+            # Example: 'one.two.server.com' → ['one.two.server.com', 'two.server.com', 'server.com']
+            # We include the domain itself (i=0) to handle cases where parent domain is in the input
+            # We exclude TLD-only parents (parts - 1) to avoid consolidating to just '.com'
+            for i in range(0, len(parts) - 1):
                 parent = '.'.join(parts[i:])
-                # Skip if parent would be just a TLD
+                # Skip TLD-only parents (must have at least 2 parts like 'example.com')
                 if len(parent.split('.')) < 2:
                     continue
+                # Track which domains this parent could consolidate
                 if parent not in parent_to_all_children:
                     parent_to_all_children[parent] = set()
                 parent_to_all_children[parent].add(domain)
         
-        # For each set of children, find the MOST specific parent that covers them all
-        # Group parents by the exact set of children they cover
+        # PHASE 2: Group parents by their exact child sets
+        # Multiple parents might cover the same set of children. For example:
+        # - 'api.example.com' might be parent of itself + 'v1.api.example.com'
+        # - 'example.com' might also be parent of the same children
+        # We group these together so we can pick the MOST specific one later
         children_set_to_parents = {}
         for parent, children in parent_to_all_children.items():
-            # Skip if fewer than 2 children
+            # Only consolidate if 2+ domains share this parent (threshold for consolidation)
             if len(children) < 2:
                 continue
             
-            # If parent is in its own children set AND it's in the input domains,
-            # this means the parent domain itself is in the input list
-            # We should include it in consolidation (e.g., server.appstate.edu with its subdomains)
-            # Don't skip this case - it's valid for consolidation
+            # Note: If the parent domain itself is in the input list, it will appear in its own children set
+            # This is intentional and valid - we want to consolidate 'example.com' + its subdomains together
             
-            # Create a frozenset for use as dictionary key
+            # Use frozenset as dictionary key (immutable, hashable)
             children_key = frozenset(children)
             
+            # Store all parents that cover this exact set of children
             if children_key not in children_set_to_parents:
                 children_set_to_parents[children_key] = []
             children_set_to_parents[children_key].append(parent)
         
-        # Filter out subset groups - only keep maximal (largest) groups
-        # Sort children sets by size (largest first) to process supersets before subsets
+        # PHASE 3: Filter out subset groups to keep only maximal groups
+        # Problem: If we have both {A,B,C} and {A,B}, we want to keep only {A,B,C}
+        # because it covers more domains. The subset {A,B} would be redundant.
+        # Example: ['one.server.com', 'two.server.com'] AND ['one.server.com', 'two.server.com', 'three.server.com']
+        # We keep the larger group and discard the smaller subset.
+        
+        # Sort by size (largest first) to process supersets before their subsets
         sorted_children_sets = sorted(children_set_to_parents.items(), 
                                       key=lambda x: len(x[0]), 
                                       reverse=True)
         
         maximal_groups = {}
         for children_set, parent_list in sorted_children_sets:
-            # Check if this set is a subset of any larger set we've already kept
+            # Check if this set is a proper subset of any larger set we've already kept
+            # If so, skip it because the larger set already covers these domains
             is_subset = False
             for kept_set in maximal_groups.keys():
-                if children_set < kept_set:  # children_set is a proper subset of kept_set
+                if children_set < kept_set:  # Proper subset check
                     is_subset = True
                     break
             
+            # Only keep this group if it's not a subset of a larger group
             if not is_subset:
                 maximal_groups[children_set] = parent_list
         
-        # For each maximal group, pick the MOST specific (longest) parent
+        # PHASE 4: Select the most specific parent for each maximal group
+        # Multiple parents might cover the same children. Example:
+        # - 'example.com' covers {api.example.com, web.example.com}
+        # - 'api.example.com' also covers the same set (if api.example.com is in input)
+        # We want the MOST specific one (longest domain) to avoid over-consolidation
         consolidated_groups = []
         processed_domains = set()
         
         for children_set, parent_list in maximal_groups.items():
-            # Get the most specific parent (the one with most parts)
+            # Select the most specific (longest) parent among candidates
+            # Example: Choose 'api.example.com' over 'example.com' if both cover same children
+            # This prevents over-generalization while still achieving consolidation
             most_specific_parent = max(parent_list, key=lambda x: len(x.split('.')))
             
-            # Get children that are in the original input and not yet processed
-            # Use set to avoid duplicates, then convert to sorted list
+            # Filter children to only those in the original input that haven't been processed yet
+            # This prevents double-counting domains that might appear in multiple groups
             children_in_input = set(c for c in children_set if c in domains and c not in processed_domains)
             
-            # If the parent itself is in the input, add it too
+            # If the selected parent itself is in the input, include it in the children list
+            # This handles cases like: input=['server.com', 'api.server.com'] → parent='server.com'
             if most_specific_parent in domains and most_specific_parent not in processed_domains:
                 children_in_input.add(most_specific_parent)
             
-            # Only consolidate if we have 2+ domains to group
+            # Only create a consolidated group if we have 2+ domains to group together
+            # A single domain doesn't benefit from consolidation
             if len(children_in_input) >= 2:
                 consolidated_groups.append({
                     'parent': most_specific_parent,
                     'children': sorted(list(children_in_input))
                 })
+                # Mark these domains as processed so they don't appear in individual_domains
                 processed_domains.update(children_in_input)
         
-        # Collect individual domains
+        # PHASE 5: Collect remaining individual domains (those without siblings)
+        # These domains don't share a common parent with any other domains
+        # They'll be generated as individual rules (no consolidation possible)
         individual_domains = [d for d in domains if d not in processed_domains]
         
         return {
@@ -829,16 +859,9 @@ class DomainImporter:
     def load_aws_template(self):
         """Load AWS best practices Suricata rules template from website"""
         if self.parent.modified:
-            save_result = self.parent.ask_save_changes()
-            if save_result is False:
-                # User chose not to save, continue with loading
-                pass
-            elif save_result is None:
-                # User cancelled, abort operation
+            if not self.parent.ask_save_changes():
+                # User cancelled or save failed, abort operation
                 return
-            elif save_result is True:
-                # User saved successfully, continue with loading
-                pass
         
         try:
             # Show loading message

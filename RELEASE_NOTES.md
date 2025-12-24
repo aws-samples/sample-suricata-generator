@@ -1,5 +1,278 @@
 # Release Notes
 
+## Version 1.24.3 - December 24, 2025
+
+### AWS Quota Compliance Validation
+- **Network Firewall Quota Enforcement**: Added comprehensive validation to prevent rules that would be rejected by AWS Network Firewall
+  - **Rule Length Validation**: Validates total rule length including expanded variable values against AWS' 8,192 character limit
+    - Expands all variables ($HOME_NET, @ALLOW_LIST, etc.) to their actual values before checking length
+    - Blocks rules exceeding limit with clear error message showing actual expanded length
+    - Warns when approaching limit (7,693-8,192 chars) with remaining character count
+  - **IP Set Reference Limit**: Enforces AWS' 5 IP Set Reference (@variable) limit per rule group
+    - Counts unique @ references across all rules in rule group
+    - Blocks adding rules that would exceed 5 total references
+    - Warns when at limit (5 references) to prevent accidental violations
+    - Smart exclusion logic prevents false positives when modifying existing rules
+  - **Integration Points**: Validation automatically runs when saving/inserting rules via editor panel or dialogs
+- **CloudFormation Template Size Validation**: Added three-tier validation for CloudFormation export to prevent deployment failures
+  - **Hard Limit (1 MB)**: Blocks export of templates exceeding S3 limit with error message and alternatives
+  - **S3 Required (51.2 KB - 1 MB)**: Warns templates require S3 upload before deployment, provides instructions, asks confirmation
+  - **Approaching Limit (45-51.2 KB)**: Info warning when getting close to direct API limit
+  - **Real Limits Tested**: Maximum ~380 rules for direct API, ~7,700 rules with S3, 8,000+ rules blocked
+
+### Technical Implementation
+- **New Validation Methods**: Added `validate_total_rule_length()` and `validate_ip_set_references()` to main application
+- **Export Enhancement**: Enhanced `export_file()` with CloudFormation template size checks
+- **User-Friendly Errors**: All errors provide specific measurements, limits, and actionable solutions
+- **Zero Breaking Changes**: Validations are additive - existing functionality completely preserved
+
+### User Impact
+- **Prevents Deployment Failures**: Catches quota violations before attempting AWS deployment
+- **Clear Guidance**: Error messages explain the issue and provide specific solutions
+- **Improved Confidence**: Users can trust their rules will deploy successfully to AWS
+- **Terraform Recommendation**: Large rule sets automatically guided toward Terraform export (no size limits)
+
+---
+
+## Version 1.24.2 - December 22, 2025
+
+### Bug Fix: AWS Best Practices Template Load
+- **Fixed Cancel Button Behavior**: Corrected bug where clicking "Cancel" on the save changes dialog would still load the AWS template and overwrite unsaved work
+  - **Root Cause**: Incorrect return value handling in `load_aws_template()` method
+  - **Impact**: Users who clicked "Cancel" expecting to abort the operation would lose their unsaved changes
+  - **Solution**: Simplified logic to properly abort template loading when user cancels the save dialog
+  - **User Impact**: Cancel button now works as expected - clicking Cancel preserves current work and aborts the template load operation
+
+---
+
+## Version 1.24.1 - December 21, 2025
+
+### Rules Analysis Engine Bug Fixes (v1.10.1)
+- **Four Critical False Positive Fixes**: Comprehensive bug fix release addressing incorrect conflict detection in multiple scenarios
+  - **Bug Fix 1 - Same-Action Shadowing**: Fixed DROP/REJECT rules incorrectly flagged as "security bypass" when shadowing other DROP/REJECT rules
+    - **Root Cause**: Logic checked `if upper_rule.action in ['pass', 'drop', 'reject']` instead of just checking for 'pass'
+    - **Impact**: False "CRITICAL" warnings for rules with same blocking actions
+    - **Solution**: Changed to `if upper_rule.action == 'pass'` - security bypass only when PASS shadows DROP/REJECT
+    - **Result**: DROP/REJECT shadowing DROP/REJECT now correctly classified as "info" (redundant), not "critical"
+  - **Bug Fix 2 - TLS Version Restriction**: Fixed ssl_version rules incorrectly flagged as conflicting with domain-based rules
+    - **Root Cause**: Analyzer didn't recognize ssl_version makes rules MORE specific (targets old TLS versions only)
+    - **Impact**: Rules blocking old TLS versions incorrectly flagged as conflicting with domain allow-listing
+    - **Example**: `ssl_version:sslv2,sslv3,tls1.0,tls1.1` vs `tls.sni; content:"amazonaws.com"` don't conflict
+    - **Solution**: Added early return in `is_content_equal_or_broader()` when ssl_version present
+    - **Enhanced Detection**: Added ssl_version vs domain detection to `uses_different_detection_mechanisms()`
+  - **Bug Fix 3 - Negated GeoIP Detection**: Fixed negated geoip patterns not recognized as broader than specific countries
+    - **Root Cause**: `has_geographic_specificity()` treated all geoip rules as "different detection"
+    - **Impact**: Broad negated patterns like `geoip:dst,!KH,!CN` not flagged as shadowing specific `geoip:dst,BT`
+    - **Solution**: Enhanced to detect negated vs non-negated and return False (allow conflict detection)
+    - **Country Comparison**: Added regex extraction and set comparison for specific country codes
+  - **Bug Fix 4 - Same-Country GeoIP**: Fixed identical country rules not detected as conflicting
+    - **Root Cause**: Both rules using specific countries returned True (different detection), stopping analysis
+    - **Impact**: `geoip:dst,BT` (DROP) not flagged as shadowing `geoip:dst,BT` (PASS)
+    - **Solution**: Return False when both use specific countries (same detection mechanism)
+    - **Comprehensive Fix**: Check both content and original_options fields for geoip keywords
+
+### Technical Implementation
+- **Modified Methods in rule_analyzer.py**:
+  - `check_rule_conflict()` - Fixed security bypass logic (line ~210)
+  - `is_content_equal_or_broader()` - Added ssl_version early return + geoip comparison logic
+  - `uses_different_detection_mechanisms()` - Added ssl_version, JA3/JA4 vs domain detection
+  - `has_geographic_specificity()` - Enhanced for negated geoip + same-country detection
+
+### User Impact
+- **Eliminated False Positives**: No more incorrect "CRITICAL" warnings for valid rule configurations
+- **Accurate GeoIP Analysis**: Negated and specific country patterns now correctly analyzed
+- **Better ssl_version Handling**: Version-specific rules no longer conflict with domain rules
+- **Cleaner Reports**: Only real conflicts flagged, reducing noise and confusion
+
+---
+
+## Version 1.24.1 - December 21, 2025
+
+### Variable Management Enhancement: Add Common Ports Feature
+- **Pre-Configured Port Variables Library**: New comprehensive library of common port variables categorized for rapid creation
+  - **One-Click Addition**: Add industry-standard port variables with descriptions via "Add Common Ports" button
+  - **Category Organization**: Port variables grouped by service type for easy navigation
+  - **Description Support**: All variables include descriptive text explaining their purpose and included ports
+    - Descriptions display in Variables tab for easy reference
+    - Helps teams understand variable contents without memorizing port numbers
+  - **Conflict Detection**: Warns if variable name already exists before overwriting
+  - **User-Extensible**: Edit `common_ports.json` to add custom port variables without code changes
+  - **Backward Compatible**: Enhanced variable format compatible with existing .var files
+    - Old .var files load seamlessly and auto-upgrade to new format
+    - New description field optional - empty string if not provided
+    - Legacy string format automatically converted to new dictionary format
+
+### Variable Data Structure Enhancement
+- **Description Field**: Variables now support optional description text
+  - Internal format: `{"definition": "[80,443]", "description": "Standard HTTP/HTTPS"}`
+  - Displayed in Variables tab for documentation
+  - Preserved in .var files for persistence
+- **Hybrid Format Support**: File loading handles both legacy and enhanced formats
+  - Legacy format: `{"$WEB_PORTS": "[80,443]"}` (string)
+  - New format: `{"$WEB_PORTS": {"definition": "[80,443]", "description": "..."}}`
+  - Automatic conversion on load, always saves in new format
+
+### User Interface Updates
+- **Add Common Ports Button**: New button in Variables tab between "Add Reference" and "Edit"
+- **Description Column**: New column in Variables tab displays variable descriptions
+- **Enhanced Dialogs**: Variable add/edit dialogs include description textbox
+- **Category Selection**: Common ports dialog shows checkboxes organized by service category
+
+### Technical Implementation
+- **New Data File**: `common_ports.json` with pre-configured port variables
+- **Enhanced File Manager**: Updated variable loading/saving to handle description field
+- **UI Manager Updates**: Enhanced dialogs and table display for description support
+- **Seamless Migration**: Existing workflows unaffected, descriptions optional
+
+### User Impact
+- **Faster Variable Creation**: Select from common port definitions instead of manual entry
+- **Better Documentation**: Descriptions explain variable purpose and included ports
+- **Reduced Errors**: Pre-configured port lists ensure correct port numbers
+- **Team Collaboration**: Descriptions improve understanding across team members
+- **Extensibility**: Custom port variables easily added to common_ports.json
+- **Zero Breaking Changes**: All existing functionality preserved with enhanced capabilities
+
+---
+
+## Version 1.24.0 - December 21, 2025
+
+### Major New Feature: Rule Templates Library
+- **Pre-Built Security Rule Templates**: New comprehensive template library with 14 ready-to-use templates for common security patterns and policy enforcement
+  - **Rapid Rule Generation**: Generate complete, production-ready Suricata rules from templates with minimal input
+  - **Category Organization**: Templates grouped into 6 security categories for easy navigation
+    - **Protocol Enforcement** (5 templates): Force DNS resolver, enforce HTTPS, enforce TLS versions, protocol port usage, block file sharing
+    - **Cloud Security** (1 template): Enforce HTTPS for AWS services
+    - **Threat Protection** (4 templates): Block cryptocurrency mining, block malware C2 ports, block direct-to-IP connections
+    - **Geographic Control** (1 template): GeoIP-based country filtering with 36 countries across 6 regions
+    - **Application Control** (1 template): JA3 TLS fingerprint matching
+    - **Default Deny** (2 templates): Comprehensive egress and ingress default-deny rulesets
+  - **Two Template Types**:
+    - **Policy Templates** (6 templates): One-click rule generation with no configuration needed
+    - **Parameterized Templates** (8 templates): Customizable templates with user input for specific scenarios
+  - **Six Parameter Types**: Flexible configuration options for parameterized templates
+    - **Radio Buttons**: Select one option (e.g., TLS 1.2+ or TLS 1.3+)
+    - **Checkboxes**: Boolean options (e.g., bidirectional enforcement)
+    - **Text Input**: Free-form entry with validation (e.g., JA3 hash)
+    - **Multi-Select Port**: Choose from multiple ports with descriptions
+    - **Multi-Select Protocol**: Select protocols with transport/port metadata display
+    - **Multi-Select Country**: Regional country selection with grouping (Asia, Americas, Africa, Middle East, Europe, Oceania)
+  - **Test Mode Feature**: Universal safety feature for all templates
+    - Convert all generated rule actions to 'alert' for safe testing
+    - Adds [TEST] prefix to rule messages
+    - Validate rule behavior before deploying blocking rules
+  - **Smart Features**:
+    - **Preview Dialog**: Review generated rules before insertion with scrollable preview
+    - **Smart SID Suggestions**: Automatically suggests next available SID (Default Deny templates use 999991-999999 range)
+    - **Variable Auto-Detection**: Templates using variables trigger automatic detection and population in Variables tab
+    - **Atomic Insertion**: All template rules inserted together with all-or-none guarantee
+    - **Undo Support**: Complete undo capability (Ctrl+Z removes all template rules)
+    - **Change Tracking**: Template applications logged in change history when tracking enabled
+  - **Complex Template Support**:
+    - **Conditional Rules**: Templates can generate different rule sets based on parameter selections
+    - **Multi-Rule Generation**: Multi-select parameters generate 1 rule per selection
+    - **Insertion Control**: Default Deny templates automatically insert at end of ruleset
+    - **Regional Grouping**: Country selection organized by geographic region with Select All/None controls
+
+### Access and Usage
+- **Menu Access**: File > Insert Rules From Template
+- **Workflow**: Select Template → Configure Parameters (if needed) → Preview Rules → Apply with SID
+- **Category Filtering**: Browse templates by security function category
+- **Complexity Indicators**: Beginner, Intermediate, or Advanced labels guide template selection
+
+### Template Examples
+
+**Simple Policy Template:**
+```
+Force Route 53 Resolver
+- No parameters required
+- Generates 1 rule blocking direct DNS
+- Use case: Force VPC Route 53 usage
+```
+
+**Parameterized Template:**
+```
+Enforce TLS Version
+- Parameter: Radio (TLS 1.2+ or TLS 1.3+)
+- Generates 1 rule blocking old SSL/TLS versions
+- Use case: Security compliance enforcement
+```
+
+**Complex Multi-Select Template:**
+```
+Geographic Country Control
+- Parameter 1: Radio (Block mode or Allow mode)
+- Parameter 2: Multi-select country (36 countries with regional grouping)
+- Generates 1 rule per selected country
+- Use case: Geographic access control with GeoIP
+```
+
+**Default Deny Template:**
+```
+Default Egress Block Rules
+- No parameters required
+- Generates 7 rules with flowbits coordination
+- Automatically inserts at end of ruleset (SID 999991-999997)
+- Use case: Comprehensive deny-all egress policy
+```
+
+### Technical Implementation
+- **New Module**: `template_manager.py` with TemplateManager class for template loading and rule generation
+- **Template Library**: `rule_templates.json` containing all 14 template definitions with parameters and metadata
+- **UI Integration**: Category-organized template selection dialog with parameter collection and preview
+- **Data-Driven Design**: Templates defined in JSON for easy extension without code changes
+- **Zero Breaking Changes**: All existing functionality preserved - templates are purely additive
+
+### User Impact
+- **Faster Rule Development**: Generate multiple rules in seconds instead of manual creation
+- **Best Practices Built-In**: Templates embody security best practices and common patterns
+- **Reduced Errors**: Pre-validated rule patterns minimize syntax and logic errors
+- **Consistency**: Standardized rule patterns across teams and deployments
+- **Educational**: Learn Suricata rule patterns from working examples
+- **Production Ready**: Test Mode enables safe validation before deploying blocking rules
+- **Time Savings**: Complex rulesets (like Default Deny with 7 coordinated rules) generated instantly
+
+---
+
+## Version 1.23.1 - December 18, 2025
+
+### Flow Tester Critical Bug Fixes (v1.0.4)
+- **Four Critical Flow Testing Bugs Fixed**: Comprehensive bug fix release addressing flow matching logic issues with connectionless protocols, port matching, and application layer validation
+  - **Bug Fix 1 - ICMP/UDP Flow Direction Matching**: Fixed rules with `flow:to_server`/`flow:to_client` not matching connectionless protocols
+    - **Root Cause**: Flow direction keywords incorrectly required `flow_state=='established'`, preventing ICMP/UDP flows (which use `flow_state=='all'`) from matching
+    - **Impact**: ICMP/UDP rules with direction keywords never matched in flow tests, showing incorrect "undetermined" results
+    - **Real-World Example**: `pass icmp $HOME_NET any -> any any (flow:to_server; sid:202501035;)` failed to match ICMP flows
+    - **Solution**: Updated `_flow_state_matches()` to allow `to_server`/`to_client` to match both 'established' and 'all' states
+  - **Bug Fix 2 - Port-Specific Rules Matching ICMP**: Fixed connectionless protocols incorrectly matching rules with specific port numbers
+    - **Root Cause**: When `flow_port="any"` (ICMP doesn't have ports), logic incorrectly returned `True` for any rule port specification
+    - **Impact**: ICMP flows matched rules for ports 53, 1389, [4444,666,3389] even though ICMP doesn't use ports
+    - **Solution**: Updated `_port_matches()` so when `flow_port="any"`, only matches if rule also has `port="any"`
+  - **Bug Fix 3 - Pcre Pattern Validation Missing**: Fixed application layer rules with pcre patterns not being properly validated
+    - **Root Cause**: When rules had both `content:` and `pcre:` keywords, only content was checked, ignoring the pcre regex validation
+    - **Impact**: Rules like (direct-to-IP detection: `content:"."; pcre:"/IP_REGEX/"`) matched any domain with a dot, not just IPs
+    - **Real-World Example**: HTTP flow to "www.example.com" incorrectly matched direct-to-IP detection rule
+    - **Solution**: Enhanced `_extract_keyword_value()` and `_matches_pattern()` to extract and validate pcre patterns (pcre takes precedence)
+  - **Bug Fix 4 - TLD Checking Rules Matching IP Addresses**: Fixed domain TLD validation rules incorrectly matching direct-to-IP connections
+    - **Root Cause**: TLD-checking rules (looking for suspicious domain suffixes like .ru, .cn) applied to IP addresses in http.host/tls.sni
+    - **Impact**: Flow tests with IP addresses in URL field (e.g., "1.2.1.2") incorrectly matched TLD validation rules
+    - **Solution**: Added logic to detect when host/SNI is an IP address and skip TLD-checking rules for those cases
+
+### Technical Implementation
+- **Enhanced Functions**: Modified four core functions in `flow_tester.py`
+  - `_flow_state_matches()` - Fixed flow direction keyword matching for connectionless protocols
+  - `_port_matches()` - Fixed port matching logic for protocols without ports
+  - `_extract_keyword_value()` and `_matches_pattern()` - Added pcre pattern extraction and validation
+  - `_check_application_layer_match()` - Added IP address detection and TLD rule filtering
+- **New Helper Functions**: Added `_is_ip_address()` and `_is_tld_checking_rule()` for enhanced validation
+- **Comprehensive Testing**: Validated against multiple test scenarios (ICMP, HTTP with domain, HTTP with IP, TLS with IP)
+
+### User Impact
+- **Accurate Flow Testing**: Flow tester now correctly predicts how Suricata/AWS Network Firewall will process flows
+- **Proper Protocol Handling**: Connectionless protocols (ICMP, UDP) now match rules correctly without false positives
+- **Application Layer Precision**: HTTP/TLS rules with pcre patterns now validate correctly against provided domains/IPs
+- **Production Ready**: Flow tester behavior matches actual Suricata processing for all tested scenarios
+
+---
+
 ## Version 1.23.1 - December 17, 2025
 
 ### Rules Analysis Engine Enhancement (v1.10.0) - AWS Network Firewall Compliance

@@ -16,6 +16,7 @@ from search_manager import SearchManager
 from ui_manager import UIManager
 from flow_tester import FlowTester
 from rule_filter import RuleFilter
+from template_manager import TemplateManager
 from constants import SuricataConstants
 from version import get_main_version
 from security_validator import security_validator, validate_rule_input, validate_file_operation
@@ -49,6 +50,7 @@ class SuricataRuleGenerator:
         self.search_manager = SearchManager(self)  # Search functionality manager
         self.ui_manager = UIManager(self)  # UI components manager
         self.rule_filter = RuleFilter()  # Rule filtering manager
+        self.template_manager = TemplateManager()  # Template management for rule generation
         
         # Load user configuration
         self.load_config()
@@ -75,49 +77,126 @@ class SuricataRuleGenerator:
         """
         detected_vars = set()
         
-        # Scan all rules for variables (skip comments and blank lines)
+        # PHASE 1: Scan all rules to detect which variables are actually being used
+        # This ensures we only create/maintain variables that are referenced in the ruleset
         for rule in self.rules:
+            # Skip non-rule lines (comments and blank lines don't have network/port fields)
             if getattr(rule, 'is_comment', False) or getattr(rule, 'is_blank', False):
                 continue
             
-            # Check source and destination networks for variable references
+            # Check network fields for variable references ($HOME_NET, @ALLOW_LIST, etc.)
             if rule.src_net.startswith(('$', '@')):
                 detected_vars.add(rule.src_net)
             if rule.dst_net.startswith(('$', '@')):
                 detected_vars.add(rule.dst_net)
             
-            # Check source and destination ports for variable references
+            # Check port fields for variable references ($WEB_PORTS, etc.)
+            # Note: @ variables not allowed for ports per AWS Network Firewall requirements
             if rule.src_port.startswith(('$', '@')):
                 detected_vars.add(rule.src_port)
             if rule.dst_port.startswith(('$', '@')):
                 detected_vars.add(rule.dst_port)
         
-        # Remove $EXTERNAL_NET as it's implicitly defined by AWS Network Firewall
-        detected_vars.discard('$EXTERNAL_NET')
+        # Keep $EXTERNAL_NET in detected_vars if it's used, so we can define it properly
+        # detected_vars.discard('$EXTERNAL_NET')  # Don't discard - we'll handle it below
         
-        # Remove variables that are no longer used in any rules AND have no definition
-        # (Keep variables with explicit definitions even if not currently used)
-        # Create a copy of the keys to iterate over since we'll be modifying the dict
-        current_vars = list(self.variables.keys())
+        # PHASE 2: Clean up unused variables (but preserve variables with definitions)
+        # Remove variables that are:
+        # 1. Not used in any rules AND
+        # 2. Have no definition (empty or whitespace only)
+        # Keep variables that have definitions even if not currently used (user may add them soon)
+        # Always keep $EXTERNAL_NET and $HOME_NET (core variables)
+        current_vars = list(self.variables.keys())  # Copy keys since we're modifying dict
         for var in current_vars:
-            if var not in detected_vars and var != '$EXTERNAL_NET':
-                # Only remove if the variable has no definition (is empty or whitespace)
-                if not self.variables[var].strip():
+            if var not in detected_vars and var not in ['$EXTERNAL_NET', '$HOME_NET']:
+                # Extract definition (handle both new dict format and legacy string format)
+                var_def = self.variables[var].get("definition", "") if isinstance(self.variables[var], dict) else self.variables[var]
+                if not var_def.strip():
+                    # Variable is unused and has no definition - safe to remove
                     del self.variables[var]
-                # If variable has a definition, keep it even if not currently used
+                # If variable has a definition, keep it even if not currently used in rules
         
-        # Add detected variables to our variables dict with sensible defaults
+        # PHASE 3: Create new variables with sensible defaults
+        # For each detected variable that doesn't exist yet, create it with appropriate defaults
         for var in detected_vars:
             if var not in self.variables:
                 if var == '$HOME_NET':
-                    # Default to RFC1918 private address space (brackets required for multiple CIDRs)
-                    self.variables[var] = "[10.0.0.0/8,172.16.0.0/12,192.168.0.0/16]"
+                    # Default to RFC1918 private address space
+                    # AWS Network Firewall requires brackets for multiple CIDRs
+                    self.variables[var] = {
+                        "definition": "[10.0.0.0/8,172.16.0.0/12,192.168.0.0/16]",
+                        "description": ""
+                    }
+                elif var == '$EXTERNAL_NET':
+                    # Will be auto-defined in Phase 4 based on $HOME_NET
+                    # This ensures $EXTERNAL_NET is always the inverse of $HOME_NET
+                    pass
                 else:
-                    # Leave empty for user to define
-                    self.variables[var] = ""
+                    # Unknown variable - create with empty definition for user to fill in
+                    self.variables[var] = {
+                        "definition": "",
+                        "description": ""
+                    }
+        
+        # PHASE 4: Auto-define $EXTERNAL_NET as the inverse of $HOME_NET
+        # AWS Network Firewall best practice: $EXTERNAL_NET should be the negation of $HOME_NET
+        # This prevents policy conflicts where rules for $HOME_NET and $EXTERNAL_NET overlap
+        # Example: If $HOME_NET=[10.0.0.0/8,172.16.0.0/12], then $EXTERNAL_NET=[!10.0.0.0/8,!172.16.0.0/12]
+        if '$HOME_NET' in self.variables:
+            # Extract $HOME_NET definition (handle both new dict format and legacy string format)
+            home_net_data = self.variables['$HOME_NET']
+            if isinstance(home_net_data, dict):
+                home_net_def = home_net_data.get("definition", "")
+            else:
+                home_net_def = home_net_data
+            
+            if home_net_def.strip():
+                # Generate $EXTERNAL_NET as negation of $HOME_NET using helper method
+                external_net_def = self._negate_cidr_list(home_net_def)
+                self.variables['$EXTERNAL_NET'] = {
+                    "definition": external_net_def,
+                    "description": "Auto-defined as negation of $HOME_NET"
+                }
         
         # Refresh variables table display
         self.refresh_variables_table()
+    
+    def _negate_cidr_list(self, cidr_list: str) -> str:
+        """Negate a CIDR list to create the inverse definition
+        
+        Converts $HOME_NET CIDRs to their negation for $EXTERNAL_NET.
+        Examples:
+        - "10.0.0.0/8" -> "!10.0.0.0/8"
+        - "[10.0.0.0/8,172.16.0.0/12]" -> "[!10.0.0.0/8,!172.16.0.0/12]"
+        
+        Args:
+            cidr_list: CIDR specification string
+            
+        Returns:
+            Negated CIDR specification string
+        """
+        cidr_list = cidr_list.strip()
+        
+        # Handle bracketed lists
+        if cidr_list.startswith('[') and cidr_list.endswith(']'):
+            # Extract inner content
+            inner_content = cidr_list[1:-1]
+            # Split by comma and negate each CIDR
+            cidrs = [cidr.strip() for cidr in inner_content.split(',')]
+            negated_cidrs = []
+            for cidr in cidrs:
+                if cidr and not cidr.startswith('!'):
+                    negated_cidrs.append(f'!{cidr}')
+                else:
+                    # Already negated or empty, keep as is
+                    negated_cidrs.append(cidr)
+            return f"[{','.join(negated_cidrs)}]"
+        else:
+            # Single CIDR - just prepend with !
+            if not cidr_list.startswith('!'):
+                return f'!{cidr_list}'
+            else:
+                return cidr_list
     
     def refresh_variables_table(self):
         """Refresh the variables table display"""
@@ -132,8 +211,17 @@ class SuricataRuleGenerator:
         variable_usage = self.file_manager.analyze_variable_usage(self.rules)
         
         # Add variables to table with usage-based type detection
-        for var, definition in sorted(self.variables.items()):
+        for var, var_data in sorted(self.variables.items()):
             var_type = self.file_manager.get_variable_type_from_usage(var, variable_usage)
+            
+            # Extract definition and description from new dict format (with backward compatibility)
+            if isinstance(var_data, dict):
+                definition = var_data.get("definition", "")
+                description = var_data.get("description", "")
+            else:
+                # Legacy format: string value (backward compatibility)
+                definition = var_data
+                description = ""
             
             # If variable has a definition but shows as "IP Set", check if it's actually a port definition
             if var_type == "IP Set" and definition and var.startswith('$'):
@@ -142,11 +230,17 @@ class SuricataRuleGenerator:
                     var_type = "Port Set"
             
             if var == '$EXTERNAL_NET':
-                # Grey out $EXTERNAL_NET and show it's auto-defined
-                display_definition = "(auto-defined by AWS Network Firewall)"
-                item = self.variables_tree.insert("", tk.END, values=(var, var_type, display_definition), tags=("external_net",))
+                # Show actual definition if auto-generated, otherwise show as managed by AWS
+                if definition.strip():
+                    # We have an auto-generated definition - show it with grey formatting
+                    item = self.variables_tree.insert("", tk.END, values=(var, var_type, definition, description), tags=("external_net",))
+                else:
+                    # No definition - show as managed by AWS
+                    display_definition = "(auto-defined by AWS Network Firewall)"
+                    auto_description = "Automatically managed by AWS"
+                    item = self.variables_tree.insert("", tk.END, values=(var, var_type, display_definition, auto_description), tags=("external_net",))
             else:
-                item = self.variables_tree.insert("", tk.END, values=(var, var_type, definition))
+                item = self.variables_tree.insert("", tk.END, values=(var, var_type, definition, description))
     
     def get_variable_type(self, var_name):
         """Determine variable type based on usage context"""
@@ -409,7 +503,19 @@ class SuricataRuleGenerator:
             stats['sid_range']['max'] = max(sids)
         
         # Count undefined variables (exclude $EXTERNAL_NET as it's implicitly defined by AWS Network Firewall)
-        undefined_vars = [var for var in used_vars if var not in self.variables or not self.variables[var].strip()]
+        undefined_vars = []
+        for var in used_vars:
+            if var not in self.variables:
+                undefined_vars.append(var)
+            else:
+                # Handle both old string format and new dict format for backward compatibility
+                var_data = self.variables[var]
+                if isinstance(var_data, dict):
+                    var_def = var_data.get("definition", "")
+                else:
+                    var_def = var_data
+                if not var_def.strip():
+                    undefined_vars.append(var)
         undefined_vars = [var for var in undefined_vars if var != '$EXTERNAL_NET']
         stats['undefined_vars'] = len(undefined_vars)
         
@@ -793,6 +899,11 @@ class SuricataRuleGenerator:
             messagebox.showerror("Error", "Could not determine rule position.")
             return
         
+        # Bounds check
+        if rule_index < 0 or rule_index >= len(self.rules):
+            messagebox.showerror("Error", f"Invalid rule position: {rule_index + 1}")
+            return
+        
         if rule_index == 0:
             messagebox.showinfo("Info", "Rule is already at the top.")
             return
@@ -872,6 +983,139 @@ class SuricataRuleGenerator:
                 continue
             if i != exclude_index and rule.sid == sid:
                 return False
+        return True
+    
+    def validate_total_rule_length(self, rule: SuricataRule) -> bool:
+        """Validate total rule length including expanded variables (AWS limit: 8,192 chars)
+        
+        AWS Network Firewall has a hard limit of 8,192 characters per Suricata rule,
+        INCLUDING the expanded variable values. This validation expands all variables
+        and checks the total length.
+        
+        Args:
+            rule: SuricataRule object to validate
+            
+        Returns:
+            bool: True if rule length is valid, False otherwise
+        """
+        # Get rule string
+        rule_string = rule.to_string()
+        
+        # Expand all variables to their actual values
+        for var_name, var_data in self.variables.items():
+            if isinstance(var_data, dict):
+                definition = var_data.get("definition", "")
+            else:
+                definition = var_data
+            
+            # Replace variable with its definition
+            if definition:
+                rule_string = rule_string.replace(var_name, definition)
+        
+        # Check total length
+        total_length = len(rule_string)
+        
+        if total_length > 8192:
+            messagebox.showerror(
+                "AWS Network Firewall Quota Violation",
+                f"Rule length exceeds AWS Network Firewall limit!\n\n"
+                f"Total length (with variables expanded): {total_length} characters\n"
+                f"AWS limit: 8,192 characters\n\n"
+                f"Please reduce the rule length by:\n"
+                f"• Shortening the message text\n"
+                f"• Reducing content keywords\n"
+                f"• Simplifying variable definitions\n"
+                f"• Using shorter variable names"
+            )
+            return False
+        
+        # Warn if approaching limit (within 500 characters)
+        if total_length > 7692:
+            messagebox.showwarning(
+                "Rule Length Warning",
+                f"Rule length is approaching AWS Network Firewall limit!\n\n"
+                f"Current length: {total_length} characters\n"
+                f"AWS limit: 8,192 characters\n"
+                f"Remaining: {8192 - total_length} characters\n\n"
+                f"Consider reducing rule complexity to stay within limits."
+            )
+        
+        return True
+    
+    def validate_ip_set_references(self, new_rule: Optional[SuricataRule] = None, 
+                                   exclude_index: int = -1) -> bool:
+        """Validate total IP Set References don't exceed 5 (AWS limit)
+        
+        AWS Network Firewall allows maximum 5 IP Set References (@ variables)
+        per rule group. This validation counts existing references and checks
+        if adding/modifying a rule would exceed this limit.
+        
+        Args:
+            new_rule: Optional new rule being added/modified
+            exclude_index: Index of rule being modified (to exclude from count)
+            
+        Returns:
+            bool: True if IP Set Reference count is valid, False otherwise
+        """
+        # Collect all IP Set References (@ variables) from current rules
+        reference_sets = set()
+        
+        for i, rule in enumerate(self.rules):
+            # Skip comment and blank rules
+            if getattr(rule, 'is_comment', False) or getattr(rule, 'is_blank', False):
+                continue
+            
+            # Skip the rule being modified
+            if i == exclude_index:
+                continue
+            
+            # Check source network
+            if rule.src_net.startswith('@'):
+                reference_sets.add(rule.src_net)
+            
+            # Check destination network
+            if rule.dst_net.startswith('@'):
+                reference_sets.add(rule.dst_net)
+        
+        # If we're adding/modifying a rule, include its references
+        if new_rule:
+            if new_rule.src_net.startswith('@'):
+                reference_sets.add(new_rule.src_net)
+            if new_rule.dst_net.startswith('@'):
+                reference_sets.add(new_rule.dst_net)
+        
+        # Check if we exceed the limit
+        total_references = len(reference_sets)
+        
+        if total_references > 5:
+            # Build list of references for error message
+            ref_list = '\n'.join([f"  • {ref}" for ref in sorted(reference_sets)])
+            
+            messagebox.showerror(
+                "AWS Network Firewall Quota Violation",
+                f"IP Set References exceed AWS Network Firewall limit!\n\n"
+                f"Total IP Set References: {total_references}\n"
+                f"AWS limit: 5 per rule group\n\n"
+                f"Current references:\n{ref_list}\n\n"
+                f"To fix this issue:\n"
+                f"• Consolidate multiple IP sets into fewer sets\n"
+                f"• Use $ variables instead of @ references where possible\n"
+                f"• Remove unused IP Set References from rules"
+            )
+            return False
+        
+        # Warn if at limit (5 references)
+        if total_references == 5:
+            ref_list = '\n'.join([f"  • {ref}" for ref in sorted(reference_sets)])
+            messagebox.showwarning(
+                "IP Set Reference Limit Reached",
+                f"You have reached the AWS Network Firewall limit!\n\n"
+                f"Total IP Set References: 5 (at maximum)\n\n"
+                f"Current references:\n{ref_list}\n\n"
+                f"Cannot add more IP Set References (@) without\n"
+                f"removing or consolidating existing ones."
+            )
+        
         return True
     
     def validate_network_field(self, value: str, field_name: str) -> bool:
@@ -1105,7 +1349,7 @@ class SuricataRuleGenerator:
             protocol=default_protocol,
             src_net="$HOME_NET",
             src_port="any",
-            dst_net="$EXTERNAL_NET",
+            dst_net="any",
             dst_port="any",
             message="",
             content=default_content,
@@ -1864,6 +2108,59 @@ class SuricataRuleGenerator:
                 content = self.file_manager.generate_terraform_template(self.rules, self.variables)
             else:  # cloudformation
                 content = self.file_manager.generate_cloudformation_template(self.rules, self.variables)
+                
+                # AWS CloudFormation Quota Validation (Priority 1 & 2)
+                # Validate CloudFormation template size against AWS limits
+                template_size = len(content.encode('utf-8'))
+                rule_count = len([r for r in self.rules if not getattr(r, 'is_comment', False) 
+                                 and not getattr(r, 'is_blank', False)])
+                
+                # Check against 1 MB S3 limit (hard limit)
+                if template_size > 1048576:  # 1 MB
+                    messagebox.showerror(
+                        "CloudFormation Template Too Large",
+                        f"CloudFormation template size: {template_size:,} bytes ({template_size/1024/1024:.2f} MB)\n"
+                        f"AWS S3 limit: 1,048,576 bytes (1 MB)\n\n"
+                        f"Your template with {rule_count} rules exceeds the maximum "
+                        f"CloudFormation template size.\n\n"
+                        f"This template cannot be deployed to AWS.\n\n"
+                        f"Solutions:\n"
+                        f"• Reduce rule count (currently {rule_count} rules)\n"
+                        f"• Use Terraform export instead (no size limits)\n"
+                        f"• Split rules into multiple rule groups"
+                    )
+                    return
+                
+                # Check against 51.2 KB direct API limit (requires S3)
+                elif template_size > 51200:  # 51.2 KB
+                    response = messagebox.askyesno(
+                        "CloudFormation Template Requires S3",
+                        f"CloudFormation template size: {template_size:,} bytes ({template_size/1024:.1f} KB)\n"
+                        f"Direct API limit: 51,200 bytes (51.2 KB)\n\n"
+                        f"⚠️ This template is too large for direct API deployment.\n"
+                        f"You MUST upload it to S3 before deploying.\n\n"
+                        f"Deployment steps:\n"
+                        f"1. Upload template to S3 bucket\n"
+                        f"2. Deploy using S3 URL:\n"
+                        f"   aws cloudformation create-stack --template-url s3://...\n\n"
+                        f"S3 limit: 1,048,576 bytes (1 MB)\n"
+                        f"Your template: {template_size:,} bytes ({(template_size/1048576)*100:.1f}% of S3 limit)\n\n"
+                        f"Continue with export?\n"
+                        f"(Template will be saved but requires S3 upload before deployment)"
+                    )
+                    if not response:
+                        return
+                
+                # Warn if approaching 51.2 KB limit but still safe for direct API
+                elif template_size > 45000:  # Within 6 KB of limit
+                    messagebox.showwarning(
+                        "CloudFormation Template Approaching Size Limit",
+                        f"CloudFormation template size: {template_size:,} bytes ({template_size/1024:.1f} KB)\n"
+                        f"Direct API limit: 51,200 bytes (51.2 KB)\n"
+                        f"Remaining: {51200 - template_size:,} bytes\n\n"
+                        f"Your template is approaching the direct API size limit.\n"
+                        f"Consider using Terraform export for larger rule sets."
+                    )
             
             try:
                 # Validate directory permissions before writing
@@ -2212,6 +2509,102 @@ class SuricataRuleGenerator:
         
         rule = self.rules[self.selected_rule_index]
         
+        # Handle blank lines - replace with new rule
+        if getattr(rule, 'is_blank', False):
+            # Blank line selected - replace it with a new rule
+            try:
+                # Validate rule inputs for security
+                try:
+                    validate_rule_input(
+                        message=self.message_var.get(),
+                        content=self.content_var.get()
+                    )
+                except ValueError as e:
+                    messagebox.showerror("Security Validation Error", str(e))
+                    return
+                
+                # Validate SID
+                sid_str = self.sid_var.get().strip()
+                if not sid_str:
+                    messagebox.showerror("Error", "SID is required.")
+                    return
+                
+                sid = int(sid_str)
+                if not (SuricataConstants.SID_MIN <= sid <= SuricataConstants.SID_MAX):
+                    messagebox.showerror("Error", f"SID must be between {SuricataConstants.SID_MIN} and {SuricataConstants.SID_MAX}.")
+                    return
+                
+                # Validate network fields
+                if not self.validate_network_field(self.src_net_var.get(), "Source Network"):
+                    return
+                if not self.validate_network_field(self.dst_net_var.get(), "Dest Network"):
+                    return
+                
+                # Validate port fields
+                if not self.validate_port_field(self.src_port_var.get(), "Source Port"):
+                    return
+                if not self.validate_port_field(self.dst_port_var.get(), "Dest Port"):
+                    return
+                
+                # Create new rule from editor fields
+                options_parts = []
+                if self.message_var.get():
+                    options_parts.append(f'msg:"{self.message_var.get()}"')
+                if self.content_var.get():
+                    content_cleaned = self.content_var.get().rstrip(';')
+                    options_parts.append(content_cleaned)
+                options_parts.append(f'sid:{sid}')
+                options_parts.append(f'rev:1')
+                original_options = '; '.join(options_parts)
+                
+                new_rule = SuricataRule(
+                    action=self.action_var.get(),
+                    protocol=self.protocol_var.get(),
+                    src_net=self.src_net_var.get(),
+                    src_port=self.src_port_var.get(),
+                    dst_net=self.dst_net_var.get(),
+                    dst_port=self.dst_port_var.get(),
+                    message=self.message_var.get(),
+                    content=self.content_var.get(),
+                    sid=sid,
+                    direction=self.direction_var.get(),
+                    original_options=original_options
+                )
+                
+                # AWS Network Firewall Quota Validation (Priority 1 & 2)
+                # Validate total rule length with variable expansion
+                if not self.validate_total_rule_length(new_rule):
+                    return
+                
+                # Validate IP Set References don't exceed 5
+                if not self.validate_ip_set_references(new_rule, exclude_index=self.selected_rule_index):
+                    return
+                
+                # Save state for undo
+                self.save_undo_state()
+                
+                # Add history entry
+                rule_details = {
+                    'line': self.selected_rule_index + 1, 
+                    'rule_text': new_rule.to_string()
+                }
+                self.add_history_entry('rule_added', rule_details)
+                
+                # Replace the blank line with the new rule
+                self.rules[self.selected_rule_index] = new_rule
+                
+                # Refresh and auto-detect variables
+                self.refresh_table()
+                self.modified = True
+                self.auto_detect_variables()
+                self.update_status_bar()
+                
+                messagebox.showinfo("Success", f"Rule added at line {updated_line_num} successfully.")
+                
+            except ValueError:
+                messagebox.showerror("Error", "SID must be a valid number.")
+            return
+        
         if getattr(rule, 'is_comment', False):
             # Validate comment text for security
             try:
@@ -2371,6 +2764,15 @@ class SuricataRuleGenerator:
                     original_options=new_original_options,
                     rev=new_rev
                 )
+                
+                # AWS Network Firewall Quota Validation (Priority 1 & 2)
+                # Validate total rule length with variable expansion
+                if not self.validate_total_rule_length(updated_rule):
+                    return
+                
+                # Validate IP Set References don't exceed 5
+                if not self.validate_ip_set_references(updated_rule, exclude_index=self.selected_rule_index):
+                    return
                 
                 # Save state for undo
                 self.save_undo_state()
@@ -2607,6 +3009,15 @@ class SuricataRuleGenerator:
                 direction=self.direction_var.get(),
                 original_options=original_options
             )
+            
+            # AWS Network Firewall Quota Validation (Priority 1 & 2)
+            # Validate total rule length with variable expansion
+            if not self.validate_total_rule_length(new_rule):
+                return
+            
+            # Validate IP Set References don't exceed 5
+            if not self.validate_ip_set_references(new_rule):
+                return
             
             # Save state for undo
             self.save_undo_state()
@@ -3096,7 +3507,7 @@ class SuricataRuleGenerator:
         start_frame = ttk.Frame(options_frame)
         start_frame.pack(fill=tk.X, padx=10, pady=5)
         ttk.Label(start_frame, text="Starting SID:").pack(side=tk.LEFT)
-        start_var = tk.StringVar(value="1000")
+        start_var = tk.StringVar(value="100")
         start_entry = ttk.Entry(start_frame, textvariable=start_var, width=10)
         start_entry.pack(side=tk.LEFT, padx=(10, 0))
         
@@ -3997,8 +4408,15 @@ class SuricataRuleGenerator:
         # Use variables from Variables tab, or get from user if none defined
         variables = dict(self.variables)  # Copy current variables
         
-        # Check if we have undefined variables
-        undefined_vars = [var for var, definition in variables.items() if not definition.strip()]
+        # Check if we have undefined variables (handle both dict and string formats)
+        undefined_vars = []
+        for var, var_data in variables.items():
+            if isinstance(var_data, dict):
+                definition = var_data.get("definition", "")
+            else:
+                definition = var_data
+            if not definition.strip():
+                undefined_vars.append(var)
         
         if undefined_vars:
             # Show dialog to define missing variables
@@ -4260,6 +4678,22 @@ class SuricataRuleGenerator:
     
 
     
+    def find_first_rule_position(self) -> int:
+        """Find the position of the first actual rule (after comments and blank lines)
+        
+        Returns:
+            int: Index of first rule position (0-based)
+        """
+        for i, rule in enumerate(self.rules):
+            # Skip comments and blank lines
+            if getattr(rule, 'is_comment', False) or getattr(rule, 'is_blank', False):
+                continue
+            # Found first actual rule
+            return i
+        
+        # No rules found, insert at beginning
+        return 0
+    
     def deselect_item(self, item):
         """Deselect an item and update UI state"""
         self.tree.selection_remove(item)
@@ -4269,6 +4703,1121 @@ class SuricataRuleGenerator:
 
     
     
+    
+    def show_template_dialog(self):
+        """Show template selection dialog for inserting rules from templates"""
+        # Check if template file exists and templates loaded
+        if not self.template_manager.templates:
+            messagebox.showwarning("Templates Unavailable", 
+                "No templates found. Please ensure rule_templates.json exists in the program directory.")
+            return
+        
+        # Create selection dialog
+        dialog = tk.Toplevel(self.root)
+        dialog.title("Insert Rules From Template")
+        dialog.geometry("800x600")
+        dialog.transient(self.root)
+        dialog.grab_set()
+        dialog.resizable(False, False)
+        
+        # Center the dialog
+        dialog.geometry("+%d+%d" % (self.root.winfo_rootx() + 100, self.root.winfo_rooty() + 50))
+        
+        # Main frame
+        main_frame = ttk.Frame(dialog)
+        main_frame.pack(fill=tk.BOTH, expand=True, padx=15, pady=15)
+        
+        # Title
+        title_label = ttk.Label(main_frame, text="Insert Rules From Template", 
+                               font=("TkDefaultFont", 12, "bold"))
+        title_label.pack(pady=(0, 15))
+        
+        # Category filter
+        category_frame = ttk.Frame(main_frame)
+        category_frame.pack(fill=tk.X, pady=(0, 10))
+        ttk.Label(category_frame, text="Category:").pack(side=tk.LEFT, padx=(0, 5))
+        category_var = tk.StringVar(value="All Categories")
+        category_combo = ttk.Combobox(category_frame, textvariable=category_var,
+                                     state="readonly", width=20)
+        category_combo.pack(side=tk.LEFT)
+        
+        # Get all categories
+        categories = self.template_manager.get_templates_by_category()
+        category_list = ["All Categories"] + sorted(categories.keys())
+        category_combo['values'] = category_list
+        
+        # Template list frame
+        list_frame = ttk.LabelFrame(main_frame, text="Select Template")
+        list_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 15))
+        
+        # Create listbox with scrollbar
+        listbox_frame = ttk.Frame(list_frame)
+        listbox_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+        
+        templates_listbox = tk.Listbox(listbox_frame, font=("TkDefaultFont", 10))
+        scrollbar = ttk.Scrollbar(listbox_frame, orient=tk.VERTICAL, command=templates_listbox.yview)
+        templates_listbox.configure(yscrollcommand=scrollbar.set)
+        
+        templates_listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        
+        # Store template IDs with listbox items
+        template_ids = []
+        
+        def populate_templates(category_filter="All Categories"):
+            """Populate template listbox based on category filter"""
+            templates_listbox.delete(0, tk.END)
+            template_ids.clear()
+            
+            if category_filter == "All Categories":
+                # Show all templates grouped by category
+                for category in sorted(categories.keys()):
+                    # Add category header (non-selectable, just for display)
+                    templates_listbox.insert(tk.END, f"▼ {category}")
+                    templates_listbox.itemconfig(tk.END, {'bg': '#E0E0E0', 'fg': '#424242'})
+                    
+                    # Add templates under this category with icons
+                    for template in sorted(categories[category], key=lambda t: t['name']):
+                        icon = template.get('icon', '')
+                        display_text = f"    {icon} {template['name']}" if icon else f"    {template['name']}"
+                        templates_listbox.insert(tk.END, display_text)
+                        template_ids.append(template['id'])
+            else:
+                # Show only templates in selected category with icons
+                for template in sorted(categories[category_filter], key=lambda t: t['name']):
+                    icon = template.get('icon', '')
+                    display_text = f"{icon} {template['name']}" if icon else template['name']
+                    templates_listbox.insert(tk.END, display_text)
+                    template_ids.append(template['id'])
+        
+        # Initial population
+        populate_templates()
+        
+        # Bind category change to repopulate
+        category_combo.bind('<<ComboboxSelected>>', lambda e: populate_templates(category_var.get()))
+        
+        # Description frame
+        desc_frame = ttk.Frame(main_frame)
+        desc_frame.pack(fill=tk.X, pady=(0, 15))
+        
+        desc_text = tk.Text(desc_frame, height=4, wrap=tk.WORD, font=("TkDefaultFont", 9), 
+                           relief=tk.FLAT, bg='white')
+        desc_text.pack(fill=tk.X)
+        desc_text.insert(tk.END, "Select a template from the list above.")
+        desc_text.config(state=tk.DISABLED)
+        
+        # Update description when selection changes
+        def on_template_select(event):
+            selection = templates_listbox.curselection()
+            if not selection:
+                return
+            
+            selected_index = selection[0]
+            # Check if this is a category header (grey background)
+            try:
+                bg_color = templates_listbox.itemcget(selected_index, 'bg')
+                if bg_color == '#E0E0E0':
+                    # Category header - ignore
+                    return
+            except:
+                pass
+            
+            # Find corresponding template ID
+            # Count actual template items before this selection (skip category headers)
+            template_index = 0
+            for i in range(selected_index + 1):
+                try:
+                    bg = templates_listbox.itemcget(i, 'bg')
+                    if bg != '#E0E0E0':
+                        template_index += 1
+                except:
+                    template_index += 1
+            
+            template_index -= 1  # Adjust for 0-based indexing
+            
+            if 0 <= template_index < len(template_ids):
+                template_id = template_ids[template_index]
+                template = self.template_manager.get_template(template_id)
+                
+                if template:
+                    desc_text.config(state=tk.NORMAL)
+                    desc_text.delete(1.0, tk.END)
+                    # Add icon to description if available
+                    icon = template.get('icon', '')
+                    if icon:
+                        desc_text.insert(tk.END, f"{icon} ")
+                    desc_text.insert(tk.END, f"{template['description']}\n\n")
+                    desc_text.insert(tk.END, f"Category: {template.get('category', 'Uncategorized')} | ")
+                    desc_text.insert(tk.END, f"Complexity: {template.get('complexity', 'N/A').title()}")
+                    desc_text.config(state=tk.DISABLED)
+        
+        templates_listbox.bind('<<ListboxSelect>>', on_template_select)
+        
+        # Buttons
+        button_frame = ttk.Frame(main_frame)
+        button_frame.pack(fill=tk.X)
+        
+        def on_next():
+            """Handle Next button - show template-specific dialog"""
+            selection = templates_listbox.curselection()
+            if not selection:
+                messagebox.showwarning("No Selection", "Please select a template first.")
+                return
+            
+            selected_index = selection[0]
+            # Check if this is a category header
+            try:
+                bg_color = templates_listbox.itemcget(selected_index, 'bg')
+                if bg_color == '#E0E0E0':
+                    messagebox.showwarning("Invalid Selection", "Please select a template, not a category header.")
+                    return
+            except:
+                pass
+            
+            # Find template ID
+            template_index = 0
+            for i in range(selected_index + 1):
+                try:
+                    bg = templates_listbox.itemcget(i, 'bg')
+                    if bg != '#E0E0E0':
+                        template_index += 1
+                except:
+                    template_index += 1
+            template_index -= 1
+            
+            if 0 <= template_index < len(template_ids):
+                template_id = template_ids[template_index]
+                dialog.destroy()
+                self.show_template_application_dialog(template_id)
+        
+        ttk.Button(button_frame, text="Next >", command=on_next).pack(side=tk.RIGHT, padx=(5, 0))
+        ttk.Button(button_frame, text="Cancel", command=dialog.destroy).pack(side=tk.RIGHT)
+    
+    def show_template_application_dialog(self, template_id: str):
+        """Show dialog for applying template with parameter collection
+        
+        Args:
+            template_id: Template identifier
+        """
+        template = self.template_manager.get_template(template_id)
+        if not template:
+            messagebox.showerror("Error", "Template not found.")
+            return
+        
+        # Check if template has parameters
+        has_parameters = bool(template.get('parameters'))
+        
+        if has_parameters:
+            # Show parameter collection dialog first
+            parameters = self.show_template_parameters_dialog(template)
+            if parameters is None:
+                return  # User cancelled
+            # Then show preview/apply dialog
+            self.show_template_preview_dialog(template_id, parameters)
+        else:
+            # Policy template - show preview/apply dialog directly
+            self.show_template_preview_dialog(template_id, {})
+    
+    def show_template_parameters_dialog(self, template):
+        """Show dialog for collecting template parameters
+        
+        Args:
+            template: Template dictionary
+            
+        Returns:
+            Dict with parameter values or None if cancelled
+        """
+        dialog = tk.Toplevel(self.root)
+        # Add icon to dialog title if available
+        icon = template.get('icon', '')
+        dialog_title = f"{icon} {template['name']}" if icon else template['name']
+        dialog.title(dialog_title)
+        dialog.geometry("900x720")
+        dialog.transient(self.root)
+        dialog.grab_set()
+        dialog.resizable(True, True)
+        
+        # Center the dialog
+        dialog.geometry("+%d+%d" % (self.root.winfo_rootx() + 200, self.root.winfo_rooty() + 100))
+        
+        # Main frame
+        main_frame = ttk.Frame(dialog)
+        main_frame.pack(fill=tk.BOTH, expand=True, padx=15, pady=15)
+        
+        # Title with icon
+        title_text = f"{icon} {template['name']}" if icon else template['name']
+        title_label = ttk.Label(main_frame, text=title_text, 
+                               font=("TkDefaultFont", 12, "bold"))
+        title_label.pack(pady=(0, 5))
+        
+        # Description
+        desc_label = ttk.Label(main_frame, text=template['description'], 
+                              font=("TkDefaultFont", 9), wraplength=550)
+        desc_label.pack(pady=(0, 15))
+        
+        # Scrollable parameters frame (increased height for country tabs)
+        canvas = tk.Canvas(main_frame, height=450)
+        scrollbar = ttk.Scrollbar(main_frame, orient=tk.VERTICAL, command=canvas.yview)
+        params_frame = ttk.Frame(canvas)
+        
+        params_frame.bind(
+            "<Configure>",
+            lambda e: canvas.configure(scrollregion=canvas.bbox("all"))
+        )
+        
+        canvas.create_window((0, 0), window=params_frame, anchor="nw")
+        canvas.configure(yscrollcommand=scrollbar.set)
+        
+        canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        
+        # Store parameter widgets
+        param_widgets = {}
+        
+        # Create UI for each parameter
+        for param in template.get('parameters', []):
+            param_type = param['type']
+            param_name = param['name']
+            
+            # Parameter frame
+            param_container = ttk.LabelFrame(params_frame, text=param.get('description', param_name))
+            param_container.pack(fill=tk.X, padx=5, pady=10)
+            
+            if param_type == 'radio':
+                # Radio button parameter
+                var = tk.StringVar(value=param['options'][0]['value'])
+                param_widgets[param_name] = var
+                
+                for option in param['options']:
+                    ttk.Radiobutton(param_container, 
+                                   text=option['label'],
+                                   variable=var,
+                                   value=option['value']).pack(anchor=tk.W, padx=10, pady=2)
+            
+            elif param_type == 'checkbox':
+                # Checkbox parameter
+                var = tk.BooleanVar(value=param.get('default', False))
+                param_widgets[param_name] = var
+                
+                ttk.Checkbutton(param_container,
+                               text=param.get('label', param_name),
+                               variable=var).pack(anchor=tk.W, padx=10, pady=5)
+            
+            elif param_type == 'text_input':
+                # Text input parameter
+                var = tk.StringVar(value='')
+                
+                label_text = param.get('label', param_name)
+                ttk.Label(param_container, text=label_text).pack(anchor=tk.W, padx=10, pady=(5, 2))
+                
+                entry = ttk.Entry(param_container, textvariable=var, width=50)
+                entry.pack(fill=tk.X, padx=10, pady=(0, 5))
+                
+                # Store both var and entry widget for validation
+                param_widgets[param_name] = {'var': var, 'entry': entry}
+                
+                if param.get('placeholder'):
+                    entry.insert(0, param['placeholder'])
+                    entry.config(foreground='grey')
+                    
+                    def on_focus_in(e, entry=entry, ph=param['placeholder']):
+                        if entry.get() == ph:
+                            entry.delete(0, tk.END)
+                            entry.config(foreground='black')
+                    
+                    def on_focus_out(e, entry=entry, ph=param['placeholder']):
+                        if not entry.get():
+                            entry.insert(0, ph)
+                            entry.config(foreground='grey')
+                    
+                    entry.bind('<FocusIn>', on_focus_in)
+                    entry.bind('<FocusOut>', on_focus_out)
+                
+                # Add hint if available
+                if param.get('description'):
+                    ttk.Label(param_container, text=param['description'],
+                             font=("TkDefaultFont", 8), foreground='#666666').pack(anchor=tk.W, padx=10, pady=(0, 5))
+            
+            elif param_type == 'multi_select_port':
+                # Multi-select port parameter
+                port_vars = {}
+                param_widgets[param_name] = port_vars
+                
+                # Add Select All / None buttons
+                button_frame = ttk.Frame(param_container)
+                button_frame.pack(fill=tk.X, padx=10, pady=5)
+                
+                def select_all_ports():
+                    for var in port_vars.values():
+                        var.set(True)
+                
+                def select_none_ports():
+                    for var in port_vars.values():
+                        var.set(False)
+                
+                ttk.Button(button_frame, text="Select All", command=select_all_ports, width=10).pack(side=tk.LEFT, padx=(0, 5))
+                ttk.Button(button_frame, text="None", command=select_none_ports, width=10).pack(side=tk.LEFT)
+                
+                # Create checkboxes for each port
+                for option in param['options']:
+                    var = tk.BooleanVar(value=option.get('default_checked', False))
+                    port_vars[option['value']] = var
+                    
+                    # Format: "DNS (53) - DNS tunneling"
+                    label_text = f"{option['label']}"
+                    if option.get('description'):
+                        label_text += f" - {option['description']}"
+                    
+                    ttk.Checkbutton(param_container, text=label_text, 
+                                   variable=var).pack(anchor=tk.W, padx=10, pady=1)
+            
+            elif param_type == 'multi_select_protocol':
+                # Multi-select protocol parameter
+                protocol_vars = {}
+                param_widgets[param_name] = protocol_vars
+                
+                # Add Select All / None buttons
+                button_frame = ttk.Frame(param_container)
+                button_frame.pack(fill=tk.X, padx=10, pady=5)
+                
+                def select_all_protocols():
+                    for var in protocol_vars.values():
+                        var.set(True)
+                
+                def select_none_protocols():
+                    for var in protocol_vars.values():
+                        var.set(False)
+                
+                ttk.Button(button_frame, text="Select All", command=select_all_protocols, width=10).pack(side=tk.LEFT, padx=(0, 5))
+                ttk.Button(button_frame, text="None", command=select_none_protocols, width=10).pack(side=tk.LEFT)
+                
+                # Create checkboxes for each protocol
+                for option in param['options']:
+                    var = tk.BooleanVar(value=option.get('default_checked', False))
+                    protocol_vars[option['value']] = var
+                    
+                    # Format: "TLS (HTTPS) - TCP/443"
+                    transport = option.get('transport', 'tcp').upper()
+                    port = option.get('port', 'any')
+                    label_text = f"{option['label']} - {transport}/{port}"
+                    if option.get('description'):
+                        label_text += f" ({option['description']})"
+                    
+                    ttk.Checkbutton(param_container, text=label_text, 
+                                   variable=var).pack(anchor=tk.W, padx=10, pady=1)
+            
+            elif param_type == 'multi_select_extension':
+                # Multi-select file extension parameter
+                extension_vars = {}
+                param_widgets[param_name] = extension_vars
+                
+                # Add Select All / None buttons
+                button_frame = ttk.Frame(param_container)
+                button_frame.pack(fill=tk.X, padx=10, pady=5)
+                
+                def select_all_extensions():
+                    for var in extension_vars.values():
+                        var.set(True)
+                
+                def select_none_extensions():
+                    for var in extension_vars.values():
+                        var.set(False)
+                
+                ttk.Button(button_frame, text="Select All", command=select_all_extensions, width=10).pack(side=tk.LEFT, padx=(0, 5))
+                ttk.Button(button_frame, text="None", command=select_none_extensions, width=10).pack(side=tk.LEFT)
+                
+                # Create checkboxes for each extension
+                for option in param['options']:
+                    var = tk.BooleanVar(value=option.get('default_checked', False))
+                    extension_vars[option['value']] = var
+                    
+                    # Format: "Executable (.exe)"
+                    label_text = option['label']
+                    
+                    ttk.Checkbutton(param_container, text=label_text, 
+                                   variable=var).pack(anchor=tk.W, padx=10, pady=1)
+            
+            elif param_type == 'multi_select_method':
+                # Multi-select HTTP method parameter
+                method_vars = {}
+                param_widgets[param_name] = method_vars
+                
+                # Add Select All / None buttons
+                button_frame = ttk.Frame(param_container)
+                button_frame.pack(fill=tk.X, padx=10, pady=5)
+                
+                def select_all_methods():
+                    for var in method_vars.values():
+                        var.set(True)
+                
+                def select_none_methods():
+                    for var in method_vars.values():
+                        var.set(False)
+                
+                ttk.Button(button_frame, text="Select All", command=select_all_methods, width=10).pack(side=tk.LEFT, padx=(0, 5))
+                ttk.Button(button_frame, text="None", command=select_none_methods, width=10).pack(side=tk.LEFT)
+                
+                # Create checkboxes for each method
+                for option in param['options']:
+                    var = tk.BooleanVar(value=option.get('default_checked', False))
+                    method_vars[option['value']] = var
+                    
+                    # Format: "PUT - Upload/modify resources"
+                    label_text = f"{option['label']}"
+                    if option.get('description'):
+                        label_text += f" - {option['description']}"
+                    
+                    ttk.Checkbutton(param_container, text=label_text, 
+                                   variable=var).pack(anchor=tk.W, padx=10, pady=1)
+            
+            elif param_type == 'multi_select_country':
+                # Multi-select country parameter with dropdown and two-panel layout
+                # Region selector frame
+                selector_frame = ttk.Frame(param_container)
+                selector_frame.pack(fill=tk.X, padx=10, pady=5)
+                
+                ttk.Label(selector_frame, text="Region:", font=("TkDefaultFont", 9, "bold")).pack(side=tk.LEFT, padx=(0, 10))
+                
+                # Region dropdown
+                region_var = tk.StringVar()
+                
+                # Group countries by region
+                regions = {}
+                for option in param['options']:
+                    region = option.get('region', 'Other')
+                    if region not in regions:
+                        regions[region] = []
+                    regions[region].append(option)
+                
+                region_list = ['Asia', 'Americas', 'Africa', 'Middle East', 'Europe', 'Oceania']
+                # Only include regions that have countries
+                region_list = [r for r in region_list if r in regions]
+                region_var.set(region_list[0] if region_list else "")
+                
+                region_combo = ttk.Combobox(selector_frame, textvariable=region_var,
+                                           values=region_list, state="readonly", width=20)
+                region_combo.pack(side=tk.LEFT)
+                
+                # Country count label
+                count_label = ttk.Label(selector_frame, text="", font=("TkDefaultFont", 8), foreground="#666666")
+                count_label.pack(side=tk.LEFT, padx=(10, 0))
+                
+                # Two-panel layout
+                panels_frame = ttk.Frame(param_container)
+                panels_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
+                
+                # LEFT PANEL: Countries in selected region
+                left_panel = ttk.LabelFrame(panels_frame, text="Countries in Selected Region")
+                left_panel.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 5))
+                
+                # Scrollable canvas for left panel
+                left_canvas = tk.Canvas(left_panel)
+                left_scrollbar = ttk.Scrollbar(left_panel, orient=tk.VERTICAL, command=left_canvas.yview)
+                left_content = ttk.Frame(left_canvas)
+                
+                left_content.bind(
+                    "<Configure>",
+                    lambda e: left_canvas.configure(scrollregion=left_canvas.bbox("all"))
+                )
+                
+                left_canvas.create_window((0, 0), window=left_content, anchor="nw")
+                left_canvas.configure(yscrollcommand=left_scrollbar.set)
+                
+                left_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=5, pady=5)
+                left_scrollbar.pack(side=tk.RIGHT, fill=tk.Y, pady=5)
+                
+                # Enable mousewheel scrolling for left panel
+                def on_left_mousewheel(event):
+                    left_canvas.yview_scroll(int(-1*(event.delta/120)), "units")
+                
+                left_canvas.bind("<Enter>", lambda e: left_canvas.bind("<MouseWheel>", on_left_mousewheel))
+                left_canvas.bind("<Leave>", lambda e: left_canvas.unbind("<MouseWheel>"))
+                
+                # RIGHT PANEL: Selected countries summary
+                right_panel = ttk.LabelFrame(panels_frame, text="Selected Countries")
+                right_panel.pack(side=tk.RIGHT, fill=tk.BOTH, expand=False, padx=(5, 0))
+                right_panel.config(width=250)
+                
+                # Selected count label
+                selected_count_label = ttk.Label(right_panel, text="0 selected", 
+                                                font=("TkDefaultFont", 9, "bold"), foreground="#1976D2")
+                selected_count_label.pack(pady=(5, 5))
+                
+                # Scrollable canvas for right panel
+                right_canvas = tk.Canvas(right_panel, width=230)
+                right_scrollbar = ttk.Scrollbar(right_panel, orient=tk.VERTICAL, command=right_canvas.yview)
+                right_content = ttk.Frame(right_canvas)
+                
+                right_content.bind(
+                    "<Configure>",
+                    lambda e: right_canvas.configure(scrollregion=right_canvas.bbox("all"))
+                )
+                
+                right_canvas.create_window((0, 0), window=right_content, anchor="nw")
+                right_canvas.configure(yscrollcommand=right_scrollbar.set)
+                
+                right_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=5, pady=5)
+                right_scrollbar.pack(side=tk.RIGHT, fill=tk.Y, pady=5)
+                
+                # Enable mousewheel scrolling for right panel
+                def on_right_mousewheel(event):
+                    right_canvas.yview_scroll(int(-1*(event.delta/120)), "units")
+                
+                right_canvas.bind("<Enter>", lambda e: right_canvas.bind("<MouseWheel>", on_right_mousewheel))
+                right_canvas.bind("<Leave>", lambda e: right_canvas.unbind("<MouseWheel>"))
+                
+                # Global storage for selections across ALL regions
+                selected_countries = {}  # {code: {'label': ..., 'region': ...}}
+                
+                # Store current region checkboxes
+                current_checkboxes = {}
+                
+                def update_selected_panel():
+                    """Update right panel showing all selected countries"""
+                    # Clear existing items
+                    for widget in right_content.winfo_children():
+                        widget.destroy()
+                    
+                    # Update count
+                    count = len(selected_countries)
+                    selected_count_label.config(text=f"{count} selected")
+                    
+                    if not selected_countries:
+                        ttk.Label(right_content, text="No countries selected",
+                                 font=("TkDefaultFont", 8, "italic"), foreground="#666666").pack(padx=5, pady=20)
+                        return
+                    
+                    # Show each selected country with remove button
+                    for code in sorted(selected_countries.keys()):
+                        country_info = selected_countries[code]
+                        
+                        # Create frame for this country
+                        country_frame = ttk.Frame(right_content)
+                        country_frame.pack(fill=tk.X, padx=5, pady=2)
+                        
+                        # Country label (name and code)
+                        label_text = f"{country_info['label']} ({code})"
+                        country_label = ttk.Label(country_frame, text=label_text, 
+                                                 font=("TkDefaultFont", 8))
+                        country_label.pack(side=tk.LEFT, fill=tk.X, expand=True)
+                        
+                        # Remove button
+                        def make_remove_command(c):
+                            def remove():
+                                del selected_countries[c]
+                                # Update checkbox if in current region
+                                if c in current_checkboxes:
+                                    current_checkboxes[c].set(False)
+                                # Refresh right panel
+                                update_selected_panel()
+                            return remove
+                        
+                        remove_btn = ttk.Button(country_frame, text="✕", width=2,
+                                               command=make_remove_command(code))
+                        remove_btn.pack(side=tk.RIGHT)
+                
+                def populate_region(region_name):
+                    """Populate left panel with countries in selected region"""
+                    # Clear existing checkboxes
+                    for widget in left_content.winfo_children():
+                        widget.destroy()
+                    current_checkboxes.clear()
+                    
+                    # Get countries for this region
+                    region_countries = regions.get(region_name, [])
+                    
+                    # Update count label
+                    count_label.config(text=f"({len(region_countries)} countries)")
+                    
+                    if not region_countries:
+                        ttk.Label(left_content, text="No countries in this region",
+                                 font=("TkDefaultFont", 8, "italic")).pack(padx=10, pady=20)
+                        return
+                    
+                    # Add checkbox for each country
+                    for country in region_countries:
+                        code = country['value']
+                        label = country['label']
+                        
+                        # Check if already selected
+                        is_selected = code in selected_countries
+                        
+                        var = tk.BooleanVar(value=is_selected)
+                        current_checkboxes[code] = var
+                        
+                        # Format: "China (CN)"
+                        label_text = f"{label} ({code})"
+                        
+                        # Checkbox with change handler
+                        def make_checkbox_handler(c, lbl, rgn):
+                            def on_change():
+                                if current_checkboxes[c].get():
+                                    # Add to selected
+                                    selected_countries[c] = {
+                                        'label': lbl,
+                                        'region': rgn
+                                    }
+                                else:
+                                    # Remove from selected
+                                    if c in selected_countries:
+                                        del selected_countries[c]
+                                # Update right panel
+                                update_selected_panel()
+                            return on_change
+                        
+                        cb = ttk.Checkbutton(left_content, text=label_text, variable=var,
+                                            command=make_checkbox_handler(code, label, region_name))
+                        cb.pack(anchor=tk.W, padx=10, pady=1)
+                
+                # Populate initial region
+                if region_list:
+                    populate_region(region_list[0])
+                
+                # Bind region change event
+                region_combo.bind('<<ComboboxSelected>>', lambda e: populate_region(region_var.get()))
+                
+                # Initial update of selected panel
+                update_selected_panel()
+                
+                # Store the selected_countries dict in param_widgets for collection
+                param_widgets[param_name] = selected_countries
+        
+        # Buttons
+        button_frame = ttk.Frame(main_frame)
+        button_frame.pack(fill=tk.X, pady=(10, 0))
+        
+        result = [None]
+        
+        def on_next():
+            """Validate and collect parameters"""
+            params = {}
+            
+            # Validate and collect each parameter
+            for param in template.get('parameters', []):
+                param_name = param['name']
+                param_type = param['type']
+                
+                if param_type == 'radio':
+                    params[param_name] = param_widgets[param_name].get()
+                
+                elif param_type == 'checkbox':
+                    params[param_name] = param_widgets[param_name].get()
+                
+                elif param_type == 'text_input':
+                    entry_widget = param_widgets[param_name]['entry']
+                    value = param_widgets[param_name]['var'].get()
+                    
+                    # Check if text is greyed out (placeholder still shown)
+                    # Only treat as empty if it's the placeholder AND greyed out
+                    if value == param.get('placeholder', '') and entry_widget.cget('foreground') == 'grey':
+                        value = ''
+                    
+                    # Validate required
+                    if param.get('required') and not value:
+                        messagebox.showerror("Validation Error", 
+                            f"{param.get('label', param_name)} is required.")
+                        return
+                    
+                    # Validate pattern if specified
+                    if value and param.get('pattern'):
+                        import re
+                        if not re.match(param['pattern'], value):
+                            error_msg = param.get('validation_message', f"Invalid format for {param_name}")
+                            messagebox.showerror("Validation Error", error_msg)
+                            return
+                    
+                    # Validate length
+                    if value:
+                        if param.get('min_length') and len(value) < param['min_length']:
+                            messagebox.showerror("Validation Error",
+                                f"{param.get('label', param_name)} must be at least {param['min_length']} characters.")
+                            return
+                        if param.get('max_length') and len(value) > param['max_length']:
+                            messagebox.showerror("Validation Error",
+                                f"{param.get('label', param_name)} must be no more than {param['max_length']} characters.")
+                            return
+                    
+                    params[param_name] = value
+                
+                elif param_type == 'multi_select_port':
+                    # Collect selected ports
+                    port_vars = param_widgets[param_name]
+                    selected = [port_val for port_val, var in port_vars.items() if var.get()]
+                    
+                    # Validate minimum selections
+                    min_selections = param.get('min_selections', 1)
+                    if len(selected) < min_selections:
+                        messagebox.showerror("Validation Error",
+                            f"Please select at least {min_selections} port(s).")
+                        return
+                    
+                    params[param_name] = selected
+                
+                elif param_type == 'multi_select_protocol':
+                    # Collect selected protocols
+                    protocol_vars = param_widgets[param_name]
+                    selected = [protocol_val for protocol_val, var in protocol_vars.items() if var.get()]
+                    
+                    # Validate minimum selections
+                    min_selections = param.get('min_selections', 1)
+                    if len(selected) < min_selections:
+                        messagebox.showerror("Validation Error",
+                            f"Please select at least {min_selections} protocol(s).")
+                        return
+                    
+                    params[param_name] = selected
+                
+                elif param_type == 'multi_select_extension':
+                    # Collect selected file extensions
+                    extension_vars = param_widgets[param_name]
+                    selected = [ext_val for ext_val, var in extension_vars.items() if var.get()]
+                    
+                    # Validate minimum selections
+                    min_selections = param.get('min_selections', 1)
+                    if len(selected) < min_selections:
+                        messagebox.showerror("Validation Error",
+                            f"Please select at least {min_selections} file extension(s).")
+                        return
+                    
+                    params[param_name] = selected
+                
+                elif param_type == 'multi_select_method':
+                    # Collect selected HTTP methods
+                    method_vars = param_widgets[param_name]
+                    selected = [method_val for method_val, var in method_vars.items() if var.get()]
+                    
+                    # Validate minimum selections
+                    min_selections = param.get('min_selections', 1)
+                    if len(selected) < min_selections:
+                        messagebox.showerror("Validation Error",
+                            f"Please select at least {min_selections} HTTP method(s).")
+                        return
+                    
+                    params[param_name] = selected
+                
+                elif param_type == 'multi_select_country':
+                    # Collect selected countries from the global selected_countries dict
+                    # (not from country_vars which are just the current region checkboxes)
+                    selected = list(param_widgets[param_name].keys())
+                    
+                    # Validate minimum selections
+                    min_selections = param.get('min_selections', 1)
+                    if len(selected) < min_selections:
+                        messagebox.showerror("Validation Error",
+                            f"Please select at least {min_selections} country/countries.")
+                        return
+                    
+                    params[param_name] = selected
+            
+            result[0] = params
+            dialog.destroy()
+        
+        ttk.Button(button_frame, text="Next >", command=on_next).pack(side=tk.RIGHT, padx=(5, 0))
+        ttk.Button(button_frame, text="Cancel", command=dialog.destroy).pack(side=tk.RIGHT)
+        
+        dialog.wait_window()
+        return result[0]
+    
+    def show_template_preview_dialog(self, template_id: str, parameters: dict):
+        """Show preview and apply dialog for template
+        
+        Args:
+            template_id: Template identifier
+            parameters: Collected parameter values
+        """
+        template = self.template_manager.get_template(template_id)
+        if not template:
+            messagebox.showerror("Error", "Template not found.")
+            return
+        
+        # Create application dialog for policy template
+        dialog = tk.Toplevel(self.root)
+        # Add icon to dialog title if available
+        icon = template.get('icon', '')
+        dialog_title = f"{icon} {template['name']}" if icon else template['name']
+        dialog.title(dialog_title)
+        dialog.geometry("700x500")
+        dialog.transient(self.root)
+        dialog.grab_set()
+        dialog.resizable(False, False)
+        
+        # Center the dialog
+        dialog.geometry("+%d+%d" % (self.root.winfo_rootx() + 150, self.root.winfo_rooty() + 100))
+        
+        # Main frame
+        main_frame = ttk.Frame(dialog)
+        main_frame.pack(fill=tk.BOTH, expand=True, padx=15, pady=15)
+        
+        # Title and description with icon
+        title_text = f"{icon} {template['name']}" if icon else template['name']
+        title_label = ttk.Label(main_frame, text=title_text, 
+                               font=("TkDefaultFont", 12, "bold"))
+        title_label.pack(pady=(0, 5))
+        
+        desc_label = ttk.Label(main_frame, text=template['description'], 
+                              font=("TkDefaultFont", 9), wraplength=650)
+        desc_label.pack(pady=(0, 15))
+        
+        # Test mode checkbox
+        test_mode_var = tk.BooleanVar(value=False)
+        test_mode_frame = ttk.Frame(main_frame)
+        test_mode_frame.pack(fill=tk.X, pady=(0, 15))
+        
+        ttk.Checkbutton(test_mode_frame, text="Test Mode (use 'alert' action for all rules)",
+                       variable=test_mode_var).pack(anchor=tk.W)
+        ttk.Label(test_mode_frame, 
+                 text="When enabled, all generated rules will use 'alert' action instead of their default actions.",
+                 font=("TkDefaultFont", 8), foreground="#666666").pack(anchor=tk.W, padx=(20, 0))
+        
+        # Preview frame
+        preview_frame = ttk.LabelFrame(main_frame, text="Rule Preview")
+        preview_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 15))
+        
+        preview_text = tk.Text(preview_frame, wrap=tk.NONE, font=("Consolas", 9), height=12)
+        preview_scrollbar = ttk.Scrollbar(preview_frame, orient=tk.VERTICAL, command=preview_text.yview)
+        preview_h_scrollbar = ttk.Scrollbar(preview_frame, orient=tk.HORIZONTAL, command=preview_text.xview)
+        preview_text.configure(yscrollcommand=preview_scrollbar.set, xscrollcommand=preview_h_scrollbar.set)
+        
+        preview_text.grid(row=0, column=0, sticky="nsew")
+        preview_scrollbar.grid(row=0, column=1, sticky="ns")
+        preview_h_scrollbar.grid(row=1, column=0, sticky="ew")
+        
+        preview_frame.grid_rowconfigure(0, weight=1)
+        preview_frame.grid_columnconfigure(0, weight=1)
+        
+        # SID entry frame
+        sid_frame = ttk.Frame(main_frame)
+        sid_frame.pack(fill=tk.X, pady=(0, 15))
+        
+        ttk.Label(sid_frame, text="Starting SID:").pack(side=tk.LEFT, padx=(0, 5))
+        
+        # Get suggested starting SID
+        existing_sids = {r.sid for r in self.rules 
+                        if not getattr(r, 'is_comment', False) 
+                        and not getattr(r, 'is_blank', False)}
+        suggested_sid = self.template_manager.get_suggested_starting_sid(template, existing_sids)
+        
+        sid_var = tk.StringVar(value=str(suggested_sid))
+        sid_entry = ttk.Entry(sid_frame, textvariable=sid_var, width=10)
+        sid_entry.pack(side=tk.LEFT, padx=(0, 10))
+        
+        ttk.Label(sid_frame, text=f"(Next available: {suggested_sid})", 
+                 font=("TkDefaultFont", 8), foreground="#666666").pack(side=tk.LEFT)
+        
+        # Update preview function
+        def update_preview():
+            """Update preview based on test mode checkbox"""
+            try:
+                start_sid = int(sid_var.get())
+                test_mode = test_mode_var.get()
+                
+                # Generate preview (use collected parameters)
+                preview = self.template_manager.preview_rules(template_id, parameters, start_sid, test_mode)
+                
+                # Count rules to be generated (consider conditional rules and dual insertion)
+                temp_rules = self.template_manager.apply_template(template_id, parameters, start_sid, test_mode)
+                
+                # Calculate rule count based on result type
+                if isinstance(temp_rules, dict) and 'top_rules' in temp_rules:
+                    # Dual insertion template
+                    rule_count = len(temp_rules['top_rules']) + len(temp_rules['bottom_rules'])
+                else:
+                    # Standard template
+                    rule_count = len(temp_rules)
+                
+                preview_text.config(state=tk.NORMAL)
+                preview_text.delete(1.0, tk.END)
+                preview_text.insert(tk.END, f"This will create {rule_count} rule(s):\n\n")
+                preview_text.insert(tk.END, preview)
+                
+                # Add notes if available
+                if template.get('notes'):
+                    preview_text.insert(tk.END, f"\n\nNotes:\n{template['notes']}")
+                
+                preview_text.config(state=tk.DISABLED)
+            except ValueError:
+                preview_text.config(state=tk.NORMAL)
+                preview_text.delete(1.0, tk.END)
+                preview_text.insert(tk.END, "Invalid starting SID")
+                preview_text.config(state=tk.DISABLED)
+        
+        # Initial preview
+        update_preview()
+        
+        # Bind changes to update preview
+        test_mode_var.trace('w', lambda *args: update_preview())
+        sid_var.trace('w', lambda *args: update_preview())
+        
+        # Buttons
+        button_frame = ttk.Frame(main_frame)
+        button_frame.pack(fill=tk.X)
+        
+        def on_apply():
+            """Apply the template"""
+            try:
+                start_sid = int(sid_var.get())
+                
+                # Validate SID
+                if not (SuricataConstants.SID_MIN <= start_sid <= SuricataConstants.SID_MAX):
+                    messagebox.showerror("Error", 
+                        f"Starting SID must be between {SuricataConstants.SID_MIN} and {SuricataConstants.SID_MAX}.")
+                    return
+                
+                # Generate rules from template (use collected parameters)
+                test_mode = test_mode_var.get()
+                result = self.template_manager.apply_template(template_id, parameters, start_sid, test_mode)
+                
+                if not result:
+                    messagebox.showerror("Error", "Failed to generate rules from template.")
+                    return
+                
+                # Check if this is a dual insertion template
+                if isinstance(result, dict) and 'top_rules' in result:
+                    top_rules = result['top_rules']
+                    bottom_rules = result['bottom_rules']
+                    
+                    if not top_rules and not bottom_rules:
+                        messagebox.showerror("Error", "Failed to generate rules from template.")
+                        return
+                    
+                    # Save undo state BEFORE making changes
+                    self.save_undo_state()
+                    
+                    # Insert top rules at the beginning (after comments/blank lines)
+                    if top_rules:
+                        top_insert_position = self.find_first_rule_position()
+                        
+                        # Insert comment headers
+                        comment1 = SuricataRule()
+                        comment1.is_comment = True
+                        comment1.comment_text = "# Silently allow TCP 3-way handshake to be setup by $HOME_NET clients"
+                        self.rules.insert(top_insert_position, comment1)
+                        
+                        comment2 = SuricataRule()
+                        comment2.is_comment = True
+                        comment2.comment_text = "# Do not move this section, it's important that this be at the top of the entire firewall ruleset to reduce rule conflicts"
+                        self.rules.insert(top_insert_position + 1, comment2)
+                        
+                        # Insert first 2 TCP handshake rules
+                        self.rules.insert(top_insert_position + 2, top_rules[0])
+                        self.rules.insert(top_insert_position + 3, top_rules[1])
+                        
+                        # Add blank line
+                        blank1 = SuricataRule()
+                        blank1.is_blank = True
+                        self.rules.insert(top_insert_position + 4, blank1)
+                        
+                        # Add comment for JA3 rules
+                        comment3 = SuricataRule()
+                        comment3.is_comment = True
+                        comment3.comment_text = "# Silently turn on JA3/S hash logging for all other tls alert rules (like sid:999991)"
+                        self.rules.insert(top_insert_position + 5, comment3)
+                        
+                        # Insert remaining JA3 logging rules (rules 3 and 4)
+                        self.rules.insert(top_insert_position + 6, top_rules[2])
+                        self.rules.insert(top_insert_position + 7, top_rules[3])
+                        
+                        # Add comment indicating where user rules begin
+                        comment4 = SuricataRule()
+                        comment4.is_comment = True
+                        comment4.comment_text = "# ---Insert user rules beginning here---"
+                        self.rules.insert(top_insert_position + 8, comment4)
+                        
+                        # Add blank line after top rules section
+                        blank2 = SuricataRule()
+                        blank2.is_blank = True
+                        self.rules.insert(top_insert_position + 9, blank2)
+                    
+                    # Insert bottom rules at the end
+                    bottom_insert_position = len(self.rules)
+                    for i, rule in enumerate(bottom_rules):
+                        self.rules.insert(bottom_insert_position + i, rule)
+                    
+                    # Add change tracking entry
+                    if self.tracking_enabled:
+                        total_rules = len(top_rules) + len(bottom_rules)
+                        self.add_history_entry('template_applied', {
+                            'template_name': template['name'],
+                            'rule_count': total_rules,
+                            'top_rules_count': len(top_rules),
+                            'bottom_rules_count': len(bottom_rules),
+                            'test_mode': test_mode,
+                            'insertion_type': 'dual'
+                        })
+                    
+                    # Update UI
+                    self.refresh_table()
+                    self.auto_detect_variables()
+                    self.modified = True
+                    self.update_status_bar()
+                    
+                    # Close dialog and show success
+                    dialog.destroy()
+                    
+                    total_rules = len(top_rules) + len(bottom_rules)
+                    rule_text = "rule" if total_rules == 1 else "rules"
+                    test_text = " (Test Mode)" if test_mode else ""
+                    messagebox.showinfo("Template Applied", 
+                        f"Successfully added {total_rules} {rule_text} from template{test_text}.\n\n"
+                        f"• {len(top_rules)} rules inserted at TOP of file\n"
+                        f"• {len(bottom_rules)} rules inserted at BOTTOM of file\n\n"
+                        "Use Ctrl+Z to undo if needed.")
+                else:
+                    # Standard single insertion
+                    template_rules = result
+                    
+                    # Determine insertion point
+                    insertion_point = template.get('insertion_point')
+                    if insertion_point == 'end':
+                        insert_position = len(self.rules)
+                    else:
+                        # Insert at current position or after selected rule
+                        if self.selected_rule_index is not None:
+                            insert_position = self.selected_rule_index + 1
+                        else:
+                            insert_position = len(self.rules)
+                    
+                    # Save undo state BEFORE making changes
+                    self.save_undo_state()
+                    
+                    # Insert rules atomically
+                    for i, rule in enumerate(template_rules):
+                        self.rules.insert(insert_position + i, rule)
+                    
+                    # Add change tracking entry
+                    if self.tracking_enabled:
+                        self.add_history_entry('template_applied', {
+                            'template_name': template['name'],
+                            'rule_count': len(template_rules),
+                            'start_sid': template_rules[0].sid if template_rules else start_sid,
+                            'end_sid': template_rules[-1].sid if template_rules else start_sid,
+                            'test_mode': test_mode,
+                            'insertion_point': insert_position + 1
+                        })
+                    
+                    # Update UI
+                    self.refresh_table()
+                    self.auto_detect_variables()
+                    self.modified = True
+                    self.update_status_bar()
+                    
+                    # Close dialog and show success
+                    dialog.destroy()
+                    
+                    rule_text = "rule" if len(template_rules) == 1 else "rules"
+                    test_text = " (Test Mode)" if test_mode else ""
+                    messagebox.showinfo("Template Applied", 
+                        f"Successfully added {len(template_rules)} {rule_text} from template{test_text}.\n\n"
+                        f"SID range: {template_rules[0].sid} - {template_rules[-1].sid}\n\n"
+                        "Use Ctrl+Z to undo if needed.")
+                
+            except ValueError:
+                messagebox.showerror("Error", "Starting SID must be a valid number.")
+            except Exception as e:
+                messagebox.showerror("Template Error", f"Failed to apply template:\n\n{str(e)}")
+        
+        ttk.Button(button_frame, text="Apply", command=on_apply).pack(side=tk.RIGHT, padx=(5, 0))
+        ttk.Button(button_frame, text="Cancel", command=dialog.destroy).pack(side=tk.RIGHT)
     
     def on_closing(self):
         """Handle application closing"""

@@ -1220,8 +1220,13 @@ class AdvancedEditor:
                                 if sid_match:
                                     used_sids.add(int(sid_match.group(1)))
                             
-                            # Find next available SID starting from 100
-                            next_sid = 100
+                            # Find next available SID (max + 1, like main program)
+                            if used_sids:
+                                next_sid = max(used_sids) + 1
+                            else:
+                                next_sid = 100
+                            
+                            # Safety check to prevent infinite loop
                             while next_sid in used_sids:
                                 next_sid += 1
                                 if next_sid > 999999999:  # Prevent infinite loop

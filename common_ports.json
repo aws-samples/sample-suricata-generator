@@ -1,0 +1,249 @@
+{
+  "version": "1.0.0",
+  "last_updated": "2025-12-21",
+  "description": "Common port definitions for Suricata rule generation",
+  "categories": {
+    "Infrastructure Services": [
+      {
+        "name": "$DNS",
+        "definition": "[53]",
+        "description": "DNS queries"
+      },
+      {
+        "name": "$DHCP",
+        "definition": "[67,68]",
+        "description": "DHCP server and client"
+      },
+      {
+        "name": "$NTP",
+        "definition": "[123]",
+        "description": "Network Time Protocol"
+      },
+      {
+        "name": "$SNMP",
+        "definition": "[161,162]",
+        "description": "SNMP monitoring and traps"
+      },
+      {
+        "name": "$SYSLOG",
+        "definition": "[514]",
+        "description": "Syslog logging"
+      },
+      {
+        "name": "$NFS",
+        "definition": "[111,2049]",
+        "description": "NFS file sharing"
+      },
+      {
+        "name": "$LDAP",
+        "definition": "[389,636]",
+        "description": "LDAP and LDAPS (standalone for non-Windows)"
+      }
+    ],
+    "Windows/Active Directory": [
+      {
+        "name": "$AD",
+        "definition": "[53,88,123,135,389,445,464,636,9389,3268,3269,49152:65535]",
+        "description": "Active Directory services (DNS, Kerberos, LDAP, SMB, RPC, Global Catalog, dynamic ports)"
+      },
+      {
+        "name": "$SMB",
+        "definition": "[139,445]",
+        "description": "NetBIOS and SMB file sharing"
+      },
+      {
+        "name": "$RPC",
+        "definition": "[135]",
+        "description": "RPC Endpoint Mapper"
+      },
+      {
+        "name": "$WINDOWS_MGMT",
+        "definition": "[3389,5985,5986]",
+        "description": "RDP and WinRM"
+      }
+    ],
+    "Web Services": [
+      {
+        "name": "$WEB",
+        "definition": "[80,443]",
+        "description": "Standard HTTP/HTTPS"
+      },
+      {
+        "name": "$WEB_ALT",
+        "definition": "[8080,8443]",
+        "description": "Alternative web ports"
+      },
+      {
+        "name": "$PROXY",
+        "definition": "[3128,8080,8888]",
+        "description": "HTTP proxy servers"
+      }
+    ],
+    "Databases": [
+      {
+        "name": "$SQL_SERVER",
+        "definition": "[1433,1434]",
+        "description": "Microsoft SQL Server"
+      },
+      {
+        "name": "$MYSQL",
+        "definition": "[3306]",
+        "description": "MySQL/MariaDB"
+      },
+      {
+        "name": "$POSTGRES",
+        "definition": "[5432]",
+        "description": "PostgreSQL"
+      },
+      {
+        "name": "$ORACLE",
+        "definition": "[1521,1522]",
+        "description": "Oracle Database"
+      },
+      {
+        "name": "$REDIS",
+        "definition": "[6379]",
+        "description": "Redis cache"
+      },
+      {
+        "name": "$MONGODB",
+        "definition": "[27017,27018,27019]",
+        "description": "MongoDB cluster"
+      },
+      {
+        "name": "$ELASTICSEARCH",
+        "definition": "[9200,9300]",
+        "description": "Elasticsearch HTTP and transport"
+      },
+      {
+        "name": "$CASSANDRA",
+        "definition": "[7000,9042]",
+        "description": "Cassandra storage and CQL"
+      },
+      {
+        "name": "$MEMCACHED",
+        "definition": "[11211]",
+        "description": "Memcached cache"
+      }
+    ],
+    "Email": [
+      {
+        "name": "$SMTP",
+        "definition": "[25,465,587]",
+        "description": "SMTP (plain, TLS, submission)"
+      },
+      {
+        "name": "$IMAP",
+        "definition": "[143,993]",
+        "description": "IMAP and IMAPS"
+      },
+      {
+        "name": "$POP3",
+        "definition": "[110,995]",
+        "description": "POP3 and POP3S"
+      }
+    ],
+    "Security/Threat Detection": [
+      {
+        "name": "$MALWARE_C2_COMMON",
+        "definition": "[1080,4444,5555,6666,7777,8888,9999]",
+        "description": "Common malware C2 ports"
+      },
+      {
+        "name": "$CRYPTO_MINING",
+        "definition": "[3333,4444,5555,8332,8333,9332,9333]",
+        "description": "Cryptocurrency mining"
+      },
+      {
+        "name": "$BRUTE_FORCE_TARGETS",
+        "definition": "[22,23,3389]",
+        "description": "SSH, Telnet, RDP"
+      }
+    ],
+    "VPN": [
+      {
+        "name": "$VPN",
+        "definition": "[500,1194,1701,4500]",
+        "description": "IPsec, OpenVPN, L2TP"
+      }
+    ],
+    "Remote Access": [
+      {
+        "name": "$SSH",
+        "definition": "[22]",
+        "description": "SSH remote access"
+      },
+      {
+        "name": "$TELNET",
+        "definition": "[23]",
+        "description": "Telnet remote access"
+      },
+      {
+        "name": "$FTP",
+        "definition": "[20,21]",
+        "description": "FTP data and control"
+      },
+      {
+        "name": "$TFTP",
+        "definition": "[69]",
+        "description": "Trivial FTP"
+      }
+    ],
+    "Messaging/Queue Systems": [
+      {
+        "name": "$KAFKA",
+        "definition": "[9092]",
+        "description": "Apache Kafka messaging"
+      },
+      {
+        "name": "$RABBITMQ",
+        "definition": "[5672,15672]",
+        "description": "RabbitMQ AMQP and Management"
+      },
+      {
+        "name": "$MQTT",
+        "definition": "[1883,8883]",
+        "description": "MQTT and MQTTS IoT messaging"
+      }
+    ],
+    "DevOps": [
+      {
+        "name": "$GIT",
+        "definition": "[22,443,9418]",
+        "description": "Git SSH, HTTPS, protocol"
+      },
+      {
+        "name": "$DOCKER",
+        "definition": "[2375,2376]",
+        "description": "Docker HTTP/HTTPS"
+      },
+      {
+        "name": "$KUBERNETES",
+        "definition": "[6443,8080,10250,10255]",
+        "description": "Kubernetes API server, kubelet, read-only kubelet"
+      },
+      {
+        "name": "$DOCKER_REGISTRY",
+        "definition": "[5000]",
+        "description": "Docker Registry"
+      }
+    ],
+    "Monitoring/Observability": [
+      {
+        "name": "$PROMETHEUS",
+        "definition": "[9090]",
+        "description": "Prometheus metrics"
+      },
+      {
+        "name": "$GRAFANA",
+        "definition": "[3000]",
+        "description": "Grafana dashboards"
+      },
+      {
+        "name": "$SPLUNK",
+        "definition": "[8000,8089,9997]",
+        "description": "Splunk web, management, and forwarder"
+      }
+    ]
+  }
+}

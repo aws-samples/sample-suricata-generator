@@ -197,9 +197,9 @@ class RuleAnalyzer:
             return None
         
         # Determine conflict severity based on actions
-        if upper_rule.action in ['pass', 'drop', 'reject'] and lower_rule.action in ['drop', 'reject']:
+        if upper_rule.action == 'pass' and lower_rule.action in ['drop', 'reject']:
             severity = 'critical'
-            issue = f"{upper_rule.action.upper()} rule prevents {lower_rule.action.upper()} rule from executing (security bypass)"
+            issue = f"PASS rule prevents {lower_rule.action.upper()} rule from executing (security bypass)"
             suggestion = f"Move line {lower_line} above line {upper_line} to ensure blocking occurs"
         elif upper_rule.action in ['drop', 'reject'] and lower_rule.action == 'pass':
             severity = 'critical'
@@ -641,6 +641,15 @@ class RuleAnalyzer:
         if self.flow_states_are_mutually_exclusive(rule1, rule2):
             return False
         
+        # SECOND: Check if rule1 has ssl_version restriction
+        # ssl_version makes a rule MORE specific (only matches specific TLS versions)
+        # A rule with ssl_version:sslv2,sslv3,tls1.0,tls1.1 is NOT broader than rules without it
+        # It only matches OLD TLS versions, while domain-based rules match ANY TLS version
+        if 'ssl_version:' in content1:
+            # Rule1 has version restriction - it's targeting specific versions, not all TLS
+            # It cannot be broader than rule2
+            return False
+        
         # Check if rule1 has only flow keywords (no actual content matching)
         has_only_flow_keywords1 = self.has_only_flow_keywords(content1)
         has_only_flow_keywords2 = self.has_only_flow_keywords(content2)
@@ -677,6 +686,43 @@ class RuleAnalyzer:
             return False
         if not self.flow_states_overlap(content1, content2):
             return False
+        
+        # GEOIP COMPARISON: Check if both rules use geoip and if one is broader
+        # Negated geoip (e.g., !KH,!CN) is BROADER than specific geoip (e.g., BT)
+        # Check both content and original_options since geoip might be in either
+        full_content1 = content1 + ' ' + (rule1.original_options or '').lower()
+        full_content2 = content2 + ' ' + (rule2.original_options or '').lower()
+        
+        if 'geoip:' in full_content1 and 'geoip:' in full_content2:
+            # Check if rule1 uses negated pattern (broader) and rule2 uses specific countries
+            has_negated_geo1 = ',!' in full_content1 and 'geoip:' in full_content1
+            has_negated_geo2 = ',!' in full_content2 and 'geoip:' in full_content2
+            
+            if has_negated_geo1 and not has_negated_geo2:
+                # Rule1 has negated geoip (blocks all except listed) - BROADER
+                # Rule2 has specific countries - NARROWER
+                # Rule1 IS broader than rule2
+                return True
+            elif not has_negated_geo1 and has_negated_geo2:
+                # Rule1 has specific countries, rule2 has negated pattern
+                # Rule1 is NOT broader
+                return False
+            elif not has_negated_geo1 and not has_negated_geo2:
+                # Both use specific countries (e.g., both have geoip:dst,BT)
+                # Extract country codes to compare
+                geo_match1 = re.search(r'geoip:dst,([A-Z,]+)', full_content1)
+                geo_match2 = re.search(r'geoip:dst,([A-Z,]+)', full_content2)
+                
+                if geo_match1 and geo_match2:
+                    countries1 = set(geo_match1.group(1).split(','))
+                    countries2 = set(geo_match2.group(1).split(','))
+                    
+                    # If rule1's countries completely contain rule2's countries, rule1 is equal/broader
+                    # Example: geoip:dst,BT,CN contains geoip:dst,BT
+                    if countries2.issubset(countries1):
+                        return True
+                    else:
+                        return False
         
         # NEW: Handle endswith patterns for domain matching (critical for TLS SNI and HTTP host shadowing)
         if self.has_endswith_pattern(content1) and self.has_endswith_pattern(content2):
@@ -849,6 +895,26 @@ class RuleAnalyzer:
     
     def uses_different_detection_mechanisms(self, content1: str, content2: str) -> bool:
         """Check if rules use fundamentally different detection mechanisms"""
+        # TLS version-specific detection
+        has_ssl_version1 = 'ssl_version:' in content1
+        has_ssl_version2 = 'ssl_version:' in content2
+        
+        # Domain-based detection (tls.sni or http.host with content)
+        has_domain_detection1 = ('tls.sni' in content1 or 'http.host' in content1) and 'content:' in content1
+        has_domain_detection2 = ('tls.sni' in content2 or 'http.host' in content2) and 'content:' in content2
+        
+        # If one uses ssl_version and the other uses domain detection, they don't conflict
+        # Example: ssl_version:sslv2,sslv3,tls1.0 vs tls.sni with domain content
+        if (has_ssl_version1 and has_domain_detection2) or (has_ssl_version2 and has_domain_detection1):
+            return True
+        
+        # JA3/JA4 fingerprinting vs domain detection
+        has_ja_fingerprint1 = 'ja3.hash' in content1 or 'ja4.hash' in content1
+        has_ja_fingerprint2 = 'ja3.hash' in content2 or 'ja4.hash' in content2
+        
+        if (has_ja_fingerprint1 and has_domain_detection2) or (has_ja_fingerprint2 and has_domain_detection1):
+            return True
+        
         # Application layer keywords for content inspection
         app_layer_keywords = ['http.host', 'tls.sni', 'http.', 'tls.', 'ssl_state', 'ja3', 'ja4']
         
@@ -867,7 +933,11 @@ class RuleAnalyzer:
         return False
     
     def has_geographic_specificity(self, content1: str, content2: str) -> bool:
-        """Check if one rule has geographic specificity and the other is generic"""
+        """Check if one rule has geographic specificity and the other is generic
+        
+        Enhanced to handle negated geoip patterns which are BROADER than specific country rules.
+        Example: geoip:dst,!KH,!CN (all countries except KH/CN) is BROADER than geoip:dst,BT
+        """
         geo_keywords = ['geoip:']
         
         has_geo1 = any(keyword in content1 for keyword in geo_keywords)
@@ -875,6 +945,28 @@ class RuleAnalyzer:
         
         # If one rule has geographic specificity and the other doesn't, they don't conflict
         if (has_geo1 and not has_geo2) or (has_geo2 and not has_geo1):
+            return True
+        
+        # If BOTH rules have geoip, we need to check if they use different detection
+        # Negated geoip (e.g., !KH,!CN) is BROADER and CAN shadow specific geoip (e.g., BT)
+        # So we should NOT filter these out as "different detection mechanisms"
+        if has_geo1 and has_geo2:
+            # Check if either uses negated geoip pattern
+            has_negated_geo1 = 'geoip:' in content1 and ',!' in content1
+            has_negated_geo2 = 'geoip:' in content2 and ',!' in content2
+            
+            # If one uses negated geoip and the other uses specific countries, they CAN conflict
+            # The negated geoip rule is broader and can shadow the specific country rule
+            if (has_negated_geo1 and not has_negated_geo2) or (has_negated_geo2 and not has_negated_geo1):
+                # One rule is broad (negated), one is specific - they CAN conflict
+                return False
+            
+            # If both use specific countries (not negated), they use SAME detection mechanism
+            # Allow comparison to continue to check if countries match
+            if not has_negated_geo1 and not has_negated_geo2:
+                return False
+            
+            # If both use negated patterns, treat as potentially different (complex to analyze)
             return True
         
         return False
@@ -3085,9 +3177,8 @@ class RuleAnalyzer:
             'filesha1:': 'File extraction (filesha1) is not supported by AWS Network Firewall',
             'filesha256:': 'File extraction (filesha256) is not supported by AWS Network Firewall',
             
-            # Thresholding
-            'threshold:': 'Thresholding is not supported by AWS Network Firewall',
-            'detection_filter:': 'Detection filter (thresholding) is not supported by AWS Network Firewall',
+            # Thresholding (threshold keyword only - detection_filter is supported)
+            'threshold:': 'Thresholding (threshold keyword) is not supported by AWS Network Firewall',
         }
         
         # Filter out comments and blank lines

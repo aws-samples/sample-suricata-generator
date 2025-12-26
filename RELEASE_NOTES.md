@@ -1,5 +1,53 @@
 # Release Notes
 
+## Version 1.24.6 - December 25, 2025
+
+### Bug Fix: tkinter Compatibility for MacOS
+- **Fixed tkinter trace() Method Compatibility**: Resolved Python version compatibility issue causing errors on MacOS when using template dialogs
+  - **Root Cause**: Older `.trace('w', callback)` syntax is deprecated in newer Python versions and causes `TclError: bad option "variable"` on MacOS
+  - **Impact**: Mac users encountered errors when opening the template preview dialog, specifically when trace callbacks were registered for Test Mode checkbox and Starting SID field
+  - **Error Message**: `_tkinter.TclError: bad option "variable": must be add, info, or remove`
+  - **Complete Solution**: Updated all 6 `.trace('w', ...)` calls to modern `.trace_add('write', ...)` syntax
+  - **Locations Fixed**:
+    - SID Management dialog: 4 trace callbacks for conflict detection preview
+    - Template Preview dialog: 2 trace callbacks for real-time preview updates
+  - **Compatibility**: Modern syntax works on all Python 3.x versions across Windows, MacOS, and Linux
+
+### Technical Implementation
+- Modified `show_sid_management()` method in `suricata_generator.py`
+  - Updated `start_var.trace()`, `increment_var.trace()`, `scope_var.trace()`, `action_var.trace()` to use `trace_add('write', ...)`
+- Modified `show_template_preview_dialog()` method in `suricata_generator.py`
+  - Updated `test_mode_var.trace()` and `sid_var.trace()` to use `trace_add('write', ...)`
+
+### User Impact
+- **MacOS Functionality Restored**: Mac users can now use template feature without encountering tkinter errors
+- **Cross-Platform Compatibility**: Application now uses modern tkinter API that works reliably across all platforms
+- **Future-Proof**: Ensures compatibility with current and future Python versions
+
+---
+
+## Version 1.24.5 - December 24, 2025
+
+### Bug Fix: MacOS Template Dialog - Complete Fix
+- **Fixed Preview Frame Expansion Issue**: Resolved root cause where Rule Preview area was consuming all available space when dialog was resized on MacOS
+  - **Root Cause**: Preview frame was set to `expand=True`, causing it to grow and push the Starting SID field and buttons below the visible area when window was resized
+  - **Impact**: Even after increasing window height in v1.24.4, Mac users still couldn't see Cancel/Apply buttons because the preview kept expanding
+  - **Complete Solution**: Changed preview frame from `expand=True` to `expand=False` to maintain fixed size
+  - **Technical Details**: Preview frame now maintains its fixed height (12 lines) regardless of window size, ensuring buttons remain visible
+  - **Result**: Starting SID field and Apply/Cancel buttons now remain visible and accessible on MacOS at all window sizes
+
+### Technical Implementation
+- Modified `show_template_preview_dialog()` method in `suricata_generator.py`
+- Changed preview frame pack parameters: `preview_frame.pack(fill=tk.BOTH, expand=False, pady=(0, 15))`
+- Window remains resizable (from v1.24.4) with height of 700x650 for optimal display
+
+### User Impact
+- **MacOS Functionality Restored**: Mac users can now properly interact with template preview dialog buttons
+- **Consistent Behavior**: Dialog layout remains stable when window is resized
+- **Cross-Platform Parity**: Template feature now works reliably on MacOS, Windows, and Linux
+
+---
+
 ## Version 1.24.4 - December 24, 2025
 
 ### Bug Fix: MacOS Template Dialog Display

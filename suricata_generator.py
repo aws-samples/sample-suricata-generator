@@ -3751,10 +3751,10 @@ class SuricataRuleGenerator:
         check_button.config(command=check_conflicts)
         
         # Bind update events to clear status and update preview
-        start_var.trace('w', clear_conflict_status)
-        increment_var.trace('w', clear_conflict_status)
-        scope_var.trace('w', clear_conflict_status)
-        action_var.trace('w', clear_conflict_status)
+        start_var.trace_add('write', clear_conflict_status)
+        increment_var.trace_add('write', clear_conflict_status)
+        scope_var.trace_add('write', clear_conflict_status)
+        action_var.trace_add('write', clear_conflict_status)
         
         # Initial preview
         update_preview()
@@ -5536,7 +5536,7 @@ class SuricataRuleGenerator:
         icon = template.get('icon', '')
         dialog_title = f"{icon} {template['name']}" if icon else template['name']
         dialog.title(dialog_title)
-        dialog.geometry("700x650")
+        dialog.geometry("700x500")
         dialog.transient(self.root)
         dialog.grab_set()
         dialog.resizable(True, True)
@@ -5571,7 +5571,7 @@ class SuricataRuleGenerator:
         
         # Preview frame
         preview_frame = ttk.LabelFrame(main_frame, text="Rule Preview")
-        preview_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 15))
+        preview_frame.pack(fill=tk.BOTH, expand=False, pady=(0, 15))
         
         preview_text = tk.Text(preview_frame, wrap=tk.NONE, font=("Consolas", 9), height=12)
         preview_scrollbar = ttk.Scrollbar(preview_frame, orient=tk.VERTICAL, command=preview_text.yview)
@@ -5645,8 +5645,8 @@ class SuricataRuleGenerator:
         update_preview()
         
         # Bind changes to update preview
-        test_mode_var.trace('w', lambda *args: update_preview())
-        sid_var.trace('w', lambda *args: update_preview())
+        test_mode_var.trace_add('write', lambda *args: update_preview())
+        sid_var.trace_add('write', lambda *args: update_preview())
         
         # Buttons
         button_frame = ttk.Frame(main_frame)

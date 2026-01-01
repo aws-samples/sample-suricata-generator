@@ -42,6 +42,7 @@ class SuricataRuleGenerator:
         self.created_timestamp = None  # Original creation timestamp
         self.tracking_enabled = False  # Whether change tracking is enabled
         self.pending_history = []  # Pending history entries to write on save
+        self.rule_guids = {}  # {sid: guid} mapping for active rules with GUID-based tracking
         self.config_file = self.get_safe_config_path()  # User config file
         self.rule_analyzer = RuleAnalyzer()  # Rule analysis engine
         self.file_manager = FileManager()  # File operations manager
@@ -705,12 +706,123 @@ class SuricataRuleGenerator:
             self.refresh_table()
             self.modified = True
         
+        # If enabling tracking, create baseline snapshots for all existing rules
+        # BUT only if there's no existing legacy history file (or it's already v2.0)
+        if self.tracking_enabled:
+            actual_rules = [r for r in self.rules 
+                           if not getattr(r, 'is_comment', False) 
+                           and not getattr(r, 'is_blank', False)]
+            
+            if actual_rules:
+                from revision_manager import RevisionManager
+                
+                # Determine history filename
+                if self.current_file:
+                    history_filename = self.current_file.replace('.suricata', '.history')
+                    if not history_filename.endswith('.history'):
+                        history_filename += '.history'
+                else:
+                    # For unsaved files, use temporary history
+                    import tempfile
+                    temp_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'user_files')
+                    if not os.path.exists(temp_dir):
+                        temp_dir = tempfile.gettempdir()
+                    history_filename = os.path.join(temp_dir, '_unsaved_.history')
+                
+                # Check if history file exists BEFORE creating RevisionManager
+                history_file_exists = os.path.exists(history_filename)
+                
+                # For NEW files (no history exists), always create baseline snapshots (v2.0)
+                # For EXISTING files, check if upgrade needed
+                if not history_file_exists:
+                    # New file - use v2.0 format
+                    revision_manager = RevisionManager(history_filename)
+                    # Create baseline snapshots for all current rules with GUIDs
+                    import datetime
+                    timestamp = datetime.datetime.now().isoformat()
+                    
+                    baseline_entries = []
+                    for rule in actual_rules:
+                        # Generate GUID for this rule
+                        rule_guid = revision_manager.generate_rule_guid()
+                        self.rule_guids[rule.sid] = rule_guid
+                        
+                        baseline_details = {
+                            'sid': rule.sid,
+                            'message': rule.message
+                        }
+                        
+                        # Create snapshot entry with GUID
+                        snapshot_entry = revision_manager.save_change_with_snapshot(
+                            rule,
+                            'baseline_snapshot',
+                            baseline_details,
+                            self.get_version_number(),
+                            timestamp,
+                            rule_guid=rule_guid
+                        )
+                        
+                        baseline_entries.append(snapshot_entry)
+                    
+                    # CRITICAL FIX: Write baseline snapshots immediately to _unsaved_.history (or real file)
+                    # This ensures the history file exists on disk so ui_manager can detect v2.0 format
+                    if baseline_entries:
+                        success = revision_manager.write_pending_snapshots(baseline_entries)
+                        if not success:
+                            # If write fails, add to pending_history as fallback
+                            self.pending_history.extend(baseline_entries)
+                else:
+                    # Existing file - check if v2.0 or needs upgrade
+                    revision_manager = RevisionManager(history_filename)
+                    needs_upgrade, version = revision_manager.detect_format_and_upgrade_needed()
+                    
+                    # Only create baseline snapshots if v2.0 format
+                    if not needs_upgrade:
+                        # Create baseline snapshots for all current rules with GUIDs
+                        import datetime
+                        timestamp = datetime.datetime.now().isoformat()
+                        
+                        for rule in actual_rules:
+                            # Generate GUID for this rule
+                            rule_guid = revision_manager.generate_rule_guid()
+                            self.rule_guids[rule.sid] = rule_guid
+                            
+                            baseline_details = {
+                                'sid': rule.sid,
+                                'message': rule.message
+                            }
+                            
+                            # Create snapshot entry with GUID (deferred - stored in pending_history)
+                            snapshot_entry = revision_manager.save_change_with_snapshot(
+                                rule,
+                                'baseline_snapshot',
+                                baseline_details,
+                                self.get_version_number(),
+                                timestamp,
+                                rule_guid=rule_guid
+                            )
+                            
+                            # Add to pending_history (will be written on file save)
+                            self.pending_history.append(snapshot_entry)
+        
         # Update status bar to show tracking state
         self.update_status_bar()
         
         # Show confirmation message
         status = "enabled" if self.tracking_enabled else "disabled"
-        messagebox.showinfo("Change Tracking", f"Change tracking has been {status}.")
+        if self.tracking_enabled:
+            actual_rule_count = len([r for r in self.rules 
+                                    if not getattr(r, 'is_comment', False) 
+                                    and not getattr(r, 'is_blank', False)])
+            if actual_rule_count > 0:
+                messagebox.showinfo("Change Tracking", 
+                    f"Change tracking has been {status}.\n\n"
+                    f"Baseline snapshots created for {actual_rule_count} rules.\n"
+                    f"You can now roll back to their current revisions.")
+            else:
+                messagebox.showinfo("Change Tracking", f"Change tracking has been {status}.")
+        else:
+            messagebox.showinfo("Change Tracking", f"Change tracking has been {status}.")
     
     def check_and_enable_existing_tracking(self):
         """Check for existing history file and auto-enable tracking if found"""
@@ -1286,7 +1398,7 @@ class SuricataRuleGenerator:
         insert_index = line_num - 1
         
         # Auto-generate SID
-        max_sid = max([rule.sid for rule in self.rules], default=99)
+        max_sid = max([rule.sid for rule in self.rules if not getattr(rule, 'is_comment', False) and not getattr(rule, 'is_blank', False)], default=99)
         next_sid = max_sid + 1
         
         # Create a new rule with default values (protocol-based content)
@@ -1337,7 +1449,7 @@ class SuricataRuleGenerator:
             return
         
         # Auto-generate SID
-        max_sid = max([rule.sid for rule in self.rules], default=99)
+        max_sid = max([rule.sid for rule in self.rules if not getattr(rule, 'is_comment', False) and not getattr(rule, 'is_blank', False)], default=99)
         next_sid = max_sid + 1
         
         # Create a new rule with default values (protocol-based content)
@@ -1363,12 +1475,67 @@ class SuricataRuleGenerator:
                 # Save state for undo
                 self.save_undo_state()
                 
-                # Add history entry with simplified rule information
-                rule_details = {
-                    'line': insert_index + 1, 
-                    'rule_text': updated_rule.to_string()
-                }
-                self.add_history_entry('rule_added', rule_details)
+                # If tracking enabled, check format version before saving snapshot
+                if self.tracking_enabled:
+                    from revision_manager import RevisionManager
+                    
+                    # Build history filename (works for both saved and unsaved files)
+                    if self.current_file:
+                        history_filename = self.current_file.replace('.suricata', '.history')
+                        if not history_filename.endswith('.history'):
+                            history_filename += '.history'
+                    else:
+                        # Use temporary filename for unsaved files
+                        import tempfile
+                        temp_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'user_files')
+                        if not os.path.exists(temp_dir):
+                            temp_dir = tempfile.gettempdir()
+                        history_filename = os.path.join(temp_dir, '_unsaved_.history')
+                    
+                    revision_manager = RevisionManager(history_filename)
+                    
+                    # Check if format is v2.0 (snapshots enabled) or v1.0 (legacy, no snapshots)
+                    needs_upgrade, version = revision_manager.detect_format_and_upgrade_needed()
+                    
+                    # Only save snapshots if format is v2.0 (user accepted upgrade or new file)
+                    if not needs_upgrade:
+                        # Generate GUID for new rule
+                        rule_guid = revision_manager.generate_rule_guid()
+                        self.rule_guids[updated_rule.sid] = rule_guid
+                        
+                        # Save baseline snapshot for newly created rule (Rev 1)
+                        history_details = {
+                            'line': insert_index + 1,
+                            'sid': updated_rule.sid,
+                            'action': updated_rule.action,
+                            'message': updated_rule.message
+                        }
+                        
+                        # Create snapshot entry with GUID (deferred - stored in pending_history)
+                        snapshot_entry = revision_manager.save_change_with_snapshot(
+                            updated_rule,
+                            'rule_added',
+                            history_details,
+                            self.get_version_number(),
+                            rule_guid=rule_guid
+                        )
+                        
+                        # Add to pending_history (will be written on file save)
+                        self.pending_history.append(snapshot_entry)
+                    else:
+                        # Legacy v1.0 format - use regular history entry (pending until save)
+                        rule_details = {
+                            'line': insert_index + 1, 
+                            'rule_text': updated_rule.to_string()
+                        }
+                        self.add_history_entry('rule_added', rule_details)
+                else:
+                    # Tracking disabled - use regular history entry
+                    rule_details = {
+                        'line': insert_index + 1, 
+                        'rule_text': updated_rule.to_string()
+                    }
+                    self.add_history_entry('rule_added', rule_details)
                 
                 self.rules.insert(insert_index, updated_rule)
                 self.refresh_table()
@@ -1448,20 +1615,115 @@ class SuricataRuleGenerator:
                     # Save state for undo
                     self.save_undo_state()
                     
-                    # Add history entry with detailed change information
-                    history_details = {
-                        'line': rule_index + 1, 
-                        'rule_text': updated_rule.to_string(),
-                        'action': updated_rule.action,
-                        'sid': updated_rule.sid,
-                        'message': updated_rule.message
-                    }
+                    # Check if fields actually changed (to determine if we should increment rev)
+                    fields_changed = (
+                        original_rule.action != updated_rule.action or
+                        original_rule.protocol != updated_rule.protocol or
+                        original_rule.src_net != updated_rule.src_net or
+                        original_rule.src_port != updated_rule.src_port or
+                        original_rule.direction != updated_rule.direction or
+                        original_rule.dst_net != updated_rule.dst_net or
+                        original_rule.dst_port != updated_rule.dst_port or
+                        original_rule.content != updated_rule.content or
+                        original_rule.sid != updated_rule.sid
+                    )
                     
-                    # Include detailed changes if any were captured
-                    if changes:
-                        history_details['changes'] = changes
-                    
-                    self.add_history_entry('rule_modified', history_details)
+                    # If tracking enabled and fields changed, create snapshot for v2.0 format
+                    if self.tracking_enabled and fields_changed:
+                        from revision_manager import RevisionManager
+                        
+                        # Build history filename
+                        if self.current_file:
+                            history_filename = self.current_file.replace('.suricata', '.history')
+                            if not history_filename.endswith('.history'):
+                                history_filename += '.history'
+                        else:
+                            # Use temporary filename for unsaved files
+                            import tempfile
+                            temp_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'user_files')
+                            if not os.path.exists(temp_dir):
+                                temp_dir = tempfile.gettempdir()
+                            history_filename = os.path.join(temp_dir, '_unsaved_.history')
+                        
+                        # Check if history file exists on disk
+                        history_file_exists = os.path.exists(history_filename)
+                        
+                        # Check if baseline snapshots exist in pending_history
+                        has_pending_snapshots = any(
+                            entry.get('action') == 'baseline_snapshot' and 'rule_snapshot' in entry.get('details', {})
+                            for entry in self.pending_history
+                        )
+                        
+                        # Determine if we should create snapshot
+                        if not history_file_exists:
+                            should_create_snapshot = True
+                            revision_manager = RevisionManager(history_filename)
+                        elif has_pending_snapshots:
+                            should_create_snapshot = True
+                            revision_manager = RevisionManager(history_filename)
+                        else:
+                            revision_manager = RevisionManager(history_filename)
+                            needs_upgrade, version = revision_manager.detect_format_and_upgrade_needed()
+                            should_create_snapshot = not needs_upgrade
+                        
+                        if should_create_snapshot:
+                            # Get or generate GUID for this rule
+                            if original_rule.sid in self.rule_guids:
+                                rule_guid = self.rule_guids[original_rule.sid]
+                            else:
+                                rule_guid = revision_manager.generate_rule_guid()
+                                self.rule_guids[original_rule.sid] = rule_guid
+                            
+                            # If SID changed, update GUID mapping
+                            if original_rule.sid != updated_rule.sid:
+                                self.rule_guids[updated_rule.sid] = rule_guid
+                                if original_rule.sid in self.rule_guids:
+                                    del self.rule_guids[original_rule.sid]
+                            
+                            # Prepare details for history entry
+                            history_details = {
+                                'line': rule_index + 1,
+                                'sid': updated_rule.sid,
+                                'action': updated_rule.action,
+                                'message': updated_rule.message,
+                                'changes': changes
+                            }
+                            
+                            # Create snapshot entry with GUID (deferred - stored in pending_history)
+                            snapshot_entry = revision_manager.save_change_with_snapshot(
+                                updated_rule,
+                                'rule_modified',
+                                history_details,
+                                self.get_version_number(),
+                                rule_guid=rule_guid
+                            )
+                            
+                            # Add to pending_history (will be written on file save)
+                            self.pending_history.append(snapshot_entry)
+                        else:
+                            # Legacy v1.0 format - use regular history entry
+                            history_details = {
+                                'line': rule_index + 1, 
+                                'rule_text': updated_rule.to_string(),
+                                'action': updated_rule.action,
+                                'sid': updated_rule.sid,
+                                'message': updated_rule.message
+                            }
+                            if changes:
+                                history_details['changes'] = changes
+                            self.add_history_entry('rule_modified', history_details)
+                    else:
+                        # Tracking disabled or no fields changed - use regular history entry
+                        history_details = {
+                            'line': rule_index + 1, 
+                            'rule_text': updated_rule.to_string(),
+                            'action': updated_rule.action,
+                            'sid': updated_rule.sid,
+                            'message': updated_rule.message
+                        }
+                        if changes:
+                            history_details['changes'] = changes
+                        self.add_history_entry('rule_modified', history_details)
                     
                     self.rules[rule_index] = updated_rule
                     self.refresh_table()
@@ -1624,6 +1886,10 @@ class SuricataRuleGenerator:
             # Clear pending history from previous file
             self.pending_history.clear()
             
+            # Reset file session flag for upgrade prompt
+            if hasattr(self, '_file_upgrade_prompted'):
+                delattr(self, '_file_upgrade_prompted')
+            
             self.load_rules_from_file(filename)
             self.current_file = filename
             self.modified = False
@@ -1631,6 +1897,33 @@ class SuricataRuleGenerator:
             
             # Check for existing history file and auto-enable tracking
             self.check_and_enable_existing_tracking()
+            
+            # Load GUIDs from history if tracking enabled
+            if self.tracking_enabled:
+                history_filename = self.current_file.replace('.suricata', '.history')
+                if not history_filename.endswith('.history'):
+                    history_filename += '.history'
+                
+                if os.path.exists(history_filename):
+                    from revision_manager import RevisionManager
+                    revision_manager = RevisionManager(history_filename)
+                    self.rule_guids = revision_manager.extract_rule_guids()
+            
+            # Check if upgrade needed for revision tracking (only show once per file session)
+            if self.tracking_enabled:
+                history_filename = self.current_file.replace('.suricata', '.history')
+                if not history_filename.endswith('.history'):
+                    history_filename += '.history'
+                
+                if os.path.exists(history_filename):
+                    from revision_manager import RevisionManager
+                    revision_manager = RevisionManager(history_filename)
+                    needs_upgrade, version = revision_manager.detect_format_and_upgrade_needed()
+                    
+                    # Show upgrade prompt once per file session
+                    if needs_upgrade and not getattr(self, '_file_upgrade_prompted', False):
+                        self._file_upgrade_prompted = True
+                        self.show_history_upgrade_prompt(revision_manager)
             
             self.update_status_bar()
             # Refresh table without preserving selection to enable click-to-insert
@@ -1677,12 +1970,46 @@ class SuricataRuleGenerator:
             if not os.access(directory, os.W_OK):
                 raise PermissionError(f"Cannot write to directory: {directory}")
             
+            # CRITICAL: If tracking enabled and this is first save, migrate _unsaved_.history
+            if self.tracking_enabled and not self.current_file:
+                import tempfile
+                temp_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'user_files')
+                if not os.path.exists(temp_dir):
+                    temp_dir = tempfile.gettempdir()
+                unsaved_history = os.path.join(temp_dir, '_unsaved_.history')
+                
+                # If _unsaved_.history exists, move/rename it to the new filename
+                if os.path.exists(unsaved_history):
+                    target_history = filename.replace('.suricata', '.history')
+                    if not target_history.endswith('.history'):
+                        target_history += '.history'
+                    
+                    try:
+                        # Copy/rename the unsaved history to the new filename
+                        import shutil
+                        shutil.move(unsaved_history, target_history)
+                    except (OSError, IOError):
+                        pass  # If move fails, continue anyway
+            
             success = self.file_manager.save_rules_to_file(
                 filename, self.rules, self.variables, 
                 self.has_header, self.tracking_enabled, self.pending_history
             )
             
             if success:
+                # Reload GUIDs from saved history file BEFORE clearing pending_history
+                # This ensures we capture GUIDs from all snapshots including those just written
+                if self.tracking_enabled and filename:
+                    history_filename = filename.replace('.suricata', '.history')
+                    if not history_filename.endswith('.history'):
+                        history_filename += '.history'
+                    
+                    if os.path.exists(history_filename):
+                        from revision_manager import RevisionManager
+                        revision_manager = RevisionManager(history_filename)
+                        self.rule_guids = revision_manager.extract_rule_guids()
+                
+                # NOW clear pending_history after GUIDs have been reloaded
                 if self.tracking_enabled and self.pending_history:
                     self.pending_history.clear()
                 
@@ -1768,7 +2095,8 @@ class SuricataRuleGenerator:
                         content=rule.content,
                         sid=new_sid,
                         direction=rule.direction,
-                        original_options=rule.original_options
+                        original_options=rule.original_options,
+                        rev=rule.rev  # Preserve rev from source rule
                     )
                     internal_rules.append(internal_rule)
                     original_rules.append(rule)  # Use original rule object with original SID
@@ -1901,7 +2229,11 @@ class SuricataRuleGenerator:
     
     
     def assign_safe_sids(self, new_rules: List[SuricataRule]) -> None:
-        """Assign safe SIDs to avoid conflicts with existing rules"""
+        """Assign safe SIDs to avoid conflicts with existing rules
+        
+        Only reassigns SIDs when there's an actual conflict. Preserves original
+        SIDs when they don't conflict with existing rules.
+        """
         existing_sids = {rule.sid for rule in self.rules 
                          if not getattr(rule, 'is_comment', False) 
                          and not getattr(rule, 'is_blank', False)}
@@ -1910,16 +2242,23 @@ class SuricataRuleGenerator:
         
         for rule in new_rules:
             if not getattr(rule, 'is_comment', False) and not getattr(rule, 'is_blank', False):
-                while next_sid in existing_sids:
+                # Check if rule's current SID conflicts with existing rules
+                if rule.sid in existing_sids:
+                    # Conflict detected - find next available SID
+                    while next_sid in existing_sids:
+                        next_sid += 1
+                    
+                    # Reassign to avoid conflict
+                    rule.sid = next_sid
+                    # Update original_options to reflect new SID
+                    if rule.original_options:
+                        import re
+                        rule.original_options = re.sub(r'sid:\d+', f'sid:{next_sid}', rule.original_options)
+                    existing_sids.add(next_sid)
                     next_sid += 1
-                
-                rule.sid = next_sid
-                # Update original_options to reflect new SID
-                if rule.original_options:
-                    import re
-                    rule.original_options = re.sub(r'sid:\d+', f'sid:{next_sid}', rule.original_options)
-                existing_sids.add(next_sid)
-                next_sid += 1
+                else:
+                    # No conflict - keep original SID and add to tracking set
+                    existing_sids.add(rule.sid)
 
     def paste_rules(self):
         """Paste rules from clipboard at selected position or end"""
@@ -1999,6 +2338,9 @@ class SuricataRuleGenerator:
             messagebox.showwarning("Warning", "No rules in clipboard to paste.")
             return
         
+        # Calculate count early for use in history entries
+        count = len(rules_to_paste)
+        
         # Validate port fields in pasted rules before inserting
         invalid_rules = []
         for i, rule in enumerate(rules_to_paste):
@@ -2024,19 +2366,86 @@ class SuricataRuleGenerator:
         # Save state for undo
         self.save_undo_state()
         
-        # Add history entry for paste operation
-        count = len(rules_to_paste)
-        # Collect details about pasted rules for better tracking
-        pasted_rules_details = []
-        for rule in rules_to_paste:
-            if getattr(rule, 'is_comment', False):
-                pasted_rules_details.append({'type': 'comment', 'text': rule.comment_text[:50] + '...' if len(rule.comment_text) > 50 else rule.comment_text})
-            elif getattr(rule, 'is_blank', False):
-                pasted_rules_details.append({'type': 'blank'})
+        # If tracking enabled, create baseline snapshots for pasted rules at their current rev
+        if self.tracking_enabled:
+            from revision_manager import RevisionManager
+            
+            # Build history filename
+            if self.current_file:
+                history_filename = self.current_file.replace('.suricata', '.history')
+                if not history_filename.endswith('.history'):
+                    history_filename += '.history'
             else:
-                pasted_rules_details.append({'type': 'rule', 'action': rule.action, 'sid': rule.sid, 'message': rule.message[:30] + '...' if len(rule.message) > 30 else rule.message})
-        
-        self.add_history_entry('rules_pasted', {'line': paste_index + 1, 'count': count, 'rules': pasted_rules_details})
+                # Use temporary filename for unsaved files
+                import tempfile
+                temp_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'user_files')
+                if not os.path.exists(temp_dir):
+                    temp_dir = tempfile.gettempdir()
+                history_filename = os.path.join(temp_dir, '_unsaved_.history')
+            
+            revision_manager = RevisionManager(history_filename)
+            
+            # Check if format is v2.0 (snapshots enabled) or v1.0 (legacy, no snapshots)
+            needs_upgrade, version = revision_manager.detect_format_and_upgrade_needed()
+            
+            # Only save snapshots if format is v2.0 (user accepted upgrade or new file)
+            if not needs_upgrade:
+                # Create baseline snapshots for all pasted rules (skip comments/blanks)
+                import datetime
+                timestamp = datetime.datetime.now().isoformat()
+                
+                for rule in rules_to_paste:
+                    if not getattr(rule, 'is_comment', False) and not getattr(rule, 'is_blank', False):
+                        # Generate GUID for this pasted rule
+                        rule_guid = revision_manager.generate_rule_guid()
+                        self.rule_guids[rule.sid] = rule_guid
+                        
+                        # Save baseline snapshot for pasted rule at its current rev
+                        history_details = {
+                            'line': paste_index + 1,
+                            'sid': rule.sid,
+                            'action': rule.action,
+                            'message': rule.message
+                        }
+                        
+                        # Create snapshot entry with GUID (deferred - stored in pending_history)
+                        snapshot_entry = revision_manager.save_change_with_snapshot(
+                            rule,
+                            'rule_added',
+                            history_details,
+                            self.get_version_number(),
+                            timestamp,
+                            rule_guid=rule_guid
+                        )
+                        
+                        # Add to pending_history (will be written on file save)
+                        self.pending_history.append(snapshot_entry)
+            else:
+                # Legacy v1.0 format - use regular history entry (pending until save)
+                # Collect details about pasted rules for better tracking
+                pasted_rules_details = []
+                for rule in rules_to_paste:
+                    if getattr(rule, 'is_comment', False):
+                        pasted_rules_details.append({'type': 'comment', 'text': rule.comment_text[:50] + '...' if len(rule.comment_text) > 50 else rule.comment_text})
+                    elif getattr(rule, 'is_blank', False):
+                        pasted_rules_details.append({'type': 'blank'})
+                    else:
+                        pasted_rules_details.append({'type': 'rule', 'action': rule.action, 'sid': rule.sid, 'message': rule.message[:30] + '...' if len(rule.message) > 30 else rule.message})
+                
+                self.add_history_entry('rules_pasted', {'line': paste_index + 1, 'count': count, 'rules': pasted_rules_details})
+        else:
+            # Tracking disabled - use regular history entry
+            # Collect details about pasted rules for better tracking
+            pasted_rules_details = []
+            for rule in rules_to_paste:
+                if getattr(rule, 'is_comment', False):
+                    pasted_rules_details.append({'type': 'comment', 'text': rule.comment_text[:50] + '...' if len(rule.comment_text) > 50 else rule.comment_text})
+                elif getattr(rule, 'is_blank', False):
+                    pasted_rules_details.append({'type': 'blank'})
+                else:
+                    pasted_rules_details.append({'type': 'rule', 'action': rule.action, 'sid': rule.sid, 'message': rule.message[:30] + '...' if len(rule.message) > 30 else rule.message})
+            
+            self.add_history_entry('rules_pasted', {'line': paste_index + 1, 'count': count, 'rules': pasted_rules_details})
         
         # Insert rules from clipboard
         for i, rule in enumerate(rules_to_paste):
@@ -2403,21 +2812,27 @@ class SuricataRuleGenerator:
                 if not self.validate_port_field(dst_port_var.get(), "Dest Port"):
                     return
                 
-                # Check if any non-message fields changed to determine if rev should increment
-                original_rule = rule
-                fields_changed = (
-                    original_rule.action != action_var.get() or
-                    original_rule.protocol != protocol_var.get() or
-                    original_rule.src_net != src_net_var.get() or
-                    original_rule.src_port != src_port_var.get() or
-                    original_rule.dst_net != dst_net_var.get() or
-                    original_rule.dst_port != dst_port_var.get() or
-                    original_rule.content != content_var.get() or
-                    original_rule.sid != sid
-                )
-                
-                # Increment rev if any non-message fields changed
-                new_rev = rule.rev + 1 if fields_changed else rule.rev
+                # For INSERT operations (Add/Insert Rule), always keep rev at 1
+                # For EDIT operations, increment rev if fields changed
+                if "Insert" in title or "Add" in title:
+                    # INSERT operation - new rule always starts at rev 1
+                    new_rev = 1
+                else:
+                    # EDIT operation - check if fields changed
+                    original_rule = rule
+                    fields_changed = (
+                        original_rule.action != action_var.get() or
+                        original_rule.protocol != protocol_var.get() or
+                        original_rule.src_net != src_net_var.get() or
+                        original_rule.src_port != src_port_var.get() or
+                        original_rule.dst_net != dst_net_var.get() or
+                        original_rule.dst_port != dst_port_var.get() or
+                        original_rule.content != content_var.get() or
+                        original_rule.sid != sid
+                    )
+                    
+                    # Increment rev if any non-message fields changed
+                    new_rev = rule.rev + 1 if fields_changed else rule.rev
                 
                 updated_rule = SuricataRule(
                     action=action_var.get(),
@@ -2583,12 +2998,94 @@ class SuricataRuleGenerator:
                 # Save state for undo
                 self.save_undo_state()
                 
-                # Add history entry
-                rule_details = {
-                    'line': self.selected_rule_index + 1, 
-                    'rule_text': new_rule.to_string()
-                }
-                self.add_history_entry('rule_added', rule_details)
+                # If tracking enabled, check format version before saving snapshot
+                if self.tracking_enabled:
+                    from revision_manager import RevisionManager
+                    
+                    # Build history filename even if file not saved yet
+                    if self.current_file:
+                        history_filename = self.current_file.replace('.suricata', '.history')
+                        if not history_filename.endswith('.history'):
+                            history_filename += '.history'
+                    else:
+                        # Use temporary filename for unsaved files
+                        import tempfile
+                        temp_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'user_files')
+                        if not os.path.exists(temp_dir):
+                            temp_dir = tempfile.gettempdir()
+                        history_filename = os.path.join(temp_dir, '_unsaved_.history')
+                    
+                    # Check if history file exists BEFORE creating RevisionManager
+                    history_file_exists = os.path.exists(history_filename)
+                    
+                    # For NEW files (no history exists), use v2.0 format with snapshots
+                    # For EXISTING files, check if upgrade needed
+                    if not history_file_exists:
+                        # New file - use v2.0 format
+                        revision_manager = RevisionManager(history_filename)
+                        # Generate GUID for new rule
+                        rule_guid = revision_manager.generate_rule_guid()
+                        self.rule_guids[new_rule.sid] = rule_guid
+                        
+                        # Save baseline snapshot for newly created rule (Rev 1)
+                        history_details = {
+                            'line': self.selected_rule_index + 1,
+                            'sid': new_rule.sid,
+                            'action': new_rule.action,
+                            'message': new_rule.message
+                        }
+                        
+                        # Create snapshot entry with GUID (deferred - stored in pending_history)
+                        snapshot_entry = revision_manager.save_change_with_snapshot(
+                            new_rule,
+                            'rule_added',
+                            history_details,
+                            self.get_version_number(),
+                            rule_guid=rule_guid
+                        )
+                        
+                        # Add to pending_history (will be written on file save)
+                        self.pending_history.append(snapshot_entry)
+                    else:
+                        # Existing file - check if v2.0 or needs upgrade
+                        revision_manager = RevisionManager(history_filename)
+                        needs_upgrade, version = revision_manager.detect_format_and_upgrade_needed()
+                        
+                        if not needs_upgrade:
+                            # v2.0 format - create snapshot
+                            rule_guid = revision_manager.generate_rule_guid()
+                            self.rule_guids[new_rule.sid] = rule_guid
+                            
+                            history_details = {
+                                'line': self.selected_rule_index + 1,
+                                'sid': new_rule.sid,
+                                'action': new_rule.action,
+                                'message': new_rule.message
+                            }
+                            
+                            snapshot_entry = revision_manager.save_change_with_snapshot(
+                                new_rule,
+                                'rule_added',
+                                history_details,
+                                self.get_version_number(),
+                                rule_guid=rule_guid
+                            )
+                            
+                            self.pending_history.append(snapshot_entry)
+                        else:
+                            # v1.0 format - use regular history entry
+                            rule_details = {
+                                'line': self.selected_rule_index + 1, 
+                                'rule_text': new_rule.to_string()
+                            }
+                            self.add_history_entry('rule_added', rule_details)
+                else:
+                    # Tracking disabled - use regular history entry
+                    rule_details = {
+                        'line': self.selected_rule_index + 1, 
+                        'rule_text': new_rule.to_string()
+                    }
+                    self.add_history_entry('rule_added', rule_details)
                 
                 # Replace the blank line with the new rule
                 self.rules[self.selected_rule_index] = new_rule
@@ -2653,9 +3150,13 @@ class SuricataRuleGenerator:
                     return
                 
                 # Check for duplicate SID (excluding current rule)
-                if not self.validate_unique_sid(sid, self.selected_rule_index):
-                    messagebox.showerror("Error", f"SID {sid} is already in use. Please choose a different SID.")
-                    return
+                # Skip validation if SID hasn't actually changed from current rule
+                original_rule_sid = self.rules[self.selected_rule_index].sid
+                if sid != original_rule_sid:
+                    # SID is changing, need to validate uniqueness
+                    if not self.validate_unique_sid(sid, self.selected_rule_index):
+                        messagebox.showerror("Error", f"SID {sid} is already in use. Please choose a different SID.")
+                        return
                 
                 # Validate network fields
                 if not self.validate_network_field(self.src_net_var.get(), "Source Network"):
@@ -2687,6 +3188,17 @@ class SuricataRuleGenerator:
                     not fields_changed and 
                     original_rule.message != self.message_var.get()
                 )
+                
+                # Check if NO changes were made at all (including message)
+                no_changes = (
+                    not fields_changed and
+                    not message_only_change
+                )
+                
+                # If no changes at all, just show info message and return
+                if no_changes:
+                    messagebox.showinfo("No Changes", "No changes detected. The rule remains unchanged.")
+                    return
                 
                 # Skip tracking if only message changed
                 if message_only_change:
@@ -2781,20 +3293,116 @@ class SuricataRuleGenerator:
                 original_rule = self.rules[self.selected_rule_index]
                 changes = self.compare_rules_for_changes(original_rule, updated_rule)
                 
-                # Add history entry with detailed change information
-                history_details = {
-                    'line': self.selected_rule_index + 1, 
-                    'rule_text': updated_rule.to_string(),
-                    'action': updated_rule.action,
-                    'sid': updated_rule.sid,
-                    'message': updated_rule.message
-                }
-                
-                # Include detailed changes if any were captured
-                if changes:
-                    history_details['changes'] = changes
-                
-                self.add_history_entry('rule_modified', history_details)
+                # If tracking enabled and rev changed, check format version before saving snapshot
+                if self.tracking_enabled and fields_changed:
+                    from revision_manager import RevisionManager
+                    
+                    # Build history filename even if file not saved yet
+                    if self.current_file:
+                        history_filename = self.current_file.replace('.suricata', '.history')
+                        if not history_filename.endswith('.history'):
+                            history_filename += '.history'
+                    else:
+                        # Use temporary filename for unsaved files
+                        import tempfile
+                        temp_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'user_files')
+                        if not os.path.exists(temp_dir):
+                            temp_dir = tempfile.gettempdir()
+                        history_filename = os.path.join(temp_dir, '_unsaved_.history')
+                    
+                    # Check if history file exists on disk
+                    history_file_exists = os.path.exists(history_filename)
+                    
+                    # CRITICAL BUG FIX: Also check if baseline snapshots exist in pending_history
+                    # This handles the case where tracking was enabled on a new file (snapshots in pending_history, not on disk)
+                    has_pending_snapshots = any(
+                        entry.get('action') == 'baseline_snapshot' and 'rule_snapshot' in entry.get('details', {})
+                        for entry in self.pending_history
+                    )
+                    
+                    # For NEW files with baseline snapshots in pending_history, use v2.0 format
+                    # For NEW files without baseline snapshots, use v2.0 format (new tracking)
+                    # For EXISTING files, check format on disk
+                    if not history_file_exists:
+                        # New file - use v2.0 format (snapshots enabled)
+                        should_create_snapshot = True
+                    else:
+                        # Existing file - check format version on disk
+                        revision_manager = RevisionManager(history_filename)
+                        needs_upgrade, version = revision_manager.detect_format_and_upgrade_needed()
+                        should_create_snapshot = not needs_upgrade  # Only if v2.0 format
+                    
+                    # Create RevisionManager for snapshot creation
+                    if not history_file_exists or should_create_snapshot:
+                        revision_manager = RevisionManager(history_filename)
+                    
+                    # Save snapshots if appropriate (new file or v2.0 format)
+                    if should_create_snapshot:
+                        # Get or generate GUID for this rule
+                        if original_rule.sid in self.rule_guids:
+                            rule_guid = self.rule_guids[original_rule.sid]
+                        else:
+                            # New rule or loaded from file without GUID
+                            rule_guid = revision_manager.generate_rule_guid()
+                            self.rule_guids[original_rule.sid] = rule_guid
+                        
+                        # If SID changed, update GUID mapping (NO transfer needed with GUID!)
+                        if original_rule.sid != updated_rule.sid:
+                            # Move GUID to new SID - maintains rule identity
+                            self.rule_guids[updated_rule.sid] = rule_guid
+                            if original_rule.sid in self.rule_guids:
+                                del self.rule_guids[original_rule.sid]
+                        
+                        # Prepare details for history entry
+                        history_details = {
+                            'line': self.selected_rule_index + 1,
+                            'sid': updated_rule.sid,
+                            'action': updated_rule.action,
+                            'message': updated_rule.message,
+                            'changes': changes
+                        }
+                        
+                        # Create snapshot entry with GUID (deferred - stored in pending_history)
+                        snapshot_entry = revision_manager.save_change_with_snapshot(
+                            updated_rule,
+                            'rule_modified',
+                            history_details,
+                            self.get_version_number(),
+                            rule_guid=rule_guid
+                        )
+                        
+                        # Add to pending_history (will be written on file save)
+                        self.pending_history.append(snapshot_entry)
+                    else:
+                        # Legacy v1.0 format - use regular history entry (pending until save)
+                        history_details = {
+                            'line': self.selected_rule_index + 1, 
+                            'rule_text': updated_rule.to_string(),
+                            'action': updated_rule.action,
+                            'sid': updated_rule.sid,
+                            'message': updated_rule.message
+                        }
+                        
+                        # Include detailed changes if any were captured
+                        if changes:
+                            history_details['changes'] = changes
+                        
+                        self.add_history_entry('rule_modified', history_details)
+                else:
+                    # Fallback to regular history entry if tracking disabled or no fields changed
+                    history_details = {
+                        'line': self.selected_rule_index + 1, 
+                        'rule_text': updated_rule.to_string(),
+                        'action': updated_rule.action,
+                        'sid': updated_rule.sid,
+                        'message': updated_rule.message
+                    }
+                    
+                    # Include detailed changes if any were captured
+                    if changes:
+                        history_details['changes'] = changes
+                    
+                    self.add_history_entry('rule_modified', history_details)
                 
                 # Store line number before refresh (for message and reselection)
                 updated_line_num = self.selected_rule_index + 1
@@ -2824,6 +3432,13 @@ class SuricataRuleGenerator:
                 items = self.tree.get_children()
                 if self.selected_rule_index is not None and self.selected_rule_index < len(items):
                     self.tree.selection_set(items[self.selected_rule_index])
+                    
+                    # CRITICAL: Use after_idle to refresh rev dropdown AFTER TreeviewSelect event completes
+                    # This ensures the event handler finishes and then we refresh with the updated rule
+                    if self.tracking_enabled and fields_changed:
+                        # Create a copy of the updated_rule reference for the lambda
+                        updated_rule_ref = updated_rule
+                        self.root.after_idle(lambda: self.ui_manager.populate_rev_dropdown(updated_rule_ref))
                 
                 messagebox.showinfo("Success", f"Rule at line {updated_line_num} updated successfully.")
                 
@@ -2878,32 +3493,55 @@ class SuricataRuleGenerator:
         return changes
     
     def save_undo_state(self):
-        """Save current state for undo functionality"""
+        """Save current state for undo functionality and track pending history checkpoint"""
         import copy
         self.undo_state = copy.deepcopy(self.rules)
+        
+        # CRITICAL: Track the current length of pending_history at this checkpoint
+        # This allows undo_last_change() to remove any snapshots added after this point
+        if self.tracking_enabled:
+            self.undo_pending_history_checkpoint = len(self.pending_history)
+        else:
+            self.undo_pending_history_checkpoint = 0
     
     def undo_last_change(self):
-        """Undo the last change made to the rules"""
+        """Undo the last change made to the rules and remove undone pending snapshots"""
         if self.undo_state is None:
             messagebox.showinfo("Undo", "No changes to undo.")
             return
         
-        # Add history entry for the undo action (before restoring state)
-        current_rule_count = len([r for r in self.rules if not getattr(r, 'is_comment', False) and not getattr(r, 'is_blank', False)])
+        # Track whether we removed uncommitted changes
+        removed_pending_changes = False
+        
+        # CRITICAL: Remove pending snapshots added after the undo checkpoint
+        # This ensures undone changes don't appear in the revision history dropdown
+        if self.tracking_enabled and hasattr(self, 'undo_pending_history_checkpoint'):
+            checkpoint = self.undo_pending_history_checkpoint
+            
+            # Remove any pending history entries added after the checkpoint
+            # These are the snapshots for changes that are being undone
+            if len(self.pending_history) > checkpoint:
+                # Truncate pending_history to the checkpoint length
+                self.pending_history = self.pending_history[:checkpoint]
+                removed_pending_changes = True
         
         # Restore the previous state
         self.rules = self.undo_state
         self.undo_state = None
         
-        # Calculate rule count after undo for tracking
-        undone_rule_count = len([r for r in self.rules if not getattr(r, 'is_comment', False) and not getattr(r, 'is_blank', False)])
-        
-        # Add history entry for the undo operation
-        self.add_history_entry('undo_performed', {
-            'rules_before': current_rule_count,
-            'rules_after': undone_rule_count,
-            'rules_changed': abs(undone_rule_count - current_rule_count)
-        })
+        # DESIGN DECISION: Only add undo entry if we're undoing committed changes
+        # If we removed pending changes, don't add the undo entry (clean slate)
+        # This keeps pending changes clean - as if the change never happened
+        if not removed_pending_changes:
+            # Undoing a committed change (already saved to disk)
+            # Add undo entry to audit trail (will be saved on next file save)
+            current_rule_count = len([r for r in self.rules if not getattr(r, 'is_comment', False) and not getattr(r, 'is_blank', False)])
+            
+            self.add_history_entry('undo_performed', {
+                'rules_before': current_rule_count,
+                'rules_after': current_rule_count,
+                'rules_changed': 0
+            })
         
         self.refresh_table()
         self.modified = True
@@ -2933,7 +3571,7 @@ class SuricataRuleGenerator:
             self.ui_manager.show_rule_editor()  # Show editor fields
             self.set_default_editor_values()  # Populate with defaults
             # Auto-generate next available SID for convenience
-            max_sid = max([rule.sid for rule in self.rules], default=99)
+            max_sid = max([rule.sid for rule in self.rules if not getattr(rule, 'is_comment', False) and not getattr(rule, 'is_blank', False)], default=99)
             self.sid_var.set(str(max_sid + 1))
         else:
             # Check if clicking on already selected item to toggle selection
@@ -3022,12 +3660,88 @@ class SuricataRuleGenerator:
             # Save state for undo
             self.save_undo_state()
             
-            # Add history entry with simplified rule information
-            rule_details = {
-                'line': self.selected_rule_index + 1, 
-                'rule_text': new_rule.to_string()
-            }
-            self.add_history_entry('rule_added', rule_details)
+            # If tracking enabled, check format version before saving snapshot
+            if self.tracking_enabled:
+                from revision_manager import RevisionManager
+                
+                # Build history filename even if file not saved yet
+                if self.current_file:
+                    history_filename = self.current_file.replace('.suricata', '.history')
+                    if not history_filename.endswith('.history'):
+                        history_filename += '.history'
+                else:
+                    # Use temporary filename for unsaved files
+                    import tempfile
+                    temp_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'user_files')
+                    if not os.path.exists(temp_dir):
+                        temp_dir = tempfile.gettempdir()
+                    history_filename = os.path.join(temp_dir, '_unsaved_.history')
+                
+                # Check if history file exists on disk
+                history_file_exists = os.path.exists(history_filename)
+                
+                # CRITICAL BUG FIX: Also check if baseline snapshots exist in pending_history
+                # This handles the case where tracking was enabled on a new file (snapshots in pending_history, not on disk)
+                has_pending_snapshots = any(
+                    entry.get('action') == 'baseline_snapshot' and 'rule_snapshot' in entry.get('details', {})
+                    for entry in self.pending_history
+                )
+                
+                # For NEW files with baseline snapshots in pending_history, use v2.0 format
+                # For NEW files without baseline snapshots, use v2.0 format (new tracking)
+                # For EXISTING files, check format on disk
+                if not history_file_exists:
+                    # New file - use v2.0 format (snapshots enabled)
+                    should_create_snapshot = True
+                    revision_manager = RevisionManager(history_filename)
+                elif has_pending_snapshots:
+                    # Has pending baseline snapshots - already in v2.0 mode
+                    should_create_snapshot = True
+                    revision_manager = RevisionManager(history_filename)
+                else:
+                    # Existing file - check format version on disk
+                    revision_manager = RevisionManager(history_filename)
+                    needs_upgrade, version = revision_manager.detect_format_and_upgrade_needed()
+                    should_create_snapshot = not needs_upgrade
+                
+                if should_create_snapshot:
+                    # Generate GUID for new rule
+                    rule_guid = revision_manager.generate_rule_guid()
+                    self.rule_guids[new_rule.sid] = rule_guid
+                    
+                    # Save baseline snapshot for newly created rule (Rev 1)
+                    history_details = {
+                        'line': self.selected_rule_index + 1,
+                        'sid': new_rule.sid,
+                        'action': new_rule.action,
+                        'message': new_rule.message
+                    }
+                    
+                    # Create snapshot entry with GUID (deferred - stored in pending_history)
+                    snapshot_entry = revision_manager.save_change_with_snapshot(
+                        new_rule,
+                        'rule_added',
+                        history_details,
+                        self.get_version_number(),
+                        rule_guid=rule_guid
+                    )
+                    
+                    # Add to pending_history (will be written on file save)
+                    self.pending_history.append(snapshot_entry)
+                else:
+                    # v1.0 format - use regular history entry
+                    rule_details = {
+                        'line': self.selected_rule_index + 1, 
+                        'rule_text': new_rule.to_string()
+                    }
+                    self.add_history_entry('rule_added', rule_details)
+            else:
+                # Fallback to regular history entry if tracking disabled
+                rule_details = {
+                    'line': self.selected_rule_index + 1, 
+                    'rule_text': new_rule.to_string()
+                }
+                self.add_history_entry('rule_added', rule_details)
             
             # Insert the rule
             self.rules.insert(self.selected_rule_index, new_rule)
@@ -3058,7 +3772,7 @@ class SuricataRuleGenerator:
             
             # Set up editor for next rule with new SID
             self.set_default_editor_values()
-            max_sid = max([rule.sid for rule in self.rules], default=99)
+            max_sid = max([rule.sid for rule in self.rules if not getattr(rule, 'is_comment', False) and not getattr(rule, 'is_blank', False)], default=99)
             self.sid_var.set(str(max_sid + 1))
             
         except ValueError:
@@ -3874,6 +4588,13 @@ class SuricataRuleGenerator:
                         if existing_rule_with_sid:
                             # Find a safe SID for the displaced rule
                             safe_sid = max(all_existing_sids) + 1
+                            
+                            # CRITICAL BUG FIX: Update GUID mapping for displaced rule
+                            if existing_rule_with_sid.sid in self.rule_guids:
+                                displaced_guid = self.rule_guids[existing_rule_with_sid.sid]
+                                self.rule_guids[safe_sid] = displaced_guid
+                                del self.rule_guids[existing_rule_with_sid.sid]
+                            
                             existing_rule_with_sid.sid = safe_sid
                             if existing_rule_with_sid.original_options:
                                 import re
@@ -3883,8 +4604,17 @@ class SuricataRuleGenerator:
                     
                     # Only update if SID is actually changing
                     if rule.sid != current_sid:
+                        old_sid = rule.sid
+                        
                         # Remove old SID from tracking set
                         all_existing_sids.discard(rule.sid)
+                        
+                        # CRITICAL BUG FIX: Update GUID mapping before changing SID
+                        # This maintains the connection between the rule and its revision history
+                        if old_sid in self.rule_guids:
+                            rule_guid = self.rule_guids[old_sid]
+                            self.rule_guids[current_sid] = rule_guid
+                            del self.rule_guids[old_sid]
                         
                         # Update the rule's SID
                         rule.sid = current_sid
@@ -5733,8 +6463,74 @@ class SuricataRuleGenerator:
                     for i, rule in enumerate(bottom_rules):
                         self.rules.insert(bottom_insert_position + i, rule)
                     
-                    # Add change tracking entry
+                    # If tracking enabled, create baseline snapshots for all template rules
                     if self.tracking_enabled:
+                        from revision_manager import RevisionManager
+                        
+                        # Build history filename
+                        if self.current_file:
+                            history_filename = self.current_file.replace('.suricata', '.history')
+                            if not history_filename.endswith('.history'):
+                                history_filename += '.history'
+                        else:
+                            # Use temporary filename for unsaved files
+                            import tempfile
+                            temp_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'user_files')
+                            if not os.path.exists(temp_dir):
+                                temp_dir = tempfile.gettempdir()
+                            history_filename = os.path.join(temp_dir, '_unsaved_.history')
+                        
+                        revision_manager = RevisionManager(history_filename)
+                        
+                        # Check if format is v2.0 (snapshots enabled) or v1.0 (legacy, no snapshots)
+                        needs_upgrade, version = revision_manager.detect_format_and_upgrade_needed()
+                        
+                        # Only save snapshots if format is v2.0 (user accepted upgrade or new file)
+                        if not needs_upgrade:
+                            # Create baseline snapshots for all inserted rules (skip comments/blanks)
+                            import datetime
+                            timestamp = datetime.datetime.now().isoformat()
+                            
+                            all_template_rules = top_rules + bottom_rules
+                            for rule in all_template_rules:
+                                if not getattr(rule, 'is_comment', False) and not getattr(rule, 'is_blank', False):
+                                    # Generate GUID for this template rule
+                                    rule_guid = revision_manager.generate_rule_guid()
+                                    self.rule_guids[rule.sid] = rule_guid
+                                    
+                                    # Save baseline snapshot for template rule (Rev 1)
+                                    history_details = {
+                                        'line': 0,  # Line number not meaningful for dual insertion
+                                        'sid': rule.sid,
+                                        'action': rule.action,
+                                        'message': rule.message
+                                    }
+                                    
+                                    # Create snapshot entry with GUID (deferred - stored in pending_history)
+                                    snapshot_entry = revision_manager.save_change_with_snapshot(
+                                        rule,
+                                        'rule_added',
+                                        history_details,
+                                        self.get_version_number(),
+                                        timestamp,
+                                        rule_guid=rule_guid
+                                    )
+                                    
+                                    # Add to pending_history (will be written on file save)
+                                    self.pending_history.append(snapshot_entry)
+                        else:
+                            # Legacy v1.0 format - use regular history entry (pending until save)
+                            total_rules = len(top_rules) + len(bottom_rules)
+                            self.add_history_entry('template_applied', {
+                                'template_name': template['name'],
+                                'rule_count': total_rules,
+                                'top_rules_count': len(top_rules),
+                                'bottom_rules_count': len(bottom_rules),
+                                'test_mode': test_mode,
+                                'insertion_type': 'dual'
+                            })
+                    else:
+                        # Tracking disabled - use regular history entry
                         total_rules = len(top_rules) + len(bottom_rules)
                         self.add_history_entry('template_applied', {
                             'template_name': template['name'],
@@ -5784,8 +6580,72 @@ class SuricataRuleGenerator:
                     for i, rule in enumerate(template_rules):
                         self.rules.insert(insert_position + i, rule)
                     
-                    # Add change tracking entry
+                    # If tracking enabled, create baseline snapshots for all template rules
                     if self.tracking_enabled:
+                        from revision_manager import RevisionManager
+                        
+                        # Build history filename
+                        if self.current_file:
+                            history_filename = self.current_file.replace('.suricata', '.history')
+                            if not history_filename.endswith('.history'):
+                                history_filename += '.history'
+                        else:
+                            # Use temporary filename for unsaved files
+                            import tempfile
+                            temp_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'user_files')
+                            if not os.path.exists(temp_dir):
+                                temp_dir = tempfile.gettempdir()
+                            history_filename = os.path.join(temp_dir, '_unsaved_.history')
+                        
+                        revision_manager = RevisionManager(history_filename)
+                        
+                        # Check if format is v2.0 (snapshots enabled) or v1.0 (legacy, no snapshots)
+                        needs_upgrade, version = revision_manager.detect_format_and_upgrade_needed()
+                        
+                        # Only save snapshots if format is v2.0 (user accepted upgrade or new file)
+                        if not needs_upgrade:
+                            # Create baseline snapshots for all inserted rules (skip comments/blanks)
+                            import datetime
+                            timestamp = datetime.datetime.now().isoformat()
+                            
+                            for rule in template_rules:
+                                if not getattr(rule, 'is_comment', False) and not getattr(rule, 'is_blank', False):
+                                    # Generate GUID for this template rule
+                                    rule_guid = revision_manager.generate_rule_guid()
+                                    self.rule_guids[rule.sid] = rule_guid
+                                    
+                                    # Save baseline snapshot for template rule (Rev 1)
+                                    history_details = {
+                                        'line': insert_position + 1,
+                                        'sid': rule.sid,
+                                        'action': rule.action,
+                                        'message': rule.message
+                                    }
+                                    
+                                    # Create snapshot entry with GUID (deferred - stored in pending_history)
+                                    snapshot_entry = revision_manager.save_change_with_snapshot(
+                                        rule,
+                                        'rule_added',
+                                        history_details,
+                                        self.get_version_number(),
+                                        timestamp,
+                                        rule_guid=rule_guid
+                                    )
+                                    
+                                    # Add to pending_history (will be written on file save)
+                                    self.pending_history.append(snapshot_entry)
+                        else:
+                            # Legacy v1.0 format - use regular history entry (pending until save)
+                            self.add_history_entry('template_applied', {
+                                'template_name': template['name'],
+                                'rule_count': len(template_rules),
+                                'start_sid': template_rules[0].sid if template_rules else start_sid,
+                                'end_sid': template_rules[-1].sid if template_rules else start_sid,
+                                'test_mode': test_mode,
+                                'insertion_point': insert_position + 1
+                            })
+                    else:
+                        # Tracking disabled - use regular history entry
                         self.add_history_entry('template_applied', {
                             'template_name': template['name'],
                             'rule_count': len(template_rules),
@@ -5819,10 +6679,131 @@ class SuricataRuleGenerator:
         ttk.Button(button_frame, text="Apply", command=on_apply).pack(side=tk.RIGHT, padx=(5, 0))
         ttk.Button(button_frame, text="Cancel", command=dialog.destroy).pack(side=tk.RIGHT)
     
+    def show_history_upgrade_prompt(self, revision_manager):
+        """Show upgrade prompt for legacy .history file"""
+        
+        rule_count = len([r for r in self.rules 
+                         if not getattr(r, 'is_comment', False) 
+                         and not getattr(r, 'is_blank', False)])
+        
+        response = messagebox.askyesno(
+            "Upgrade Change Tracking",
+            f"Enable rollback capability?\n\n"
+            f"Your .history file uses an older format.\n"
+            f"Upgrading will enable per-rule rollback for:\n\n"
+            f"• {rule_count} current rules in this file\n"
+            f"• Future rule modifications\n\n"
+            f"Note: Past changes remain in history but\n"
+            f"cannot be rolled back (no snapshots exist).\n\n"
+            f"Upgrade now?"
+        )
+        
+        if response:
+            # Show progress bar if many rules
+            if rule_count > 10000:
+                self.upgrade_with_progress(revision_manager)
+            else:
+                success = revision_manager.upgrade_history_format(
+                    self.rules, self.get_version_number()
+                )
+                if success:
+                    # Load GUIDs from the upgraded history file
+                    self.rule_guids = revision_manager.extract_rule_guids()
+                    messagebox.showinfo("Success", 
+                        f"{rule_count} rules upgraded with baseline snapshots.")
+                else:
+                    messagebox.showerror("Upgrade Failed",
+                        "Failed to upgrade history file.\n\n"
+                        "Your existing history remains intact.\n"
+                        "You can try upgrading again later.")
+    
+    def upgrade_with_progress(self, revision_manager):
+        """Upgrade history with progress bar for large rule sets"""
+        rule_count = len([r for r in self.rules 
+                         if not getattr(r, 'is_comment', False) 
+                         and not getattr(r, 'is_blank', False)])
+        
+        # Create progress dialog
+        progress_dialog = tk.Toplevel(self.root)
+        progress_dialog.title("Creating Baseline Snapshots")
+        progress_dialog.geometry("400x140")
+        progress_dialog.transient(self.root)
+        progress_dialog.grab_set()
+        progress_dialog.resizable(False, False)
+        
+        # Center the progress dialog
+        progress_dialog.geometry("+%d+%d" % (
+            self.root.winfo_rootx() + 200,
+            self.root.winfo_rooty() + 200
+        ))
+        
+        # Progress frame
+        progress_frame = ttk.Frame(progress_dialog)
+        progress_frame.pack(fill=tk.BOTH, expand=True, padx=20, pady=20)
+        
+        # Status label
+        status_label = ttk.Label(progress_frame, 
+                                text=f"Processing: 0 / {rule_count} rules")
+        status_label.pack(pady=(0, 10))
+        
+        # Progress bar
+        progress_bar = ttk.Progressbar(progress_frame, mode='determinate', length=350)
+        progress_bar.pack(pady=(0, 10))
+        
+        # Progress text label
+        progress_text = ttk.Label(progress_frame, text="0%")
+        progress_text.pack()
+        
+        # Force dialog to display
+        progress_dialog.update()
+        
+        # Progress callback
+        def progress_callback(current, total):
+            progress = (current / total) * 100
+            progress_bar['value'] = progress
+            progress_text.config(text=f"{int(progress)}%")
+            status_label.config(text=f"Processing: {current} / {total} rules")
+            progress_dialog.update()
+        
+        # Perform upgrade
+        success = revision_manager.upgrade_history_format(
+            self.rules, 
+            self.get_version_number(),
+            progress_callback
+        )
+        
+        # Close progress dialog
+        progress_dialog.destroy()
+        
+        # Show result
+        if success:
+            # Load GUIDs from the upgraded history file
+            self.rule_guids = revision_manager.extract_rule_guids()
+            messagebox.showinfo("Success", 
+                f"{rule_count} rules upgraded with baseline snapshots.")
+        else:
+            messagebox.showerror("Upgrade Failed",
+                "Failed to upgrade history file.\n\n"
+                "Your existing history remains intact.\n"
+                "You can try upgrading again later.")
+    
     def on_closing(self):
         """Handle application closing"""
         if self.modified and not self.ask_save_changes():
             return
+        
+        # Clean up temporary _unsaved_.history file if it exists
+        try:
+            import tempfile
+            temp_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'user_files')
+            if not os.path.exists(temp_dir):
+                temp_dir = tempfile.gettempdir()
+            unsaved_history = os.path.join(temp_dir, '_unsaved_.history')
+            
+            if os.path.exists(unsaved_history):
+                os.remove(unsaved_history)
+        except (OSError, IOError):
+            pass  # Cleanup is best-effort, don't raise errors
         
         self.root.destroy()
     

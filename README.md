@@ -1,6 +1,6 @@
 # Suricata Rule Generator for AWS Network Firewall
 
-**Current Version: 1.24.3**
+**Current Version: 1.25.0**
 
 A GUI application for creating, editing, and managing Suricata rules - specifically designed for AWS Network Firewall deployments using strict rule ordering.
 
@@ -1299,7 +1299,7 @@ resource "aws_networkfirewall_rule_group" "suricata_rules" {
 
 ## Change Tracking
 
-> 📝 **Comprehensive audit trail** for compliance and documentation - new in v1.16.0!
+> 📝 **Comprehensive audit trail with per-rule rollback** - new in v1.16.0, enhanced with rollback in v1.25.0!
 
 ![Change Tracking](images/history.png)
 
@@ -1319,37 +1319,82 @@ resource "aws_networkfirewall_rule_group" "suricata_rules" {
 - Rules added, modified, deleted
 - Bulk operations (paste, template application)
 - SID renumbering operations
+- **Rule rollbacks** *(v1.25.0)* - Rollback to previous revisions
 
 **Advanced Operations:**
 - Advanced Editor changes (with summary)
 - Template applications with details
 - Domain import operations
 
+### Per-Rule Revision History & Rollback *(New in v1.25.0)*
+
+**Rev Dropdown for Rollback:**
+![Change Tracking](images/rev.png)
+- When change tracking is enabled, the Rev field becomes an interactive dropdown
+- Shows complete revision history for each rule (by SID)
+- Displays timestamps for each revision: "Rev 3 - 2026-01-01 01T09:32"
+- Click to select any previous revision to review or rollback
+
+**Side-by-Side Comparison:**
+![Change Tracking](images/rollback.png)
+- Before rolling back, view detailed comparison of current vs selected revision
+- Compare all rule fields with changed fields highlighted in red
+- Review full rule syntax for both versions
+- Make informed decision before proceeding
+
+**Non-Destructive Rollback:**
+- Selecting a revision populates the Rule Editor (doesn't immediately change the rule)
+- Review rolled-back values before committing
+- Click "Save Changes" to commit the rollback
+- Cancel by selecting another rule or closing editor without saving
+- Full Ctrl+Z undo support for all rollback operations (undos not tracked in history)
+
+**Linear History:**
+- All revisions preserved permanently - old versions never deleted
+- E.g. Rolling back to Rev 2 creates a new Rev value (with Rev 2's content)
+- Complete audit trail maintained for compliance
+- Can rollback to any previous revision at any time
+
+**Automatic Snapshots:**
+- Rule snapshots automatically saved during all rule modifications (except message field)
+- Works with rule edits, new rules, rule templates, and bulk operations
+- Optimized storage (snapshots embedded inline with change entries)
+- Typical file size: ~500KB for 100 rules × 10 revisions each
+
+**Snapshots not supported for Advanced Editor changes:**
+- Modifying a rule in the advanced editor does not create new rule snapshot
+- Rule changes made in the advanced editor are summarized in Change History tab
+
+**Legacy File Upgrade:**
+- Existing .history files (v1.0) continue to work normally
+- Optional upgrade prompt to enable rollback for current rules (v1.0 history)
+- Upgrade creates baseline snapshots for all rules at current revision number
+- Rollback capability enabled from upgrade point forward
+
 ### History Display
 
 **History Tab:**
-- Chronological list of all changes
+- Chronological list of all changes including rollbacks
 - Timestamps in ISO format
 - Version numbers for each operation
 - Detailed change information
-
-**Export History:**
-- Save history to text file
-- Include in documentation
-- Compliance reporting
+- Rollback entries show source and target revisions
 
 ### Storage
 
 **Companion .history File:**
-- JSON format for machine readability
-- Saves with .suricata file
+- JSON format for machine readability (v2.0 format with snapshots)
+- Saves along with .suricata file
 - Automatically loads on file open
+- Backward compatible with legacy v1.0 format
 
 ### Benefits
-- 📋 **Audit Trail**: Complete record of changes
-- 🔍 **Troubleshooting**: Track when issues were introduced
-- 📊 **Team Collaboration**: See who changed what
-- 📝 **Documentation**: Export for compliance reports
+- 📋 **Audit Trail**: Complete record of changes with revision snapshots
+- 🔍 **Troubleshooting**: Track when issues were introduced and rollback if needed
+- 📊 **Team Collaboration**: See who changed what and restore previous versions
+- 🔄 **Safety Net**: Roll back individual rules that were modified incorrectly
+- 🧪 **Experimentation**: Try changes knowing you can easily revert
+- 📚 **Learning**: Review how specific rules evolved over time
 
 ---
 
@@ -1600,6 +1645,7 @@ The application follows a modular architecture with specialized managers:
 - **rule_analyzer.py**: Conflict detection and reporting
 - **flow_tester.py**: Network traffic simulation
 - **advanced_editor.py**: IDE-style text editor *(v1.19.0)*
+- **revision_manager.py**: Per-rule revision history and rollback *(v1.25.0)*
 
 ### Configuration Files
 - **content_keywords.json**: Auto-complete keyword definitions *(v1.19.0)*
@@ -1667,5 +1713,3 @@ For issues, questions, or to contribute to the project:
 ---
 
 **Repository**: [aws-samples/sample-suricata-generator](https://github.com/aws-samples/sample-suricata-generator)
-
-**Version**: 1.24.3

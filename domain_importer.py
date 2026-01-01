@@ -156,7 +156,7 @@ class DomainImporter:
         
         # Starting SID
         ttk.Label(config_frame, text="Starting SID:").grid(row=1, column=0, sticky=tk.W, padx=5, pady=5)
-        max_sid = max([rule.sid for rule in self.parent.rules], default=99)
+        max_sid = max([rule.sid for rule in self.parent.rules if not getattr(rule, 'is_comment', False) and not getattr(rule, 'is_blank', False)], default=99)
         suggested_sid = max_sid + 1
         sid_var = tk.StringVar(value=str(suggested_sid))
         ttk.Entry(config_frame, textvariable=sid_var, width=10).grid(row=1, column=1, sticky=tk.W, padx=5, pady=5)
@@ -380,16 +380,83 @@ class DomainImporter:
                 # Determine insertion line for history tracking
                 history_line = insert_index + 1 if insert_index is not None else len(self.parent.rules) + 1
                 
-                # Add history entry with detailed domain information
-                self.parent.add_history_entry('domain_import', {
-                    'count': len(new_rules), 
-                    'domains': len(domains), 
-                    'action': action,
-                    'domain_details': domain_details,
-                    'start_sid': start_sid,
-                    'end_sid': current_sid - 1,
-                    'line': history_line
-                })
+                # If tracking enabled, create baseline snapshots for all imported rules
+                if self.parent.tracking_enabled:
+                    from revision_manager import RevisionManager
+                    
+                    # Build history filename
+                    if self.parent.current_file:
+                        history_filename = self.parent.current_file.replace('.suricata', '.history')
+                        if not history_filename.endswith('.history'):
+                            history_filename += '.history'
+                    else:
+                        # Use temporary filename for unsaved files
+                        import tempfile
+                        import os
+                        temp_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'user_files')
+                        if not os.path.exists(temp_dir):
+                            temp_dir = tempfile.gettempdir()
+                        history_filename = os.path.join(temp_dir, '_unsaved_.history')
+                    
+                    revision_manager = RevisionManager(history_filename)
+                    
+                    # Check if format is v2.0 (snapshots enabled) or v1.0 (legacy, no snapshots)
+                    needs_upgrade, version = revision_manager.detect_format_and_upgrade_needed()
+                    
+                    # Only save snapshots if format is v2.0 (user accepted upgrade or new file)
+                    if not needs_upgrade:
+                        # Create baseline snapshots for all imported rules (skip comments/blanks)
+                        import datetime
+                        timestamp = datetime.datetime.now().isoformat()
+                        
+                        for rule in new_rules:
+                            if not getattr(rule, 'is_comment', False) and not getattr(rule, 'is_blank', False):
+                                # Generate GUID for this imported rule
+                                rule_guid = revision_manager.generate_rule_guid()
+                                self.parent.rule_guids[rule.sid] = rule_guid
+                                
+                                # Save baseline snapshot for imported rule (Rev 1)
+                                history_details = {
+                                    'line': history_line,
+                                    'sid': rule.sid,
+                                    'action': rule.action,
+                                    'message': rule.message
+                                }
+                                
+                                # Create snapshot entry with GUID (deferred - stored in pending_history)
+                                snapshot_entry = revision_manager.save_change_with_snapshot(
+                                    rule,
+                                    'rule_added',
+                                    history_details,
+                                    self.parent.get_version_number(),
+                                    timestamp,
+                                    rule_guid=rule_guid
+                                )
+                                
+                                # Add to pending_history (will be written on file save)
+                                self.parent.pending_history.append(snapshot_entry)
+                    else:
+                        # Legacy v1.0 format - use regular history entry (pending until save)
+                        self.parent.add_history_entry('domain_import', {
+                            'count': len(new_rules), 
+                            'domains': len(domains), 
+                            'action': action,
+                            'domain_details': domain_details,
+                            'start_sid': start_sid,
+                            'end_sid': current_sid - 1,
+                            'line': history_line
+                        })
+                else:
+                    # Tracking disabled - use regular history entry
+                    self.parent.add_history_entry('domain_import', {
+                        'count': len(new_rules), 
+                        'domains': len(domains), 
+                        'action': action,
+                        'domain_details': domain_details,
+                        'start_sid': start_sid,
+                        'end_sid': current_sid - 1,
+                        'line': history_line
+                    })
                 
                 # Insert rules at determined position
                 if insert_index is not None:
@@ -1013,7 +1080,7 @@ class DomainImporter:
                 return
             
             # Get next available SID
-            max_sid = max([rule.sid for rule in self.parent.rules], default=99)
+            max_sid = max([rule.sid for rule in self.parent.rules if not getattr(rule, 'is_comment', False) and not getattr(rule, 'is_blank', False)], default=99)
             start_sid = max_sid + 1
             
             # Generate domain rules
@@ -1023,6 +1090,76 @@ class DomainImporter:
             
             # Save state for undo
             self.parent.save_undo_state()
+            
+            # If tracking enabled, create baseline snapshots for inserted rules
+            if self.parent.tracking_enabled:
+                from revision_manager import RevisionManager
+                
+                # Build history filename
+                if self.parent.current_file:
+                    history_filename = self.parent.current_file.replace('.suricata', '.history')
+                    if not history_filename.endswith('.history'):
+                        history_filename += '.history'
+                else:
+                    # Use temporary filename for unsaved files
+                    import tempfile
+                    import os
+                    temp_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'user_files')
+                    if not os.path.exists(temp_dir):
+                        temp_dir = tempfile.gettempdir()
+                    history_filename = os.path.join(temp_dir, '_unsaved_.history')
+                
+                revision_manager = RevisionManager(history_filename)
+                
+                # Check if format is v2.0 (snapshots enabled) or v1.0 (legacy, no snapshots)
+                needs_upgrade, version = revision_manager.detect_format_and_upgrade_needed()
+                
+                # Only save snapshots if format is v2.0 (user accepted upgrade or new file)
+                if not needs_upgrade:
+                    # Create baseline snapshots for all inserted rules (skip comments/blanks)
+                    import datetime
+                    timestamp = datetime.datetime.now().isoformat()
+                    
+                    for rule in new_rules:
+                        if not getattr(rule, 'is_comment', False) and not getattr(rule, 'is_blank', False):
+                            # Generate GUID for this inserted rule
+                            rule_guid = revision_manager.generate_rule_guid()
+                            self.parent.rule_guids[rule.sid] = rule_guid
+                            
+                            # Save baseline snapshot for inserted rule (Rev 1)
+                            history_details = {
+                                'line': insert_index + 1,
+                                'sid': rule.sid,
+                                'action': rule.action,
+                                'message': rule.message
+                            }
+                            
+                            # Create snapshot entry with GUID (deferred - stored in pending_history)
+                            snapshot_entry = revision_manager.save_change_with_snapshot(
+                                rule,
+                                'rule_added',
+                                history_details,
+                                self.parent.get_version_number(),
+                                timestamp,
+                                rule_guid=rule_guid
+                            )
+                            
+                            # Add to pending_history (will be written on file save)
+                            self.parent.pending_history.append(snapshot_entry)
+                else:
+                    # Legacy v1.0 format - use regular history entry (pending until save)
+                    self.parent.add_history_entry('rule_added', {
+                        'line': insert_index + 1,
+                        'domain': domain,
+                        'rule_count': len(new_rules)
+                    })
+            else:
+                # Tracking disabled - use regular history entry
+                self.parent.add_history_entry('rule_added', {
+                    'line': insert_index + 1,
+                    'domain': domain,
+                    'rule_count': len(new_rules)
+                })
             
             # Insert rules at selected position
             for i, rule in enumerate(new_rules):

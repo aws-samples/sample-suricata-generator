@@ -1,5 +1,93 @@
 # Release Notes
 
+## Version 1.25.0 - December 31, 2025
+
+### Major Enhancement: Per-Rule Revision History & Rollback
+- **Rule Versioning with Rollback Capability**: Enhanced change tracking feature now enables viewing and restoring individual rules to previous revisions
+  - **Rev Dropdown UI**: When change tracking is enabled, the Rev field becomes an interactive dropdown showing all available revisions for the selected rule
+    - Displays revision numbers with timestamps (e.g., "Rev 3 (Current) - 2025-12-26 14:30")
+    - Shows complete revision history for each rule by SID
+    - Only available when change tracking is enabled - read-only text field when disabled
+  - **Side-by-Side Comparison**: Before rollback, view detailed comparison of current vs selected revision
+    - Compare all rule fields (action, protocol, networks, ports, message, content)
+    - See full rule syntax for both versions
+    - Changed fields highlighted in red for easy identification
+    - Review changes before committing rollback
+  - **Non-Destructive Workflow**: Rollback populates the Rule Editor without immediately changing the rule
+    - Review rolled-back values in editor before saving
+    - Click "Save Changes" to commit rollback
+    - Cancel by selecting another rule or closing editor without saving
+    - Full Ctrl+Z undo support for all rollback operations
+  - **Linear History Model**: All revisions preserved permanently - old versions never deleted
+    - Rolling back to Rev 2 creates a new Rev 5 (with Rev 2's content)
+    - Complete audit trail maintained for compliance
+    - Can rollback to any previous revision at any time
+  - **Optimized Storage**: Rule snapshots embedded inline with change log entries
+    - No duplicate storage - snapshots stored with the changes that created them
+    - Each snapshot ~500 bytes embedded in existing .history structure
+    - Efficient for typical use (100 rules × 10 revisions = ~500KB)
+  - **Backward Compatible**: Existing .history files continue to work without changes
+    - Legacy format (v1.0) still fully supported
+    - Optional upgrade prompt for existing files to enable rollback
+    - New files automatically created in enhanced format (v2.0)
+    - Upgrade creates baseline snapshots for all current rules
+  - **Change History Integration**: Rollback operations logged in History tab
+    - Shows "rule_rolled_back" entries with source and target revision numbers
+    - Maintains complete audit trail of all rollback actions
+    - Includes original timestamp of rolled-back revision
+  - **Automatic Baseline Snapshots**: When enabling tracking on existing files
+    - Creates baseline snapshots for all current rules
+    - Enables rollback capability from the point tracking was enabled forward
+    - Upgrade prompt shown once per file session for legacy .history files
+
+### Technical Implementation
+- **Enhanced .history Format**: Version 2.0 format with inline rule snapshots
+  - Snapshots stored in `rule_snapshot` field within change entries
+  - Complete rule state captured (action, protocol, networks, ports, message, content, rev)
+  - SID indexing for O(1) revision lookups (performance optimization)
+- **RevisionManager Module**: Complete revision history management system (new revision_manager.py)
+  - `get_revisions()` - Retrieve all revisions for a specific SID
+  - `restore_revision()` - Restore rule to specific historical state
+  - `upgrade_history_format()` - Convert legacy files to enhanced format
+  - `transfer_sid_history()` - Maintain history when SID changes
+- **UI Enhancements**: Rev dropdown and rollback confirmation dialog (ui_manager.py)
+  - Conditional dropdown vs text field based on tracking status
+  - Comprehensive side-by-side comparison dialog before rollback
+  - Real-time revision list population as rules are selected
+- **Integration Points**: Snapshots automatically saved during all rule modifications
+  - Rule edits via editor panel
+  - New rule insertion
+  - Bulk operations (templates, domain import)
+  - SID renumbering operations
+
+### User Impact
+- **Safety Net**: Roll back individual rules that were modified incorrectly
+- **Audit Trail**: Complete revision history for each rule for compliance requirements
+- **Experimentation**: Try changes knowing you can easily revert to any previous version
+- **Documentation**: Review how specific rules evolved over time
+- **Learning**: See exactly what changed between revisions
+- **Zero Breaking Changes**: Existing functionality completely preserved - rollback is purely additive
+
+---
+
+## Version 1.24.7 - December 28, 2025
+
+### Bug Fix: SID Suggestion Consistency with Change Tracking
+- **Fixed Inconsistent SID Suggestions**: Corrected bug where enabling change tracking caused the program to suggest different starting SIDs
+  - **Root Cause**: SID calculation code in 10 locations was not filtering out comment and blank lines when determining the next available SID
+  - **Impact**: When change tracking was enabled (which adds 4 header comment lines), the program would suggest SID 2 instead of the expected SID 100 for new rule files
+  - **Solution**: Updated all SID calculation code to filter out comments and blank lines before calculating max SID:
+    - Changed from: `max([rule.sid for rule in self.rules], default=99)`
+    - Changed to: `max([rule.sid for rule in self.rules if not getattr(rule, 'is_comment', False) and not getattr(rule, 'is_blank', False)], default=99)`
+  - **Locations Fixed** (10 total):
+    - `suricata_generator.py`: 6 instances (add_rule, insert_rule, on_tree_click, insert_new_rule_from_editor, copy_selected_rules, paste_rules)
+    - `ui_manager.py`: 2 instances (on_rule_select, on_tree_click)
+    - `domain_importer.py`: 2 instances (show_bulk_import_dialog, insert_domain_rule)
+  - **Comprehensive Fix**: All code paths that suggest SIDs now behave consistently
+- **User Impact**: Starting SID suggestion is now consistently 100 for new rule files, regardless of whether change tracking is enabled or disabled
+
+---
+
 ## Version 1.24.6 - December 25, 2025
 
 ### Bug Fix: tkinter Compatibility for MacOS

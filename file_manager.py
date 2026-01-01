@@ -277,12 +277,30 @@ class FileManager:
                 except:
                     pass
             
-            # Add pending entries
-            history_data['changes'].extend(pending_history)
+            # Separate different entry types
+            snapshot_entries = [e for e in pending_history if 'rule_snapshot' in e.get('details', {})]
+            regular_entries = [e for e in pending_history 
+                             if 'rule_snapshot' not in e.get('details', {})]
             
-            # Save updated history as valid JSON
-            with open(history_filename, 'w', encoding='utf-8') as f:
-                json.dump(history_data, f, indent=2, ensure_ascii=False)
+            # Handle v2.0 snapshot entries using RevisionManager
+            if snapshot_entries:
+                try:
+                    from revision_manager import RevisionManager
+                    revision_manager = RevisionManager(history_filename)
+                    
+                    # Write snapshot entries directly (batch write)
+                    revision_manager.write_pending_snapshots(snapshot_entries)
+                except Exception:
+                    # If RevisionManager fails, fall back to regular append
+                    history_data['changes'].extend(snapshot_entries)
+            
+            # Handle regular v1.0 entries (append to changes)
+            if regular_entries:
+                history_data['changes'].extend(regular_entries)
+                
+                # Save updated history as valid JSON
+                with open(history_filename, 'w', encoding='utf-8') as f:
+                    json.dump(history_data, f, indent=2, ensure_ascii=False)
                 
         except PermissionError:
             pass  # Cannot write history file

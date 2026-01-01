@@ -653,8 +653,16 @@ class UIManager:
         
         ttk.Label(fields_frame, text="Rev:").grid(row=5, column=2, sticky=tk.W, padx=(20, 5), pady=(5, 0))
         self.rev_var = tk.StringVar()
+        
+        # Rev field - conditional based on tracking state (will be set up properly in show_rule_editor)
         self.rev_entry = ttk.Entry(fields_frame, textvariable=self.rev_var, width=5, state="readonly")
         self.rev_entry.grid(row=5, column=3, sticky=tk.W, pady=(5, 0))
+        
+        # Create dropdown for rev selection (hidden initially, shown when tracking enabled)
+        # Width 27 fits "Rev XXX - YYYY-MM-DDTHH:MM" comfortably without wasted space
+        self.rev_combo = ttk.Combobox(fields_frame, textvariable=self.rev_var, 
+                                      state="readonly", width=27)
+        # Don't grid it yet - will be shown/hidden dynamically
         
         # Comment (hidden by default)
         self.comment_label = ttk.Label(fields_frame, text="Comment:")
@@ -893,6 +901,13 @@ class UIManager:
                     self.content_var.set(rule.content)
                     self.sid_var.set(str(rule.sid))
                     self.rev_var.set(str(rule.rev))
+                    
+                    # Populate revision dropdown if tracking enabled
+                    if self.parent.tracking_enabled:
+                        self.populate_rev_dropdown(rule)
+                    else:
+                        # Make sure entry is shown when tracking disabled
+                        self.setup_rev_dropdown_widget()
     
     def show_rule_editor(self):
         """Show rule editing fields, hide comment fields"""
@@ -905,11 +920,16 @@ class UIManager:
         # Restore all rule fields to their original positions
         fields_frame = self.comment_label.master
         for widget in fields_frame.winfo_children():
-            if widget not in [self.comment_label, self.comment_entry, getattr(self.parent, 'comment_save_button', None)]:
+            # Exclude comment fields, comment save button, AND rev_combo from auto-grid
+            # rev_combo should only be shown when tracking is enabled
+            if widget not in [self.comment_label, self.comment_entry, getattr(self.parent, 'comment_save_button', None), self.rev_combo]:
                 try:
                     widget.grid()
                 except tk.TclError:
                     pass
+        
+        # Ensure rev_combo is hidden by default
+        self.rev_combo.grid_remove()
     
     def hide_all_editor_fields(self):
         """Hide all editor fields for blank lines"""
@@ -963,7 +983,7 @@ class UIManager:
             self.show_rule_editor()  # Show editor fields
             self.parent.set_default_editor_values()  # Populate with defaults
             # Auto-generate next available SID for convenience
-            max_sid = max([rule.sid for rule in self.parent.rules], default=99)
+            max_sid = max([rule.sid for rule in self.parent.rules if not getattr(rule, 'is_comment', False) and not getattr(rule, 'is_blank', False)], default=99)
             self.sid_var.set(str(max_sid + 1))
         else:
             # Check if clicking on already selected item to toggle selection
@@ -1907,7 +1927,11 @@ class UIManager:
                     sid = details.get('sid', self._extract_sid_from_rule_text(rule_text))
                     
                     # Base message with rule identification
-                    self.parent.history_text.insert(tk.END, f"Added {rule_action} rule at line {line} (SID: {sid})")
+                    # For template insertions (line 0), omit line number
+                    if line == 0:
+                        self.parent.history_text.insert(tk.END, f"Added {rule_action} rule (SID: {sid})")
+                    else:
+                        self.parent.history_text.insert(tk.END, f"Added {rule_action} rule at line {line} (SID: {sid})")
                     
                     # Add detailed rule information if available
                     protocol = details.get('protocol')
@@ -2125,17 +2149,24 @@ class UIManager:
                     count = details.get('count', '?')
                     rules_before = details.get('rules_before', '?')
                     rules_after = details.get('rules_after', '?')
-                    self.parent.history_text.insert(tk.END, f"[Advanced Editor] Added {count} rules ({rules_before} → {rules_after})\n")
+                    rule_word = "rule" if count == 1 else "rules"
+                    self.parent.history_text.insert(tk.END, f"[Advanced Editor] Added {count} {rule_word} | Total: {rules_before} → {rules_after} rules\n")
                 elif action == 'advanced_editor_rules_deleted':
                     count = details.get('count', '?')
                     rules_before = details.get('rules_before', '?')
                     rules_after = details.get('rules_after', '?')
-                    self.parent.history_text.insert(tk.END, f"[Advanced Editor] Deleted {count} rules ({rules_before} → {rules_after})\n")
+                    rule_word = "rule" if count == 1 else "rules"
+                    self.parent.history_text.insert(tk.END, f"[Advanced Editor] Deleted {count} {rule_word} | Total: {rules_before} → {rules_after} rules\n")
                 elif action == 'advanced_editor_rules_modified':
                     count = details.get('count', '?')
                     rules_before = details.get('rules_before', '?')
                     rules_after = details.get('rules_after', '?')
-                    self.parent.history_text.insert(tk.END, f"[Advanced Editor] Modified {count} rules ({rules_before} → {rules_after})\n")
+                    rule_word = "rule" if count == 1 else "rules"
+                    # Only show arrow notation if counts differ (for consistency)
+                    if rules_before == rules_after:
+                        self.parent.history_text.insert(tk.END, f"[Advanced Editor] Modified {count} {rule_word} | Total: {rules_after} rules\n")
+                    else:
+                        self.parent.history_text.insert(tk.END, f"[Advanced Editor] Modified {count} {rule_word} | Total: {rules_before} → {rules_after} rules\n")
                 elif action == 'advanced_editor_bulk_changes':
                     rules_before = details.get('rules_before', '?')
                     rules_after = details.get('rules_after', '?')
@@ -2242,7 +2273,11 @@ class UIManager:
                             rule_action = details.get('action', self._extract_action_from_rule_text(rule_text))
                             sid = details.get('sid', self._extract_sid_from_rule_text(rule_text))
                             
-                            self.parent.history_text.insert(tk.END, f"Added {rule_action} rule at line {line} (SID: {sid})\n")
+                            # For template insertions (line 0), omit line number
+                            if line == 0:
+                                self.parent.history_text.insert(tk.END, f"Added {rule_action} rule (SID: {sid})\n")
+                            else:
+                                self.parent.history_text.insert(tk.END, f"Added {rule_action} rule at line {line} (SID: {sid})\n")
                         elif action == 'rule_modified':
                             line = details.get('line', '?')
                             rule_text = details.get('rule_text', '')
@@ -2422,17 +2457,24 @@ class UIManager:
                             count = details.get('count', '?')
                             rules_before = details.get('rules_before', '?')
                             rules_after = details.get('rules_after', '?')
-                            self.parent.history_text.insert(tk.END, f"[Advanced Editor] Added {count} rules ({rules_before} → {rules_after})\n")
+                            rule_word = "rule" if count == 1 else "rules"
+                            self.parent.history_text.insert(tk.END, f"[Advanced Editor] Added {count} {rule_word} | Total: {rules_before} → {rules_after} rules\n")
                         elif action == 'advanced_editor_rules_deleted':
                             count = details.get('count', '?')
                             rules_before = details.get('rules_before', '?')
                             rules_after = details.get('rules_after', '?')
-                            self.parent.history_text.insert(tk.END, f"[Advanced Editor] Deleted {count} rules ({rules_before} → {rules_after})\n")
+                            rule_word = "rule" if count == 1 else "rules"
+                            self.parent.history_text.insert(tk.END, f"[Advanced Editor] Deleted {count} {rule_word} | Total: {rules_before} → {rules_after} rules\n")
                         elif action == 'advanced_editor_rules_modified':
                             count = details.get('count', '?')
                             rules_before = details.get('rules_before', '?')
                             rules_after = details.get('rules_after', '?')
-                            self.parent.history_text.insert(tk.END, f"[Advanced Editor] Modified {count} rules ({rules_before} → {rules_after})\n")
+                            rule_word = "rule" if count == 1 else "rules"
+                            # Only show arrow notation if counts differ (for consistency)
+                            if rules_before == rules_after:
+                                self.parent.history_text.insert(tk.END, f"[Advanced Editor] Modified {count} {rule_word} | Total: {rules_after} rules\n")
+                            else:
+                                self.parent.history_text.insert(tk.END, f"[Advanced Editor] Modified {count} {rule_word} | Total: {rules_before} → {rules_after} rules\n")
                         elif action == 'advanced_editor_bulk_changes':
                             rules_before = details.get('rules_before', '?')
                             rules_after = details.get('rules_after', '?')
@@ -4118,3 +4160,537 @@ class UIManager:
         button_frame = ttk.Frame(main_frame)
         button_frame.pack(fill=tk.X, pady=(15, 0))
         ttk.Button(button_frame, text="OK", command=dialog.destroy).pack(side=tk.RIGHT)
+    
+    def populate_rev_dropdown(self, rule: SuricataRule):
+        """Populate rev dropdown with available revisions for this rule"""
+        # If tracking not enabled or no combo widget, just set the rev value
+        if not self.parent.tracking_enabled or not hasattr(self, 'rev_combo'):
+            self.rev_var.set(str(rule.rev))
+            return
+        
+        # Build history filename (check both saved file and unsaved temp file)
+        if self.parent.current_file:
+            history_filename = self.parent.current_file.replace('.suricata', '.history')
+            if not history_filename.endswith('.history'):
+                history_filename += '.history'
+        else:
+            # For unsaved files, check for _unsaved_.history
+            import tempfile
+            temp_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'user_files')
+            if not os.path.exists(temp_dir):
+                temp_dir = tempfile.gettempdir()
+            history_filename = os.path.join(temp_dir, '_unsaved_.history')
+        
+        # Check format version first to determine how to display rev
+        from revision_manager import RevisionManager
+        
+        if os.path.exists(history_filename):
+            revision_manager = RevisionManager(history_filename)
+            is_v2_format = (revision_manager.format_version == '2.0')
+        else:
+            # No history file yet - will be v2.0 when created
+            is_v2_format = True
+        
+        # Setup the appropriate widget (dropdown for v2.0, entry for v1.0)
+        self.setup_rev_dropdown_widget()
+        
+        # For legacy v1.0 format (user declined upgrade), just show plain rev number
+        if not is_v2_format:
+            self.rev_var.set(str(rule.rev))
+            return
+        
+        # For v2.0 format with rollback capability, continue with dropdown population
+        if not os.path.exists(history_filename):
+            # No history file yet - just show plain rev number
+            # Dropdown won't be useful until there are multiple revisions
+            self.rev_var.set(str(rule.rev))
+            self.rev_combo['values'] = []
+            return
+        
+        # Get GUID for this rule (prefer GUID, fallback to SID)
+        rule_guid = self.parent.rule_guids.get(rule.sid)
+        
+        # Get revisions from disk using GUID (primary) or SID (fallback)
+        if rule_guid:
+            revisions = revision_manager.get_revisions(rule_guid=rule_guid)
+        else:
+            revisions = revision_manager.get_revisions(sid=rule.sid)
+        
+        # CRITICAL FIX: Merge pending snapshots from pending_history
+        # This handles unsaved changes that haven't been written to disk yet
+        pending_snapshots = []
+        for entry in self.parent.pending_history:
+            # Check if this is a snapshot entry for this rule
+            if 'rule_snapshot' in entry.get('details', {}):
+                snapshot = entry['details']['rule_snapshot']
+                details = entry['details']
+                
+                # Match by GUID first, then SID for backward compatibility
+                snapshot_guid = snapshot.get('rule_guid') or details.get('rule_guid')
+                if (snapshot_guid and snapshot_guid == rule_guid) or \
+                   (not rule_guid and (details.get('sid') == rule.sid or snapshot.get('sid') == rule.sid)):
+                    # Create revision object from pending snapshot
+                    pending_rev = snapshot.copy()
+                    pending_rev['timestamp'] = entry['timestamp']
+                    pending_snapshots.append(pending_rev)
+        
+        # Merge disk revisions with pending snapshots
+        all_revisions = revisions + pending_snapshots
+        
+        # Sort by rev number in DESCENDING order (highest rev on top)
+        all_revisions.sort(key=lambda r: r.get('rev', 0), reverse=True)
+        
+        if not all_revisions:
+            # No history yet - just set plain rev number
+            # Don't populate dropdown values since there's no history
+            self.rev_var.set(str(rule.rev))
+            self.rev_combo['values'] = []
+            return
+        
+        # Build dropdown values with timestamps (newest first)
+        dropdown_values = []
+        for rev in all_revisions:
+            timestamp = rev['timestamp'][:16]  # Truncate to minutes
+            rev_num = rev['rev']
+            # Always show just "Rev X - timestamp" format (no "Current" marker)
+            label = f"Rev {rev_num} - {timestamp}"
+            dropdown_values.append(label)
+        
+        # Setup dropdown widget and populate
+        self.setup_rev_dropdown_widget()
+        self.rev_combo['values'] = dropdown_values
+        
+        # Set current value to plain number (combobox will display this when not dropped down)
+        # When user clicks dropdown, they'll see the formatted values with timestamps
+        self.rev_var.set(str(rule.rev))
+    
+    def setup_rev_dropdown_widget(self):
+        """Setup rev dropdown widget (show dropdown only for v2.0 format, hide entry)"""
+        if not self.parent.tracking_enabled:
+            # Show entry, hide combo
+            self.rev_entry.grid()
+            self.rev_combo.grid_remove()
+            return
+        
+        # Check if we have v2.0 format (with snapshots) or legacy v1.0
+        # Only show dropdown for v2.0 format
+        has_v2_format = False
+        
+        if self.parent.current_file:
+            history_filename = self.parent.current_file.replace('.suricata', '.history')
+            if not history_filename.endswith('.history'):
+                history_filename += '.history'
+        else:
+            # For unsaved files, check for _unsaved_.history
+            import tempfile
+            temp_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'user_files')
+            if not os.path.exists(temp_dir):
+                temp_dir = tempfile.gettempdir()
+            history_filename = os.path.join(temp_dir, '_unsaved_.history')
+        
+        # CRITICAL BUG FIX: Check pending_history for baseline snapshots FIRST
+        # This handles new files where tracking was just enabled (snapshots in pending_history, not on disk)
+        has_pending_snapshots = any(
+            entry.get('action') == 'baseline_snapshot' and 'rule_snapshot' in entry.get('details', {})
+            for entry in self.parent.pending_history
+        )
+        
+        if has_pending_snapshots:
+            # Has baseline snapshots in pending_history - definitely v2.0 format
+            has_v2_format = True
+        elif os.path.exists(history_filename):
+            # Check format version on disk
+            from revision_manager import RevisionManager
+            revision_manager = RevisionManager(history_filename)
+            # If format is 2.0 or there are snapshots, show dropdown
+            has_v2_format = (revision_manager.format_version == '2.0')
+        else:
+            # No history file and no pending snapshots - NEW file with tracking just enabled
+            # Will be v2.0 when created
+            has_v2_format = True
+        
+        if has_v2_format:
+            # Show combo, hide entry
+            self.rev_entry.grid_remove()
+            self.rev_combo.grid(row=5, column=3, sticky=tk.W, pady=(5, 0))
+            
+            # Bind selection event if not already bound
+            if not hasattr(self, '_rev_combo_bound'):
+                self.rev_combo.bind('<<ComboboxSelected>>', self.on_rev_selected)
+                self._rev_combo_bound = True
+        else:
+            # Legacy v1.0 format - show read-only entry (no rollback capability)
+            self.rev_entry.grid()
+            self.rev_combo.grid_remove()
+    
+    def on_rev_selected(self, event):
+        """Handle rev dropdown selection"""
+        if self.parent.selected_rule_index is None:
+            return
+        
+        rule = self.parent.rules[self.parent.selected_rule_index]
+        
+        # Parse selected rev number from dropdown value
+        selected_value = self.rev_combo.get()
+        import re
+        match = re.match(r'Rev (\d+)', selected_value)
+        if not match:
+            return
+        
+        selected_rev = int(match.group(1))
+        
+        # If selecting current rev, do nothing
+        if selected_rev == rule.rev:
+            return
+        
+        # Show rollback confirmation dialog
+        self.show_rollback_confirmation(rule, selected_rev)
+    
+    def show_rollback_confirmation(self, current_rule: SuricataRule, target_rev: int):
+        """Show side-by-side comparison dialog for rule rollback"""
+        from revision_manager import RevisionManager
+        
+        # Build history filename (check both saved file and unsaved temp file)
+        if self.parent.current_file:
+            history_filename = self.parent.current_file.replace('.suricata', '.history')
+            if not history_filename.endswith('.history'):
+                history_filename += '.history'
+        else:
+            # For unsaved files, check for _unsaved_.history
+            import tempfile
+            temp_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'user_files')
+            if not os.path.exists(temp_dir):
+                temp_dir = tempfile.gettempdir()
+            history_filename = os.path.join(temp_dir, '_unsaved_.history')
+        
+        revision_manager = RevisionManager(history_filename)
+        
+        # Get GUID for this rule (prefer GUID, fallback to SID)
+        rule_guid = self.parent.rule_guids.get(current_rule.sid)
+        
+        # Get target revision using GUID (primary) or SID (fallback)
+        # First check disk revisions
+        if rule_guid:
+            target_revision = revision_manager.get_revision(rule_guid=rule_guid, rev=target_rev)
+        else:
+            target_revision = revision_manager.get_revision(sid=current_rule.sid, rev=target_rev)
+        
+        # CRITICAL FIX: If not found on disk, check pending_history for unsaved snapshots
+        if not target_revision:
+            # Search pending_history for the target revision
+            for entry in self.parent.pending_history:
+                if 'rule_snapshot' in entry.get('details', {}):
+                    snapshot = entry['details']['rule_snapshot']
+                    details = entry['details']
+                    
+                    # Match by GUID first, then SID for backward compatibility
+                    snapshot_guid = snapshot.get('rule_guid') or details.get('rule_guid')
+                    if (snapshot_guid and snapshot_guid == rule_guid) or \
+                       (not rule_guid and (details.get('sid') == current_rule.sid or snapshot.get('sid') == current_rule.sid)):
+                        # Check if this is the target revision
+                        if snapshot.get('rev') == target_rev:
+                            target_revision = snapshot.copy()
+                            target_revision['timestamp'] = entry['timestamp']
+                            break
+        
+        if not target_revision:
+            messagebox.showerror("Error", 
+                f"Revision {target_rev} not found for SID {current_rule.sid}")
+            # Reset dropdown to current value
+            self.populate_rev_dropdown(current_rule)
+            return
+        
+        # Create dialog
+        dialog = tk.Toplevel(self.parent.root)
+        dialog.title("Rollback Rule Confirmation")
+        dialog.geometry("900x550")
+        dialog.transient(self.parent.root)
+        dialog.grab_set()
+        dialog.resizable(False, False)
+        
+        # Center dialog
+        dialog.geometry("+%d+%d" % (
+            self.parent.root.winfo_rootx() + 100,
+            self.parent.root.winfo_rooty() + 100
+        ))
+        
+        # Main frame
+        main_frame = ttk.Frame(dialog)
+        main_frame.pack(fill=tk.BOTH, expand=True, padx=20, pady=20)
+        
+        # Header
+        timestamp_str = target_revision['timestamp'][:16]
+        header_text = f"SID: {current_rule.sid} | Rollback from Rev {current_rule.rev} → Rev {target_rev} ({timestamp_str})"
+        ttk.Label(main_frame, text=header_text, 
+                 font=("TkDefaultFont", 10, "bold")).pack(pady=(0, 15))
+        
+        # Separator
+        ttk.Separator(main_frame, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=(0, 15))
+        
+        # Comparison frame (two columns)
+        comp_frame = ttk.Frame(main_frame)
+        comp_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 15))
+        
+        # Left column: Current
+        left_frame = ttk.LabelFrame(comp_frame, text="CURRENT (Before Rollback)")
+        left_frame.grid(row=0, column=0, sticky="nsew", padx=(0, 5))
+        
+        # Right column: Target
+        right_frame = ttk.LabelFrame(comp_frame, text="SELECTED REVISION (After Rollback)")
+        right_frame.grid(row=0, column=1, sticky="nsew", padx=(5, 0))
+        
+        comp_frame.grid_columnconfigure(0, weight=1)
+        comp_frame.grid_columnconfigure(1, weight=1)
+        comp_frame.grid_rowconfigure(0, weight=1)
+        
+        # Helper function to add field comparison
+        def add_field_row(parent, label, value, changed=False):
+            frame = ttk.Frame(parent)
+            frame.pack(fill=tk.X, padx=10, pady=2)
+            
+            ttk.Label(frame, text=f"{label}:", 
+                     font=("TkDefaultFont", 9, "bold"), 
+                     width=12).pack(side=tk.LEFT)
+            
+            # Highlight changed fields
+            fg_color = "red" if changed else "black"
+            ttk.Label(frame, text=value, 
+                     font=("TkDefaultFont", 9),
+                     foreground=fg_color).pack(side=tk.LEFT)
+        
+        # Compare and populate fields
+        add_field_row(left_frame, "Action", current_rule.action,
+                     current_rule.action != target_revision['action'])
+        add_field_row(left_frame, "Protocol", current_rule.protocol,
+                     current_rule.protocol != target_revision['protocol'])
+        add_field_row(left_frame, "Source", f"{current_rule.src_net}:{current_rule.src_port}",
+                     current_rule.src_net != target_revision['src_net'] or 
+                     current_rule.src_port != target_revision['src_port'])
+        add_field_row(left_frame, "Destination", f"{current_rule.dst_net}:{current_rule.dst_port}",
+                     current_rule.dst_net != target_revision['dst_net'] or 
+                     current_rule.dst_port != target_revision['dst_port'])
+        add_field_row(left_frame, "Message", current_rule.message[:40] + "..." if len(current_rule.message) > 40 else current_rule.message,
+                     current_rule.message != target_revision['message'])
+        add_field_row(left_frame, "Rev", str(current_rule.rev), True)
+        
+        # Full rule text (scrollable)
+        ttk.Label(left_frame, text="Full Rule:", 
+                 font=("TkDefaultFont", 9, "bold")).pack(anchor=tk.W, padx=10, pady=(10, 5))
+        
+        left_text = tk.Text(left_frame, height=6, wrap=tk.WORD, 
+                           font=("Consolas", 8))
+        left_text.pack(fill=tk.BOTH, expand=True, padx=10, pady=(0, 10))
+        left_text.insert(tk.END, current_rule.to_string())
+        left_text.config(state=tk.DISABLED)
+        
+        # Right column fields
+        add_field_row(right_frame, "Action", target_revision['action'],
+                     current_rule.action != target_revision['action'])
+        add_field_row(right_frame, "Protocol", target_revision['protocol'],
+                     current_rule.protocol != target_revision['protocol'])
+        add_field_row(right_frame, "Source", f"{target_revision['src_net']}:{target_revision['src_port']}",
+                     current_rule.src_net != target_revision['src_net'] or 
+                     current_rule.src_port != target_revision['src_port'])
+        add_field_row(right_frame, "Destination", f"{target_revision['dst_net']}:{target_revision['dst_port']}",
+                     current_rule.dst_net != target_revision['dst_net'] or 
+                     current_rule.dst_port != target_revision['dst_port'])
+        
+        target_message = target_revision['message']
+        add_field_row(right_frame, "Message", target_message[:40] + "..." if len(target_message) > 40 else target_message,
+                     current_rule.message != target_revision['message'])
+        add_field_row(right_frame, "Rev", str(target_rev), True)
+        
+        # Full rule text
+        ttk.Label(right_frame, text="Full Rule:", 
+                 font=("TkDefaultFont", 9, "bold")).pack(anchor=tk.W, padx=10, pady=(10, 5))
+        
+        # Reconstruct target rule text using GUID (primary) or SID (fallback)
+        # First try disk revisions
+        if rule_guid:
+            target_rule = revision_manager.restore_revision(rule_guid=rule_guid, rev=target_rev)
+        else:
+            target_rule = revision_manager.restore_revision(sid=current_rule.sid, rev=target_rev)
+        
+        # CRITICAL FIX: If not found on disk, manually reconstruct from target_revision dict
+        # (which was already found from pending_history above)
+        if not target_rule and target_revision:
+            try:
+                target_rule = SuricataRule(
+                    action=target_revision['action'],
+                    protocol=target_revision['protocol'],
+                    src_net=target_revision['src_net'],
+                    src_port=target_revision['src_port'],
+                    dst_net=target_revision['dst_net'],
+                    dst_port=target_revision['dst_port'],
+                    message=target_revision['message'],
+                    content=target_revision['content'],
+                    sid=target_revision.get('sid', current_rule.sid),
+                    direction=target_revision.get('direction', '->'),
+                    rev=target_revision['rev'],
+                    original_options=target_revision.get('original_options', '')
+                )
+            except (KeyError, TypeError, ValueError):
+                # If reconstruction fails, target_rule will remain None
+                pass
+        
+        right_text = tk.Text(right_frame, height=6, wrap=tk.WORD, 
+                            font=("Consolas", 8))
+        right_text.pack(fill=tk.BOTH, expand=True, padx=10, pady=(0, 10))
+        if target_rule:
+            right_text.insert(tk.END, target_rule.to_string())
+        right_text.config(state=tk.DISABLED)
+        
+        # Warning message
+        ttk.Separator(main_frame, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=(0, 10))
+        warning_label = ttk.Label(main_frame,
+            text="⚠️ This will populate the Rule Editor with the selected revision. Click 'Save Changes' to commit.",
+            foreground="orange",
+            font=("TkDefaultFont", 9))
+        warning_label.pack(pady=(0, 15))
+        
+        # Buttons
+        button_frame = ttk.Frame(main_frame)
+        button_frame.pack()
+        
+        result = [False]
+        
+        def on_rollback():
+            result[0] = True
+            dialog.destroy()
+        
+        def on_cancel():
+            # Reset dropdown to current value
+            self.populate_rev_dropdown(current_rule)
+            dialog.destroy()
+        
+        ttk.Button(button_frame, text="Rollback", 
+                  command=on_rollback).pack(side=tk.LEFT, padx=5)
+        ttk.Button(button_frame, text="Cancel", 
+                  command=on_cancel).pack(side=tk.LEFT, padx=5)
+        
+        dialog.wait_window()
+        
+        if result[0]:
+            self.perform_rollback(current_rule, target_rev, revision_manager)
+        else:
+            # User cancelled - reset dropdown
+            self.populate_rev_dropdown(current_rule)
+    
+    def perform_rollback(self, current_rule: SuricataRule, target_rev: int,
+                        revision_manager):
+        """Perform the rollback by populating editor with historical values"""
+        
+        # Get GUID for this rule (prefer GUID, fallback to SID)
+        rule_guid = self.parent.rule_guids.get(current_rule.sid)
+        
+        # Restore rule from history using GUID (primary) or SID (fallback)
+        # First try disk revisions
+        if rule_guid:
+            restored_rule = revision_manager.restore_revision(rule_guid=rule_guid, rev=target_rev)
+        else:
+            restored_rule = revision_manager.restore_revision(sid=current_rule.sid, rev=target_rev)
+        
+        # CRITICAL FIX: If not found on disk, check pending_history for unsaved snapshots
+        if not restored_rule:
+            # Search pending_history for the target revision
+            for entry in self.parent.pending_history:
+                if 'rule_snapshot' in entry.get('details', {}):
+                    snapshot = entry['details']['rule_snapshot']
+                    details = entry['details']
+                    
+                    # Match by GUID first, then SID for backward compatibility
+                    snapshot_guid = snapshot.get('rule_guid') or details.get('rule_guid')
+                    if (snapshot_guid and snapshot_guid == rule_guid) or \
+                       (not rule_guid and (details.get('sid') == current_rule.sid or snapshot.get('sid') == current_rule.sid)):
+                        # Check if this is the target revision
+                        if snapshot.get('rev') == target_rev:
+                            # Manually reconstruct rule from pending snapshot
+                            try:
+                                restored_rule = SuricataRule(
+                                    action=snapshot['action'],
+                                    protocol=snapshot['protocol'],
+                                    src_net=snapshot['src_net'],
+                                    src_port=snapshot['src_port'],
+                                    dst_net=snapshot['dst_net'],
+                                    dst_port=snapshot['dst_port'],
+                                    message=snapshot['message'],
+                                    content=snapshot['content'],
+                                    sid=snapshot.get('sid', current_rule.sid),
+                                    direction=snapshot.get('direction', '->'),
+                                    rev=snapshot['rev'],
+                                    original_options=snapshot.get('original_options', '')
+                                )
+                            except (KeyError, TypeError, ValueError):
+                                pass  # Continue searching
+                            break
+        
+        if not restored_rule:
+            messagebox.showerror("Error", "Failed to restore rule revision")
+            # Reset dropdown
+            self.populate_rev_dropdown(current_rule)
+            return
+        
+        # CRITICAL: Check if restored SID differs from current SID (SID was renumbered)
+        if restored_rule.sid != current_rule.sid:
+            # SID was changed since this revision - check for conflicts
+            sid_conflict = any(
+                r.sid == restored_rule.sid and 
+                self.parent.rules.index(r) != self.parent.selected_rule_index
+                for r in self.parent.rules
+                if not getattr(r, 'is_comment', False) and not getattr(r, 'is_blank', False)
+            )
+            
+            if sid_conflict:
+                # Show conflict resolution dialog
+                response = messagebox.askyesnocancel(
+                    "SID Conflict Detected",
+                    f"The selected revision contains SID {restored_rule.sid},\n"
+                    f"but SID {restored_rule.sid} is now used by a different rule.\n\n"
+                    f"This occurred because SIDs were renumbered after\n"
+                    f"this revision was created.\n\n"
+                    f"Options:\n"
+                    f"• YES: Restore with CURRENT SID ({current_rule.sid})\n"
+                    f"       (keeps new SID, restores other fields)\n"
+                    f"• NO: Cancel rollback\n\n"
+                    f"Restore with current SID?"
+                )
+                
+                if response is None or response is False:
+                    # User cancelled or chose NO - reset dropdown
+                    self.populate_rev_dropdown(current_rule)
+                    return
+                
+                # User chose YES - keep current SID, restore other fields
+                restored_rule.sid = current_rule.sid
+                
+                # Update original_options to reflect current SID
+                if restored_rule.original_options:
+                    import re
+                    restored_rule.original_options = re.sub(
+                        r'sid:\d+', 
+                        f'sid:{current_rule.sid}', 
+                        restored_rule.original_options
+                    )
+        
+        # Populate editor fields with restored values (don't save yet!)
+        self.action_var.set(restored_rule.action)
+        self.protocol_var.set(restored_rule.protocol)
+        self.src_net_var.set(restored_rule.src_net)
+        self.src_port_var.set(restored_rule.src_port)
+        self.direction_var.set(restored_rule.direction)
+        self.dst_net_var.set(restored_rule.dst_net)
+        self.dst_port_var.set(restored_rule.dst_port)
+        self.message_var.set(restored_rule.message)
+        self.content_var.set(restored_rule.content)
+        self.sid_var.set(str(restored_rule.sid))
+        # CRITICAL FIX: Set rev to plain number for save_rule_changes() to parse correctly
+        self.rev_var.set(str(restored_rule.rev))
+        
+        # Show info message to user
+        messagebox.showinfo(
+            "Rollback Pending",
+            f"Rule editor populated with Rev {target_rev}.\n\n"
+            f"Review the changes in the editor, then:\n"
+            f"• Click 'Save Changes' to commit the rollback, OR\n"
+            f"• Select another rule to cancel"
+        )

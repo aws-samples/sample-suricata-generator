@@ -10,7 +10,7 @@ class SuricataConstants:
     
     # SID validation
     SID_MIN = 1
-    SID_MAX = 999999999
+    SID_MAX = 4294967294  # AWS Network Firewall maximum SID value (validated in AWS console)
     
     # File size limits (10MB for rule files, 1MB for domain lists)  
     MAX_RULE_FILE_SIZE = 10 * 1024 * 1024  # 10MB

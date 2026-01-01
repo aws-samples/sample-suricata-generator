@@ -1492,13 +1492,33 @@ class SuricataRuleGenerator:
                             temp_dir = tempfile.gettempdir()
                         history_filename = os.path.join(temp_dir, '_unsaved_.history')
                     
-                    revision_manager = RevisionManager(history_filename)
+                    # Check if history file exists on disk
+                    history_file_exists = os.path.exists(history_filename)
                     
-                    # Check if format is v2.0 (snapshots enabled) or v1.0 (legacy, no snapshots)
-                    needs_upgrade, version = revision_manager.detect_format_and_upgrade_needed()
+                    # CRITICAL BUG FIX: Also check if baseline snapshots exist in pending_history
+                    # This handles the case where tracking was enabled on a new file (snapshots in pending_history, not on disk)
+                    has_pending_snapshots = any(
+                        'rule_snapshot' in entry.get('details', {})
+                        for entry in self.pending_history
+                    )
+                    
+                    # Determine if we should create snapshot
+                    if not history_file_exists and has_pending_snapshots:
+                        # New file with baseline snapshots in pending_history - v2.0 mode
+                        should_create_snapshot = True
+                        revision_manager = RevisionManager(history_filename)
+                    elif not history_file_exists:
+                        # New file without baseline snapshots - will be v2.0 when created
+                        should_create_snapshot = True
+                        revision_manager = RevisionManager(history_filename)
+                    else:
+                        # Existing file - check format version on disk
+                        revision_manager = RevisionManager(history_filename)
+                        needs_upgrade, version = revision_manager.detect_format_and_upgrade_needed()
+                        should_create_snapshot = not needs_upgrade
                     
                     # Only save snapshots if format is v2.0 (user accepted upgrade or new file)
-                    if not needs_upgrade:
+                    if should_create_snapshot:
                         # Generate GUID for new rule
                         rule_guid = revision_manager.generate_rule_guid()
                         self.rule_guids[updated_rule.sid] = rule_guid
@@ -2383,13 +2403,33 @@ class SuricataRuleGenerator:
                     temp_dir = tempfile.gettempdir()
                 history_filename = os.path.join(temp_dir, '_unsaved_.history')
             
-            revision_manager = RevisionManager(history_filename)
+            # Check if history file exists on disk
+            history_file_exists = os.path.exists(history_filename)
             
-            # Check if format is v2.0 (snapshots enabled) or v1.0 (legacy, no snapshots)
-            needs_upgrade, version = revision_manager.detect_format_and_upgrade_needed()
+            # CRITICAL BUG FIX: Also check if baseline snapshots exist in pending_history
+            # This handles the case where tracking was enabled on a new file (snapshots in pending_history, not on disk)
+            has_pending_snapshots = any(
+                'rule_snapshot' in entry.get('details', {})
+                for entry in self.pending_history
+            )
+            
+            # Determine if we should create snapshot
+            if not history_file_exists and has_pending_snapshots:
+                # New file with baseline snapshots in pending_history - v2.0 mode
+                should_create_snapshot = True
+                revision_manager = RevisionManager(history_filename)
+            elif not history_file_exists:
+                # New file without baseline snapshots - will be v2.0 when created
+                should_create_snapshot = True
+                revision_manager = RevisionManager(history_filename)
+            else:
+                # Existing file - check format version on disk
+                revision_manager = RevisionManager(history_filename)
+                needs_upgrade, version = revision_manager.detect_format_and_upgrade_needed()
+                should_create_snapshot = not needs_upgrade
             
             # Only save snapshots if format is v2.0 (user accepted upgrade or new file)
-            if not needs_upgrade:
+            if should_create_snapshot:
                 # Create baseline snapshots for all pasted rules (skip comments/blanks)
                 import datetime
                 timestamp = datetime.datetime.now().isoformat()
@@ -6480,13 +6520,33 @@ class SuricataRuleGenerator:
                                 temp_dir = tempfile.gettempdir()
                             history_filename = os.path.join(temp_dir, '_unsaved_.history')
                         
-                        revision_manager = RevisionManager(history_filename)
+                        # Check if history file exists on disk
+                        history_file_exists = os.path.exists(history_filename)
                         
-                        # Check if format is v2.0 (snapshots enabled) or v1.0 (legacy, no snapshots)
-                        needs_upgrade, version = revision_manager.detect_format_and_upgrade_needed()
+                        # CRITICAL BUG FIX: Also check if baseline snapshots exist in pending_history
+                        # This handles the case where tracking was enabled on a new file (snapshots in pending_history, not on disk)
+                        has_pending_snapshots = any(
+                            'rule_snapshot' in entry.get('details', {})
+                            for entry in self.pending_history
+                        )
+                        
+                        # Determine if we should create snapshot
+                        if not history_file_exists and has_pending_snapshots:
+                            # New file with baseline snapshots in pending_history - v2.0 mode
+                            should_create_snapshot = True
+                            revision_manager = RevisionManager(history_filename)
+                        elif not history_file_exists:
+                            # New file without baseline snapshots - will be v2.0 when created
+                            should_create_snapshot = True
+                            revision_manager = RevisionManager(history_filename)
+                        else:
+                            # Existing file - check format version on disk
+                            revision_manager = RevisionManager(history_filename)
+                            needs_upgrade, version = revision_manager.detect_format_and_upgrade_needed()
+                            should_create_snapshot = not needs_upgrade
                         
                         # Only save snapshots if format is v2.0 (user accepted upgrade or new file)
-                        if not needs_upgrade:
+                        if should_create_snapshot:
                             # Create baseline snapshots for all inserted rules (skip comments/blanks)
                             import datetime
                             timestamp = datetime.datetime.now().isoformat()
@@ -6597,13 +6657,33 @@ class SuricataRuleGenerator:
                                 temp_dir = tempfile.gettempdir()
                             history_filename = os.path.join(temp_dir, '_unsaved_.history')
                         
-                        revision_manager = RevisionManager(history_filename)
+                        # Check if history file exists on disk
+                        history_file_exists = os.path.exists(history_filename)
                         
-                        # Check if format is v2.0 (snapshots enabled) or v1.0 (legacy, no snapshots)
-                        needs_upgrade, version = revision_manager.detect_format_and_upgrade_needed()
+                        # CRITICAL BUG FIX: Also check if baseline snapshots exist in pending_history
+                        # This handles the case where tracking was enabled on a new file (snapshots in pending_history, not on disk)
+                        has_pending_snapshots = any(
+                            'rule_snapshot' in entry.get('details', {})
+                            for entry in self.pending_history
+                        )
+                        
+                        # Determine if we should create snapshot
+                        if not history_file_exists and has_pending_snapshots:
+                            # New file with baseline snapshots in pending_history - v2.0 mode
+                            should_create_snapshot = True
+                            revision_manager = RevisionManager(history_filename)
+                        elif not history_file_exists:
+                            # New file without baseline snapshots - will be v2.0 when created
+                            should_create_snapshot = True
+                            revision_manager = RevisionManager(history_filename)
+                        else:
+                            # Existing file - check format version on disk
+                            revision_manager = RevisionManager(history_filename)
+                            needs_upgrade, version = revision_manager.detect_format_and_upgrade_needed()
+                            should_create_snapshot = not needs_upgrade
                         
                         # Only save snapshots if format is v2.0 (user accepted upgrade or new file)
-                        if not needs_upgrade:
+                        if should_create_snapshot:
                             # Create baseline snapshots for all inserted rules (skip comments/blanks)
                             import datetime
                             timestamp = datetime.datetime.now().isoformat()

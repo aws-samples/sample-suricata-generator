@@ -4199,22 +4199,20 @@ class UIManager:
             self.rev_var.set(str(rule.rev))
             return
         
-        # For v2.0 format with rollback capability, continue with dropdown population
-        if not os.path.exists(history_filename):
-            # No history file yet - just show plain rev number
-            # Dropdown won't be useful until there are multiple revisions
-            self.rev_var.set(str(rule.rev))
-            self.rev_combo['values'] = []
-            return
-        
         # Get GUID for this rule (prefer GUID, fallback to SID)
         rule_guid = self.parent.rule_guids.get(rule.sid)
         
         # Get revisions from disk using GUID (primary) or SID (fallback)
-        if rule_guid:
-            revisions = revision_manager.get_revisions(rule_guid=rule_guid)
+        # If history file doesn't exist yet, revisions will be empty list
+        if os.path.exists(history_filename):
+            if rule_guid:
+                revisions = revision_manager.get_revisions(rule_guid=rule_guid)
+            else:
+                revisions = revision_manager.get_revisions(sid=rule.sid)
         else:
-            revisions = revision_manager.get_revisions(sid=rule.sid)
+            # No history file yet - start with empty revisions
+            # We'll check pending_history next
+            revisions = []
         
         # CRITICAL FIX: Merge pending snapshots from pending_history
         # This handles unsaved changes that haven't been written to disk yet
@@ -4288,10 +4286,11 @@ class UIManager:
                 temp_dir = tempfile.gettempdir()
             history_filename = os.path.join(temp_dir, '_unsaved_.history')
         
-        # CRITICAL BUG FIX: Check pending_history for baseline snapshots FIRST
+        # CRITICAL BUG FIX: Check pending_history for snapshots FIRST
         # This handles new files where tracking was just enabled (snapshots in pending_history, not on disk)
+        # Check for ANY action with snapshots (baseline_snapshot OR rule_added OR rule_modified)
         has_pending_snapshots = any(
-            entry.get('action') == 'baseline_snapshot' and 'rule_snapshot' in entry.get('details', {})
+            'rule_snapshot' in entry.get('details', {})
             for entry in self.parent.pending_history
         )
         

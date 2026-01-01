@@ -1,5 +1,50 @@
 # Release Notes
 
+## Version 1.25.1 - January 1, 2026
+
+### Bug Fix: Missing Revision History for Non-Placeholder Rule Insertion Methods
+- **Fixed Missing Revision History Across All Rule Entry Methods**: Corrected bug where newly added rules did not show revision history in the Rev dropdown when change tracking was enabled on a blank file and rules were added via methods other than placeholder
+  - **Root Cause**: When enabling tracking on a blank file (no existing rules), baseline snapshots only exist in `pending_history` (not written to disk yet). Five rule insertion methods were checking if history file exists on disk, and when it didn't, they created a RevisionManager that defaulted to v1.0 format, causing `detect_format_and_upgrade_needed()` to return `(True, '1.0')`, so no snapshot was created
+  - **Impact**: Rules added via Insert Rule button, paste, domain import, and template insertion did NOT show revision history in Rev dropdown, while placeholder method worked correctly (Bug #21 fix was only applied to `save_rule_changes()` and `insert_new_rule_from_editor()`, not to other insertion methods)
+  - **Affected Methods**:
+    - ❌ Insert Rule button (`insert_rule()`) - Rev dropdown empty
+    - ❌ Paste from clipboard (`paste_rules()`) - Rev dropdown empty
+    - ❌ Insert Domain Allow Rule button (`insert_domain_rule()`) - Rev dropdown empty
+    - ❌ Import Domain List (`show_bulk_import_dialog()`) - Rev dropdown empty
+    - ❌ Template insertion (`show_template_preview_dialog()`) - Rev dropdown empty (both dual and standard)
+    - ✅ Placeholder / Save Changes (`insert_new_rule_from_editor()`, `save_rule_changes()`) - Already worked
+  - **Complete Solution**: Applied the same `has_pending_snapshots` check logic from Bug #21 fix to all 5 affected insertion methods
+    - Check if history file exists on disk
+    - **Check if baseline snapshots exist in `pending_history`** (critical addition)
+    - If either indicates v2.0 mode, create snapshots with GUIDs
+    - Rev dropdown now shows complete revision history for all insertion methods
+
+### Technical Implementation
+- **suricata_generator.py** (3 methods fixed):
+  - `insert_rule()` - Added `has_pending_snapshots` check before creating RevisionManager
+  - `paste_rules()` - Added `has_pending_snapshots` check before creating RevisionManager
+  - `show_template_preview_dialog()` - Added `has_pending_snapshots` check (both dual and standard insertion code paths)
+- **domain_importer.py** (2 methods fixed):
+  - `insert_domain_rule()` - Added `has_pending_snapshots` check before creating RevisionManager
+  - `show_bulk_import_dialog()` - Added `has_pending_snapshots` check before creating RevisionManager
+- **Consistent Pattern**: All 5 methods now use identical logic:
+  ```python
+  has_pending_snapshots = any(
+      'rule_snapshot' in entry.get('details', {})
+      for entry in self.pending_history
+  )
+  # Determine if we should create snapshot based on file existence AND pending_history
+  ```
+- **Maintains Deferred Write**: Snapshots stored in `pending_history` until file save, per v2.0 format design
+
+### User Impact
+- **Universal Revision History**: Rev dropdown now works correctly for ALL rule insertion methods on new files with tracking enabled
+- **Consistent Behavior**: No matter how you add a rule (button, paste, import, template), revision history is always available
+- **Improved Reliability**: Rev dropdown functionality no longer depends on which method was used to add the rule
+- **Complete Feature Parity**: All rule entry workflows now have identical revision tracking capabilities
+
+---
+
 ## Version 1.25.0 - December 31, 2025
 
 ### Major Enhancement: Per-Rule Revision History & Rollback

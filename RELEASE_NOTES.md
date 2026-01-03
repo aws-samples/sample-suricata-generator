@@ -1,5 +1,31 @@
 # Release Notes
 
+## Version 1.26.0 - January 3, 2026
+
+### Major New Feature: Alert-Only Test Mode for Safe Production Testing
+- **Export for Testing Without Risk**: New test mode converts all actions to 'alert' for safe production testing while preserving original actions in CloudWatch logs
+  - **Export Options Dialog**: Choose format (Terraform/CloudFormation) and enable test mode with checkbox
+  - **Live Preview**: Shows first 3 converted rules with [TEST-ACTION] prefixes
+  - **Action Preservation**: Original actions embedded in message prefix for instant CloudWatch visibility
+    - [TEST-PASS], [TEST-DROP], [TEST-REJECT], [TEST-ALERT]
+  - **Zero Risk**: Source file never modified - conversion happens only at export
+  - **Smart Defaults**: Auto-suggests _test suffix (e.g., network-firewall-rules_test.tf)
+  - **Comprehensive Warnings**: Dialog, file comments, and success message explain AWS policy requirements
+- **AWS Policy Prerequisites (CRITICAL)**: Policy must have NO default drop action for test mode to work
+  - Required: No 'Drop all', 'Drop established', or 'Application Layer drop established'
+  - Optional: 'Alert all' or 'Alert established' for enhanced visibility
+  - Alert rules only log traffic - with no default drop, traffic flows normally
+- **Professional Workflow**: Industry-standard testing pattern (alert → validate → enforce)
+  - Export with test mode → Deploy → Monitor CloudWatch → Fix false positives → Export production → Deploy
+
+### User Impact
+- **Safe Testing**: Validate rules against real traffic without service disruption
+- **Clear Logs**: See intended actions in CloudWatch without cross-referencing
+- **Fast Iteration**: No manual editing needed for testing
+- **Confidence**: Prove accuracy before enforcement
+
+---
+
 ## Version 1.25.1 - January 1, 2026
 
 ### Bug Fix: Missing Revision History for Non-Placeholder Rule Insertion Methods

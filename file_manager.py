@@ -311,11 +311,71 @@ class FileManager:
         except (ValueError, KeyError):
             pass  # Other errors
     
-    def generate_terraform_template(self, rules: List[SuricataRule], variables: dict) -> str:
-        """Generate Terraform template for AWS Network Firewall rule group"""
+    def _prepare_rules_for_export(self, rules: List, test_mode: bool) -> List:
+        """Prepare rules for export with test mode conversion and action preservation
         
-        # Calculate capacity and add buffer
-        actual_capacity = len([r for r in rules if not getattr(r, 'is_comment', False) and not getattr(r, 'is_blank', False)])
+        Args:
+            rules: List of SuricataRule objects
+            test_mode: If True, convert all actions to 'alert' with [TEST-ACTION] prefix
+            
+        Returns:
+            List of prepared rules (deepcopy if test_mode, original if not)
+        """
+        if not test_mode:
+            return rules  # Return original rules for normal export
+        
+        from copy import deepcopy
+        export_rules = []
+        
+        for rule in rules:
+            rule_copy = deepcopy(rule)
+            
+            # Only convert actual rules (skip comments and blank lines)
+            if not getattr(rule_copy, 'is_comment', False) and \
+               not getattr(rule_copy, 'is_blank', False):
+                
+                # Store original action for message prefix
+                original_action = rule_copy.action.upper()
+                
+                # Convert action to alert
+                rule_copy.action = 'alert'
+                
+                # Add [TEST-ACTION] prefix with original action
+                prefix = f"[TEST-{original_action}]"
+                if not rule_copy.message.startswith('[TEST'):
+                    rule_copy.message = f"{prefix} {rule_copy.message}"
+                
+                # Update original_options to reflect action change and message prefix
+                if rule_copy.original_options:
+                    import re
+                    # Change action keyword to 'alert'
+                    rule_copy.original_options = re.sub(
+                        r'^(pass|drop|reject|alert)', 
+                        'alert', 
+                        rule_copy.original_options
+                    )
+                    # Add prefix to message
+                    rule_copy.original_options = re.sub(
+                        r'msg:"([^"]*)"',
+                        lambda m: f'msg:"{prefix} {m.group(1)}"' 
+                                 if not m.group(1).startswith('[TEST') 
+                                 else m.group(0),
+                        rule_copy.original_options
+                    )
+            
+            export_rules.append(rule_copy)
+        
+        return export_rules
+    
+    def generate_terraform_template(self, rules: List[SuricataRule], variables: dict,
+                                   test_mode: bool = False) -> str:
+        """Generate Terraform template for AWS Network Firewall rule group with optional test mode"""
+        
+        # STEP 1: Prepare rules for export (convert to alert-only if test mode)
+        export_rules = self._prepare_rules_for_export(rules, test_mode)
+        
+        # STEP 2: Calculate capacity using CONVERTED rules
+        actual_capacity = len([r for r in export_rules if not getattr(r, 'is_comment', False) and not getattr(r, 'is_blank', False)])
         capacity = actual_capacity + SuricataConstants.CAPACITY_BUFFER
         
         # Generate rules string with normalized line endings (LF only)
@@ -324,7 +384,7 @@ class FileManager:
         # This prevents "Illegal rule syntax" errors when using comments on Windows.
         # See: GitHub issue hashicorp/terraform-provider-aws#40856
         rules_lines = []
-        for rule in rules:
+        for rule in export_rules:
             if getattr(rule, 'is_blank', False):
                 rules_lines.append('')
             elif getattr(rule, 'is_comment', False):
@@ -339,8 +399,31 @@ class FileManager:
         # Join with Unix line endings only
         rules_string = '\n'.join(rules_lines)
         
+        # Add comprehensive warning if test mode
+        if test_mode:
+            warning_comment = (
+                "# ⚠️  WARNING: This rule group was exported in TEST MODE\n"
+                "# All rule actions have been converted to 'alert' for safe testing\n"
+                "# Message prefixes show original action: [TEST-DROP], [TEST-PASS], etc.\n"
+                "#\n"
+                "# IMPORTANT PREREQUISITE:\n"
+                "# For test mode to work, your AWS Network Firewall POLICY must be\n"
+                "# configured with NO default drop action.\n"
+                "# Do NOT use: 'Drop all', 'Drop established', or 'Application Layer drop established'\n"
+                "#\n"
+                "# OPTIONAL (Recommended): Add 'Alert all' or 'Alert established' for enhanced visibility\n"
+                "#\n"
+                "# If your policy has ANY default drop action, traffic will be blocked\n"
+                "# regardless of these alert rules. See AWS documentation:\n"
+                "# https://docs.aws.amazon.com/network-firewall/latest/developerguide/suricata-rule-evaluation-order.html\n"
+                "#\n"
+                "# Rules will NOT block or drop traffic (assuming prerequisite met)\n"
+                "# Export again without test mode checkbox for production deployment\n\n"
+            )
+            rules_string = warning_comment + rules_string
+        
         # Analyze variable usage in rules to determine correct types
-        variable_usage = self.analyze_variable_usage(rules)
+        variable_usage = self.analyze_variable_usage(export_rules)
         
         # Generate rule_variables and reference_sets sections
         rule_variables = ""
@@ -422,11 +505,15 @@ EOF
 '''
         return template
     
-    def generate_cloudformation_template(self, rules: List[SuricataRule], variables: dict) -> str:
-        """Generate CloudFormation JSON template for AWS Network Firewall rule group"""
+    def generate_cloudformation_template(self, rules: List[SuricataRule], variables: dict,
+                                        test_mode: bool = False) -> str:
+        """Generate CloudFormation JSON template for AWS Network Firewall rule group with optional test mode"""
         
-        # Calculate capacity and add buffer
-        actual_capacity = len([r for r in rules if not getattr(r, 'is_comment', False) and not getattr(r, 'is_blank', False)])
+        # STEP 1: Prepare rules for export (convert to alert-only if test mode)
+        export_rules = self._prepare_rules_for_export(rules, test_mode)
+        
+        # STEP 2: Calculate capacity using CONVERTED rules
+        actual_capacity = len([r for r in export_rules if not getattr(r, 'is_comment', False) and not getattr(r, 'is_blank', False)])
         capacity = actual_capacity + 100
         
         # Generate rules string with normalized line endings (LF only)
@@ -435,7 +522,7 @@ EOF
         # This prevents "Illegal rule syntax" errors when using comments on Windows.
         # See: GitHub issue hashicorp/terraform-provider-aws#40856
         rules_lines = []
-        for rule in rules:
+        for rule in export_rules:
             if getattr(rule, 'is_blank', False):
                 rules_lines.append('')
             elif getattr(rule, 'is_comment', False):
@@ -450,13 +537,41 @@ EOF
         # Join with Unix line endings only
         rules_string = '\n'.join(rules_lines)
         
-        # Analyze variable usage in rules to determine correct types
-        variable_usage = self.analyze_variable_usage(rules)
+        # Add comprehensive warning if test mode
+        if test_mode:
+            warning_comment = (
+                "# ⚠️  WARNING: This rule group was exported in TEST MODE\n"
+                "# All rule actions have been converted to 'alert' for safe testing\n"
+                "# Message prefixes show original action: [TEST-DROP], [TEST-PASS], etc.\n"
+                "#\n"
+                "# IMPORTANT PREREQUISITE:\n"
+                "# For test mode to work, your AWS Network Firewall POLICY must be\n"
+                "# configured with NO default drop action.\n"
+                "# Do NOT use: 'Drop all', 'Drop established', or 'Application Layer drop established'\n"
+                "#\n"
+                "# OPTIONAL (Recommended): Add 'Alert all' or 'Alert established' for enhanced visibility\n"
+                "#\n"
+                "# If your policy has ANY default drop action, traffic will be blocked\n"
+                "# regardless of these alert rules. See AWS documentation:\n"
+                "# https://docs.aws.amazon.com/network-firewall/latest/developerguide/suricata-rule-evaluation-order.html\n"
+                "#\n"
+                "# Rules will NOT block or drop traffic (assuming prerequisite met)\n"
+                "# Export again without test mode checkbox for production deployment\n\n"
+            )
+            rules_string = warning_comment + rules_string
         
-        # Build template structure
+        # Analyze variable usage in rules to determine correct types
+        variable_usage = self.analyze_variable_usage(export_rules)
+        
+        # Build template structure with conditional description
+        description = (
+            "TEST MODE: All actions converted to alert. Requires policy with no default drop action. "
+            f"Created by Suricata Generator version {self.version}"
+        ) if test_mode else f"Network Firewall Rule Group created by Suricata Generator version {self.version}"
+        
         template = {
             "AWSTemplateFormatVersion": "2010-09-09",
-            "Description": f"Network Firewall Rule Group created by Suricata Generator version {self.version}",
+            "Description": description,
             "Resources": {
                 "SuricataRuleGroup": {
                     "Type": "AWS::NetworkFirewall::RuleGroup",
@@ -464,7 +579,7 @@ EOF
                         "Capacity": capacity,
                         "RuleGroupName": "suricata-generator-rg",
                         "Type": "STATEFUL",
-                        "Description": f"This rule group was created by the Suricata Generator version {self.version}",
+                        "Description": description,
                         "RuleGroup": {
                             "RulesSource": {
                                 "RulesString": rules_string

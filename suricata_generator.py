@@ -2527,36 +2527,46 @@ class SuricataRuleGenerator:
         self.root.destroy()
 
     def export_file(self):
-        """Export rules as Terraform or CloudFormation template"""
+        """Export rules as Terraform or CloudFormation template with optional test mode"""
         if not self.rules:
             messagebox.showwarning("Warning", "No rules to export.")
             return
         
+        # STEP 1: Show export options dialog FIRST
+        export_options = self.show_export_options_dialog()
+        if not export_options:
+            return  # User cancelled
+        
+        export_format = export_options['format']  # 'terraform' or 'cloudformation'
+        test_mode = export_options['test_mode']  # True or False
+        
+        # STEP 2: Show file save dialog with appropriate defaults
+        if export_format == 'terraform':
+            initial_filename = "network-firewall-rules_test.tf" if test_mode else "network-firewall-rules.tf"
+            file_extension = ".tf"
+            filetypes = [("Terraform files", "*.tf"), ("All files", "*.*")]
+        else:  # cloudformation
+            initial_filename = "network-firewall-rules_test.cft" if test_mode else "network-firewall-rules.cft"
+            file_extension = ".cft"
+            filetypes = [("CloudFormation templates", "*.cft"), ("All files", "*.*")]
+        
         filename = filedialog.asksaveasfilename(
             title="Export Infrastructure Template",
-            initialfile="network-firewall-rules.tf",
-            filetypes=[
-                ("Terraform files", "*.tf"),
-                ("CloudFormation templates", "*.cft")
-            ],
-            defaultextension=".tf"
+            initialfile=initial_filename,
+            filetypes=filetypes,
+            defaultextension=file_extension
         )
         
         if filename:
-            # Determine export format based on file extension
-            if filename.lower().endswith('.tf'):
-                export_format = "terraform"
-            elif filename.lower().endswith('.cft'):
-                export_format = "cloudformation"
-            else:
-                messagebox.showerror("Error", "Unsupported file format. Please use .tf or .cft extension.")
-                return
-            
-            # Generate and save the export file
+            # STEP 3: Generate content with test_mode parameter
             if export_format == "terraform":
-                content = self.file_manager.generate_terraform_template(self.rules, self.variables)
+                content = self.file_manager.generate_terraform_template(
+                    self.rules, self.variables, test_mode=test_mode
+                )
             else:  # cloudformation
-                content = self.file_manager.generate_cloudformation_template(self.rules, self.variables)
+                content = self.file_manager.generate_cloudformation_template(
+                    self.rules, self.variables, test_mode=test_mode
+                )
                 
                 # AWS CloudFormation Quota Validation (Priority 1 & 2)
                 # Validate CloudFormation template size against AWS limits
@@ -2624,7 +2634,51 @@ class SuricataRuleGenerator:
                 # This ensures Unix line endings (LF) are preserved in the exported file
                 with open(filename, 'w', encoding='utf-8', newline='') as f:
                     f.write(content)
-                messagebox.showinfo("Success", f"Successfully exported {export_format.title()} template to {filename}")
+                
+                # STEP 4: Log export if tracking enabled
+                if self.tracking_enabled:
+                    export_details = {
+                        'format': export_format,
+                        'test_mode': test_mode,
+                        'filename': os.path.basename(filename),
+                        'rule_count': len([r for r in self.rules 
+                                          if not getattr(r, 'is_comment', False) 
+                                          and not getattr(r, 'is_blank', False)])
+                    }
+                    action = 'test_export' if test_mode else 'production_export'
+                    self.add_history_entry(action, export_details)
+                
+                # STEP 5: Show appropriate success message
+                if test_mode:
+                    format_display = export_format.title()
+                    messagebox.showinfo(
+                        "Test Export Complete",
+                        f"Successfully exported {format_display} template for testing.\n\n"
+                        f"File: {os.path.basename(filename)}\n\n"
+                        f"✓ All rules converted to 'alert' action\n"
+                        f"✓ [TEST-ACTION] prefix added (preserves original action)\n"
+                        f"✓ Warning comments added to file\n"
+                        f"✓ Source file NOT modified\n\n"
+                        f"⚠️  BEFORE DEPLOYING:\n\n"
+                        f"REQUIRED: Verify your AWS Network Firewall POLICY:\n"
+                        f"• NO default drop action (critical!)\n"
+                        f"• Do NOT use 'Drop all' or 'Drop established'\n\n"
+                        f"How test mode works:\n"
+                        f"• All rules converted to 'alert' (logging only)\n"
+                        f"• With NO default drop, traffic is ALLOWED normally\n"
+                        f"• CloudWatch logs show intended actions\n"
+                        f"• Zero blocking occurs\n\n"
+                        f"OPTIONAL (Recommended for enhanced visibility):\n"
+                        f"• Add 'Alert all' to log unmatched traffic\n"
+                        f"• Helps identify gaps in rule coverage\n\n"
+                        f"If your policy has ANY default drop action, traffic will be\n"
+                        f"blocked regardless of these alert rules.\n\n"
+                        f"CloudWatch logs will show [TEST-DROP], [TEST-PASS], etc.\n"
+                        f"Export again without test mode for production deployment."
+                    )
+                else:
+                    messagebox.showinfo("Success", f"Successfully exported {export_format.title()} template to {filename}")
+                
             except FileNotFoundError as e:
                 messagebox.showerror("Directory Error", str(e))
             except PermissionError as e:
@@ -2634,6 +2688,207 @@ class SuricataRuleGenerator:
             except Exception as e:
                 messagebox.showerror("Export Error", f"Failed to export {export_format} template to {filename}:\n\n{str(e)}")
     
+    def show_export_options_dialog(self):
+        """Show export options dialog with format, test mode, and prerequisite warning
+        
+        Returns:
+            dict: {'format': 'terraform'|'cloudformation', 'test_mode': bool}
+            or None if cancelled
+        """
+        dialog = tk.Toplevel(self.root)
+        dialog.title("Export Options")
+        dialog.geometry("480x260")  # Initial size (will grow if test mode checked)
+        dialog.transient(self.root)
+        dialog.grab_set()
+        dialog.resizable(True, True)
+        
+        # Center dialog
+        dialog.geometry("+%d+%d" % (
+            self.root.winfo_rootx() + 250,
+            self.root.winfo_rooty() + 200
+        ))
+        
+        main_frame = ttk.Frame(dialog)
+        main_frame.pack(fill=tk.BOTH, expand=True, padx=20, pady=20)
+        
+        # Format selection
+        ttk.Label(main_frame, text="Export Format:", 
+                 font=("TkDefaultFont", 10, "bold")).pack(anchor=tk.W, pady=(0, 10))
+        
+        format_var = tk.StringVar(value='terraform')
+        ttk.Radiobutton(main_frame, text="Terraform (.tf)", 
+                       variable=format_var, value='terraform').pack(anchor=tk.W, padx=20)
+        ttk.Radiobutton(main_frame, text="CloudFormation (.cft)", 
+                       variable=format_var, value='cloudformation').pack(anchor=tk.W, padx=20, pady=(5, 0))
+        
+        # Separator
+        ttk.Separator(main_frame, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=15)
+        
+        # Test mode option
+        ttk.Label(main_frame, text="Testing Options:", 
+                 font=("TkDefaultFont", 10, "bold")).pack(anchor=tk.W, pady=(0, 5))
+        
+        test_mode_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(
+            main_frame,
+            text="Export for testing (alert-only)",
+            variable=test_mode_var
+        ).pack(anchor=tk.W, padx=20)
+        
+        info_label = ttk.Label(
+            main_frame,
+            text="Convert all rules to 'alert' action for safe production testing",
+            font=("TkDefaultFont", 8),
+            foreground="#666666"
+        )
+        info_label.pack(anchor=tk.W, padx=40, pady=(2, 0))
+        
+        # Preview frame (shows when test mode checked)
+        preview_frame = ttk.LabelFrame(main_frame, text="Preview (First 3 Rules)")
+        preview_text = tk.Text(preview_frame, height=4, wrap=tk.NONE, 
+                              font=("Consolas", 8), state=tk.DISABLED)
+        preview_scroll = ttk.Scrollbar(preview_frame, orient=tk.HORIZONTAL, 
+                                       command=preview_text.xview)
+        preview_text.configure(xscrollcommand=preview_scroll.set)
+        preview_text.pack(side=tk.TOP, fill=tk.BOTH, expand=True, padx=5, pady=5)
+        preview_scroll.pack(side=tk.BOTTOM, fill=tk.X, padx=5, pady=(0, 5))
+        
+        # Initially hide preview
+        preview_frame.pack_forget()
+        
+        # Prerequisite disclaimer frame (shows only when test mode checked)
+        disclaimer_frame = ttk.LabelFrame(main_frame, text="⚠️  Test Mode Prerequisites")
+        
+        disclaimer_text = (
+            "REQUIRED: Your AWS Network Firewall POLICY must\n"
+            "have NO default drop action configured.\n\n"
+            "❌ Do NOT use any of these:\n"
+            "   • 'Drop all'\n"
+            "   • 'Drop established'\n"
+            "   • 'Application Layer drop established'\n\n"
+            "✅ OPTIONAL (Recommended for extra visibility):\n"
+            "   • 'Alert all' - logs unmatched traffic\n"
+            "   • 'Alert established' - logs unmatched established\n\n"
+            "How test mode works:\n"
+            "• All rules become 'alert' (logging only)\n"
+            "• With NO default drop, traffic is ALLOWED\n"
+            "• CloudWatch logs show intended actions\n"
+            "• Zero blocking occurs\n\n"
+            "Default alert actions are optional enhancements\n"
+            "that log traffic not matched by your rules."
+        )
+        
+        disclaimer_label = ttk.Label(
+            disclaimer_frame,
+            text=disclaimer_text,
+            font=("TkDefaultFont", 8),
+            foreground="#D97706",  # Orange
+            justify=tk.LEFT
+        )
+        disclaimer_label.pack(padx=10, pady=10)
+        
+        # Help link
+        def open_aws_docs():
+            try:
+                import webbrowser
+                webbrowser.open("https://docs.aws.amazon.com/network-firewall/latest/developerguide/suricata-rule-evaluation-order.html")
+            except ImportError:
+                messagebox.showinfo("Documentation", 
+                    "Please visit: https://docs.aws.amazon.com/network-firewall/latest/developerguide/suricata-rule-evaluation-order.html")
+            except Exception:
+                pass  # Silently fail - link is optional
+        
+        help_link = ttk.Label(
+            disclaimer_frame,
+            text="AWS Docs: Rule Evaluation Order",
+            font=("TkDefaultFont", 8, "underline"),
+            foreground="blue",
+            cursor="hand2"
+        )
+        help_link.pack(anchor=tk.W, padx=10, pady=(0, 10))
+        help_link.bind("<Button-1>", lambda e: open_aws_docs())
+        
+        # Initially hide disclaimer
+        disclaimer_frame.pack_forget()
+        
+        # Show/hide preview and disclaimer based on checkbox
+        def on_test_mode_change():
+            if test_mode_var.get():
+                # Update preview with first 3 converted rules
+                update_preview()
+                
+                # Show preview and disclaimer
+                preview_frame.pack(fill=tk.X, pady=(10, 0))
+                disclaimer_frame.pack(fill=tk.X, pady=(10, 0))
+                # Increase dialog height to show all content including AWS documentation link
+                dialog.geometry("480x780")
+            else:
+                # Hide preview and disclaimer
+                preview_frame.pack_forget()
+                disclaimer_frame.pack_forget()
+                # Restore original dialog height
+                dialog.geometry("480x260")
+        
+        def update_preview():
+            """Update preview text with first 3 converted rules"""
+            from copy import deepcopy
+            
+            # Get first 3 actual rules (skip comments/blanks)
+            actual_rules = [r for r in self.rules 
+                           if not getattr(r, 'is_comment', False) 
+                           and not getattr(r, 'is_blank', False)]
+            preview_rules = actual_rules[:3]
+            
+            if not preview_rules:
+                preview_text.config(state=tk.NORMAL)
+                preview_text.delete(1.0, tk.END)
+                preview_text.insert(tk.END, "No rules to preview")
+                preview_text.config(state=tk.DISABLED)
+                return
+            
+            # Convert rules to test mode format
+            preview_lines = []
+            for rule in preview_rules:
+                rule_copy = deepcopy(rule)
+                original_action = rule_copy.action.upper()
+                prefix = f"[TEST-{original_action}]"
+                
+                # Show converted rule
+                rule_copy.action = 'alert'
+                message_preview = f"{prefix} {rule_copy.message[:40]}..." if len(rule_copy.message) > 40 else f"{prefix} {rule_copy.message}"
+                preview_lines.append(f"{rule_copy.action} {rule_copy.protocol} ... (msg:\"{message_preview}\")")
+            
+            if len(actual_rules) > 3:
+                preview_lines.append(f"... and {len(actual_rules) - 3} more rules")
+            
+            # Update preview text
+            preview_text.config(state=tk.NORMAL)
+            preview_text.delete(1.0, tk.END)
+            preview_text.insert(tk.END, "\n".join(preview_lines))
+            preview_text.config(state=tk.DISABLED)
+        
+        test_mode_var.trace_add('write', lambda *args: on_test_mode_change())
+        
+        # Buttons
+        result = [None]
+        
+        def on_continue():
+            result[0] = {
+                'format': format_var.get(),
+                'test_mode': test_mode_var.get()
+            }
+            dialog.destroy()
+        
+        button_frame = ttk.Frame(main_frame)
+        button_frame.pack(pady=(15, 0))
+        
+        ttk.Button(button_frame, text="Continue", 
+                  command=on_continue, width=10).pack(side=tk.LEFT, padx=5)
+        ttk.Button(button_frame, text="Cancel", 
+                  command=dialog.destroy, width=10).pack(side=tk.LEFT, padx=5)
+        
+        dialog.wait_window()
+        return result[0]
 
     
     def get_version_number(self) -> str:

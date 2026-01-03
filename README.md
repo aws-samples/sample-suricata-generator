@@ -1,6 +1,6 @@
 # Suricata Rule Generator for AWS Network Firewall
 
-**Current Version: 1.25.0**
+**Current Version: 1.26.0**
 
 A GUI application for creating, editing, and managing Suricata rules - specifically designed for AWS Network Firewall deployments using strict rule ordering.
 
@@ -1250,10 +1250,66 @@ Generate AWS Network Firewall resources for deployment:
 - **Terraform (.tf)**: Complete resource definition
 - **CloudFormation (.cft)**: JSON template
 
+### Alert-Only Test Mode *(New in v1.26.0)* 🧪
+
+![Rule Analysis](images/export.png)
+
+> 🧪 **Test rules safely in production** without risk of service disruption!
+
+Export rules with all actions converted to 'alert' for safe testing while preserving original action information in CloudWatch logs.
+
+**How to Use:**
+1. **File > Export** - New Export Options dialog appears
+2. **Select Format** - Choose Terraform or CloudFormation
+3. **Check Test Mode** - ☑️ "Export for testing (alert-only)"
+4. **Review Preview** - See first 3 converted rules with [TEST-ACTION] prefixes
+5. **Read Prerequisites** - Review AWS policy configuration requirements
+6. **Export** - Save with suggested _test suffix
+
+**Action Preservation:**
+- **[TEST-PASS]** → Would have allowed traffic
+- **[TEST-DROP]** → Would have blocked traffic silently
+- **[TEST-REJECT]** → Would have blocked with TCP reset
+- **[TEST-ALERT]** → Was already alert (no change)
+
+**AWS Policy Prerequisites (CRITICAL):**
+
+For test mode to work, your AWS Network Firewall **POLICY** must be configured:
+- ✅ **REQUIRED**: NO default drop action
+- ❌ Do NOT use 'Drop all', 'Drop established', or 'Application Layer drop established'
+- ✅ **OPTIONAL**: Add 'Alert all' or 'Alert established' for enhanced visibility
+
+**Why This Matters:**
+- Alert rules only log traffic (don't control it)
+- With no default drop action, traffic flows normally
+- CloudWatch logs show what would have happened
+- If policy has default drop, all traffic gets blocked
+
+**CloudWatch Log Analysis:**
+```
+[TEST-PASS] Allow HTTPS to AWS services     ← Would have allowed
+[TEST-DROP] Block SSH from internet         ← Would have blocked  
+[TEST-REJECT] Reject HTTP to direct IPs     ← Would have rejected
+[TEST-ALERT] Monitor DNS tunneling          ← No change (already alert)
+```
+
+**Benefits:**
+- 🛡️ **Zero Risk**: Source file never modified
+- ⚡ **Fast Iteration**: No manual rule editing needed
+- 📊 **Clear Visibility**: See intended actions in CloudWatch
+- ✅ **Confidence**: Validate before enforcing
+- 📝 **Compliance**: Document testing phase
+
+**Workflow:**
+1. Export with test mode → Deploy to AWS
+2. Monitor CloudWatch logs for [TEST-DROP], [TEST-PASS], etc.
+3. Identify false positives from log analysis
+4. Export without test mode → Deploy production rules
+
 ### Export Features
 
-**File > Export As...**
-- Select format and save location
+**File > Export**
+- Export Options dialog with format and test mode selection
 - Generates complete infrastructure code
 
 **What's Included:**

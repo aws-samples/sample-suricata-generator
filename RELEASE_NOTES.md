@@ -1,5 +1,80 @@
 # Release Notes
 
+## Version 1.27.0 - January 11, 2026
+
+### Major New Feature: CloudWatch Rule Usage Analysis
+- **AWS Integration for Rule Effectiveness Analysis**: New comprehensive CloudWatch Logs integration provides deep insights into which rules are actually triggering in production
+  - **Direct CloudWatch Integration**: Query AWS CloudWatch Logs Insights to analyze rule usage patterns across your deployed rule groups
+    - Single-click analysis from Tools menu with optional boto3 dependency
+    - Queries millions of log entries server-side, returns aggregated results (~10-60 seconds)
+    - Analyzes 7, 30, 60, or 90-day time windows for comprehensive usage patterns
+  - **Ten Analytical Views**: Results window with comprehensive tabs for actionable insights
+    - **Summary Dashboard**: Rule group health score (0-100) with visual gauge, quick stats, and priority recommendations
+    - **Unused Rules - Confirmed Unused**: Rules ≥14 days old with 0 hits - safe to remove with bulk action support
+    - **Unused Rules - Recently Deployed**: Rules <14 days old with 0 hits - too new to judge
+    - **Unused Rules - Never Observed**: Unknown age with 0 hits - manual review recommended
+    - **Low-Frequency Rules**: Identifies rarely-triggered rules (<10 hits) with color-coded staleness indicators
+    - **Rule Effectiveness**: Pareto analysis showing top performers and overly-broad rules handling excessive traffic
+    - **Efficiency Tiers**: Distribution visualization (Critical/High/Medium/Low/Unused) with bar charts
+    - **Search**: Quick SID lookup with detailed statistics and contextual analysis
+    - **Unlogged Rules**: Shows rules that don't write to CloudWatch (pass without 'alert', drop/reject with 'noalert')
+    - **Untracked Rules**: Shows SIDs in CloudWatch logs not in your file (deleted rules, AWS default policy rules)
+  - **Right-Click Quick Lookup**: Instant CloudWatch statistics for any rule from main table context menu
+    - Shows hits, percentage of traffic, last hit timestamp, and rule age
+    - Cached results enable instant lookups without re-querying CloudWatch
+    - Automatic refresh available when needed
+  - **Persistent Statistics Storage**: Save and auto-load analysis results for offline access
+    - **Save Button**: Manually save analysis results to `.stats` companion file
+    - **Automatic Loading**: Stats file automatically loaded when opening rule files
+    - **Offline Analysis**: Stats file allows viewing usage statistics offline
+    - **Session Persistence**: Loaded statistics cached until new analysis run
+    - **Same Prompt Behavior**: "View cached or run new" dialog appears with saved data
+  - **Deployment-Aware Analysis**: Integrates with existing change tracking for intelligent unused rule classification
+    - Recently deployed rules (<14 days) flagged separately from confirmed unused rules
+    - Rule age calculated from revision history for accurate confidence levels
+    - Never removes rules - only provides recommendations with confidence indicators
+  - **Actionable Recommendations**: Priority-ranked suggestions with expected impact
+    - Remove confirmed unused rules (capacity optimization)
+    - Review low-frequency rules (potential shadowing detection)
+    - Split overly-broad rules (security improvement)
+    - Monitor critical high-traffic rules (change management)
+  - **Export Capabilities**: HTML and plain text reports with comprehensive statistics and visualizations
+  - **In-App Help System**: Complete setup guide accessible from Help menu
+    - Prerequisites tab (boto3 installation, CloudWatch logging requirements)
+    - IAM Permissions tab (copy-paste ready policy with security notes)
+    - Credentials tab (AWS CLI, environment variables, IAM role options)
+    - Testing tab (connection test with detailed validation results)
+  - **Professional Error Handling**: Comprehensive error detection for all AWS scenarios
+    - boto3 not installed, AWS credentials missing, log group not found
+    - Access denied (IAM), query timeout, rate limiting, network errors
+    - All errors link to relevant help section for quick resolution
+
+### Business Value
+- **Extends AWS Network Firewall Monitoring**: Builds upon AWS Network Firewall's traffic statistics dashboard by adding rule-level efficiency analytics
+- **Identify Unused Rules**: Find rules with 0 hits without flagging recently deployed rules
+- **Capacity Optimization**: Stay within AWS 30,000 rule limit by removing unused rules
+- **Shadow Rule Detection**: Low-frequency rules may be partially blocked by earlier rules in evaluation order
+- **Security Improvement**: Detect overly-broad rules handling excessive traffic percentages
+
+### Technical Implementation
+- **New Module**: `rule_usage_analyzer.py` with RuleUsageAnalyzer class (~1,500 lines)
+- **CloudWatch Logs Insights Query**: Server-side aggregation with single efficient query
+  - Query returns ~200KB for 10,000 rules (vs millions of raw log entries)
+  - Handles pagination automatically for result sets >10,000 rules
+- **Optional Dependency**: boto3 required only for this feature (graceful degradation without it)
+- **UI Integration**: Progress dialog, results window with six tabs, right-click context menu
+- **Help System**: Four-tab setup guide with IAM policy, credential configuration, and connection testing
+- **Zero Breaking Changes**: All existing functionality preserved - feature is purely additive
+
+### User Impact
+- **Invaluable Production Insights**: Know exactly which rules are effective vs. unused
+- **Data-Driven Decisions**: Remove rules confidently with deployment-aware analysis
+- **Capacity Management**: Optimize rule count to maximize available capacity
+- **Security Validation**: Identify rules that need refinement based on actual traffic patterns
+- **AWS-Native Workflow**: Direct integration with CloudWatch Logs (standard AWS observability)
+
+---
+
 ## Version 1.26.0 - January 3, 2026
 
 ### Major New Feature: Alert-Only Test Mode for Safe Production Testing

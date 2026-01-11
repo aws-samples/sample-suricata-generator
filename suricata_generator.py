@@ -17,6 +17,7 @@ from ui_manager import UIManager
 from flow_tester import FlowTester
 from rule_filter import RuleFilter
 from template_manager import TemplateManager
+from rule_usage_analyzer import RuleUsageAnalyzer, HAS_BOTO3
 from constants import SuricataConstants
 from version import get_main_version
 from security_validator import security_validator, validate_rule_input, validate_file_operation
@@ -52,6 +53,7 @@ class SuricataRuleGenerator:
         self.ui_manager = UIManager(self)  # UI components manager
         self.rule_filter = RuleFilter()  # Rule filtering manager
         self.template_manager = TemplateManager()  # Template management for rule generation
+        self.usage_analyzer = RuleUsageAnalyzer(debug_force_pagination=False)  # Rule usage analyzer for CloudWatch integration
         
         # Load user configuration
         self.load_config()
@@ -877,7 +879,7 @@ class SuricataRuleGenerator:
 
     
     def load_rules_from_file(self, filename: str):
-        """Load rules from a .suricata file and companion .var file if it exists"""
+        """Load rules from a .suricata file and companion files (.var, .history, .stats)"""
         try:
             if not os.path.exists(filename):
                 raise FileNotFoundError(f"File not found: {filename}")
@@ -889,6 +891,9 @@ class SuricataRuleGenerator:
             self.refresh_table()
             self.auto_detect_variables()
             
+            # Check for associated .stats file and load if found
+            self.load_stats_file_if_exists(filename)
+            
         except FileNotFoundError as e:
             messagebox.showerror("File Not Found", str(e))
         except PermissionError as e:
@@ -897,6 +902,25 @@ class SuricataRuleGenerator:
             messagebox.showerror("File Encoding Error", f"Cannot read file due to encoding issues: {filename}\n\nPlease ensure the file is saved in UTF-8 format.")
         except Exception as e:
             messagebox.showerror("Error Loading File", f"Failed to load rules from {filename}:\n\n{str(e)}")
+    
+    def load_stats_file_if_exists(self, rule_filename):
+        """Load associated .stats file if it exists
+        
+        Args:
+            rule_filename: The main rule file path
+        """
+        # Build stats filename
+        stats_filename = rule_filename.replace('.suricata', '.stats')
+        if not stats_filename.endswith('.stats'):
+            stats_filename += '.stats'
+        
+        if os.path.exists(stats_filename):
+            try:
+                self.ui_manager.load_stats_from_file(stats_filename)
+            except Exception as e:
+                # Don't block file loading if stats file has issues
+                # Just print warning to console
+                print(f"Warning: Failed to load stats file: {str(e)}")
     
 
     def refresh_table(self, preserve_selection=True):

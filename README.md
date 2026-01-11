@@ -1,6 +1,6 @@
 # Suricata Rule Generator for AWS Network Firewall
 
-**Current Version: 1.26.0**
+**Current Version: 1.27.0**
 
 A GUI application for creating, editing, and managing Suricata rules - specifically designed for AWS Network Firewall deployments using strict rule ordering.
 
@@ -41,6 +41,7 @@ A GUI application for creating, editing, and managing Suricata rules - specifica
 - [Bulk SID Management](#bulk-sid-management)
 - [Advanced Editor](#advanced-editor)
 - [Rule Conflict Analysis](#rule-conflict-analysis)
+- [CloudWatch Rule Usage Analysis](#cloudwatch-rule-usage-analysis) ⭐ NEW
 - [Infrastructure Export](#infrastructure-export)
 - [Change Tracking](#change-tracking)
 - [SIG Type Classification](#sig-type-classification)
@@ -462,13 +463,27 @@ Rules are saved as text files with `.suricata` extension:
 - JSON format for easy parsing
 - Automatically loaded when opening .suricata files
 
+**Change History File (.history):**
+- Created when change tracking is enabled
+- Stores complete revision history with snapshots
+- JSON format for audit trails
+- Automatically loaded when opening .suricata files
+
+**CloudWatch Statistics File (.stats):**
+- Saved manually from Rule Usage Analysis Results window
+- Stores CloudWatch analysis results for offline access
+- JSON format with usage metrics and timestamps
+- Automatically loaded when opening .suricata files
+
 **Example Files:**
 ```
 my_rules.suricata  → Contains rules
 my_rules.var       → Contains variable definitions
+my_rules.history   → Contains change history (if tracking enabled)
+my_rules.stats     → Contains CloudWatch statistics (if saved)
 ```
 
-> 💡 Variables are persistent - they automatically save and load with your rule files!
+> 💡 All companion files are automatically saved and loaded with your rule files!
 
 ---
 
@@ -1187,7 +1202,298 @@ The Advanced Editor provides a powerful text-based interface with native code fo
 
 ---
 
-## Rule Conflict Analysis
+## CloudWatch Rule Usage Analysis
+
+![CloudWatch Analysis](images/usage_analysis.png)
+
+> 📊 **Discover which rules are actually being used in production** - AWS integration new in v1.27.0!
+
+### The Problem This Solves
+
+**Extending AWS Network Firewall Observability** While the AWS Dashboard provides excellent traffic volume and basic statistics, network security teams need deeper insights into individual rule performance. This feature extends AWS monitoring capabilities by:
+- ✅ Identifying which specific rules are triggering in your traffic
+- ✅ Discovering rules that have never matched any traffic
+- ✅ Detecting rules that might be shadowed by earlier rules based on hit patterns
+- ✅ Revealing which rules are handling the majority of your traffic
+
+**This feature accomplishes this** by directly querying AWS CloudWatch Logs to provide comprehensive per-rule usage analytics that complement your existing AWS monitoring.
+
+### What You Get
+
+The CloudWatch Rule Usage Analyzer provides **eight comprehensive analytical views** from a single query:
+
+**1. Summary Dashboard**
+- Rule group health score (0-100) with visual gauge
+- Quick statistics (unused, low-frequency, high-traffic, unlogged rules)
+- Performance insights (Pareto analysis showing top performers)
+- Priority recommendations ranked by impact
+
+**2. Unused Rules Tab - Confirmed Unused**
+![unused](images/unused_rules.png)
+- Rules ≥14 days old with 0 hits - safe to remove
+- **Bulk Actions**: Delete or comment out selected rules
+- **Color Coding**: Green background for confirmed unused status
+- Shows line number, SID, age, message, and rule preview
+
+**3. Unused Rules Tab - Recently Deployed**
+- Rules <14 days old with 0 hits - too new to judge
+- **Warning Status**: Recommends waiting before removal
+- **Color Coding**: Light yellow background for recent status
+- Shows same columns as Confirmed Unused
+
+**4. Unused Rules Tab - Never Observed**
+- Unknown age with 0 hits - manual review recommended
+- **Information Status**: Deployment date unavailable
+- **Color Coding**: Light gray background for unknown status
+- Suggests enabling change tracking for future accuracy
+
+**5. Low-Frequency Rules Tab**
+![low_frequency](images/low_frequency.png)
+- Identifies rules with <10 hits in the analysis period
+- **Staleness Indicators**: Color-coded by last hit timestamp
+  - Very light yellow: <7 days ago
+  - Light yellow: 7-14 days ago
+  - Yellow-orange: 14-21 days ago
+  - Orange: >21 days ago
+- **Shadow Detection Hints**: May indicate rules blocked by earlier rules
+
+**6. Rule Effectiveness Tab**
+![effectiveness](images/effectiveness.png)
+- **Pareto Analysis**: Shows which rules handle most traffic
+- **Top 20 Performers**: Rules sorted by hit count
+- **Overly-Broad Detection**: Flags rules handling excessive traffic (>10%, >15%, >30%)
+  - Critical (>30%): Immediate review recommended
+  - High (>15%): Review soon
+  - Medium (>10%): Consider reviewing
+- **Actionable Recommendations**: Suggests splitting broad rules into specific ones
+
+**7. Efficiency Tiers Tab**
+![tiers](images/tiers.png)
+- Visual distribution of rules by usage level
+- **Five Tiers**: Critical, High, Medium, Low, Unused
+- **Bar Chart Visualization**: Color-coded bars showing rule distribution
+- **Health Benchmarks**: Indicates healthy vs. problematic distributions
+- **Tier Navigation**: Click to view rules in each category
+
+**8. Search Tab**
+- Quick SID lookup with detailed statistics
+- Shows hits, percentage of traffic, last hit timestamp, rule age
+- Recent searches for quick access
+- Full rule display with contextual analysis
+
+**9. Unlogged Rules Tab**
+![unlogged](images/unlogged.png)
+- Shows rules that don't write to CloudWatch Logs
+- **Pass rules without 'alert' keyword**: Cannot be tracked via CloudWatch
+- **Drop/reject with 'noalert' keyword**: Logging explicitly suppressed
+- May be actively processing traffic but won't show hits
+- Excluded from health score calculations and unused detection
+- Provides recommendations for enabling logging if needed
+
+**10. Untracked Rules Tab**
+![untracked](images/untracked.png)
+- Shows SIDs found in CloudWatch logs but not in your current file
+- **Recently deleted/commented rules**: Still in logs during analysis timeframe
+- **AWS default policy rules**: Alert/drop defaults not in your rule group
+- Excluded from all analysis calculations
+- Helps identify rules removed from file or applied by AWS policy
+
+### Right-Click Quick Lookup
+![right_click](images/right_click.png)
+
+After running analysis once, right-click any rule in the main table:
+- **Context Menu**: "View CloudWatch Statistics"
+- **Instant Results**: Shows cached stats without re-querying CloudWatch
+- **Comprehensive Data**: Hits, percentage, last hit, rule age, category
+- **Quick Refresh**: Option to re-run analysis if needed
+
+### Deployment-Aware Intelligence
+
+The analyzer integrates with your existing change tracking to provide **confidence-based recommendations**:
+
+**With Change Tracking Enabled:**
+- Knows exact age of each rule from revision history
+- Separates recently deployed rules (< X days) from confirmed unused rules
+- Avoids false recommendations to remove rules still being tested
+
+**Without Change Tracking:**
+- All unused rules categorized as "Unknown Age"
+- Recommends manual review before removal
+- Still provides accurate hit counts and percentages
+
+### Setup Requirements
+
+**One-Time Setup:**
+1. **Install boto3**: `pip install boto3` (AWS SDK for Python)
+2. **Configure AWS Credentials**: Use AWS CLI (`aws configure`) or environment variables
+3. **IAM Permissions**: Requires read-only CloudWatch Logs access
+   ```json
+   {
+     "Version": "2012-10-17",
+     "Statement": [{
+       "Effect": "Allow",
+       "Action": ["logs:StartQuery", "logs:GetQueryResults"],
+       "Resource": "arn:aws:logs:*:*:log-group:/aws/network-firewall/*"
+     }]
+   }
+   ```
+4. **Enable CloudWatch Logging**: Your AWS Network Firewall must log to CloudWatch
+
+**In-App Help:**
+- **Help > Rule Usage Analyzer Setup**: Complete setup guide
+- **Four Tabs**: Prerequisites, IAM Permissions, Credentials, Testing
+- **Copy-Paste Ready**: IAM policy included for easy setup
+- **Connection Test**: Built-in testing before running analysis
+
+### Running Analysis
+
+1. **Tools > Analyze Rule Usage**
+2. **Configure Parameters**:
+   - **Log Group Name**: Your CloudWatch log group path
+   - **Time Range**: 7, 30, 60, or 90 days
+   - **Low-Frequency Threshold**: Hit count defining "low-frequency" threshold
+   - **Minimum Days in Production**: Days before considering rules unused
+3. **Click Analyze**
+4. **Wait**: ~10-60 seconds for CloudWatch query (progress shown)
+5. **Review Results**: Six-tab window with comprehensive analytics
+
+### Key Features
+
+**Efficient CloudWatch Querying:**
+- **Server-Side Aggregation**: Processes millions of logs in AWS
+- **Minimal Data Transfer**: Returns ~200KB for 10,000 rules
+- **Single Query**: All tabs populated from one query
+- **Cached Results**: Instant right-click lookups after initial analysis
+
+**Smart Analysis:**
+- **Unused Detection**: Set difference logic (100% accurate)
+- **Percentage Calculations**: Shows each rule's share of total traffic
+- **Hits Per Day**: Normalized metrics across time ranges
+- **Broadness Detection**: Identifies rules handling excessive traffic
+
+**Persistent Statistics:**
+- **Save Button**: Save analysis results to `.stats` file for offline access
+- **Auto-Load**: Statistics automatically loaded when opening rule files
+- **Session Caching**: Loaded stats persist until new analysis run
+- **Cached Prompt**: Shows "view cached or run new" dialog with saved data
+
+**Export and Sharing:**
+- **HTML Reports**: Professional formatted with color coding
+- **Plain Text Reports**: Simple format for any text editor
+- **Complete Data**: Includes all tabs and recommendations
+
+### Real-World Benefits
+
+**Capacity Optimization:**
+```
+Before: 10,150 rules consuming capacity
+Analysis Results:
+  - 275 confirmed unused rules (2.7%)
+  - 89 low-frequency rules (<10 hits/30 days)
+  
+Actions Taken:
+  - Removed 180 confirmed unused rules
+  - Capacity freed: 1.8%
+  - Monitoring remaining 95 for additional optimization
+```
+
+**Security Improvement:**
+```
+Effectiveness Tab Finding:
+  - SID 100 handles 45% of total traffic
+  - Rule: pass tcp $HOME_NET any -> any any (flow:established; ...)
+  - Too broad - matches ALL established TCP
+  
+Recommendation:
+  - Split into specific rules for known services
+  - Improved security posture
+  - Better visibility per service
+```
+
+**Shadow Rule Detection:**
+```
+Low-Frequency Tab Finding:
+  - SID 5500: 3 hits in 30 days
+  - Last hit: 18 days ago
+  - Likely shadowed by earlier rule
+  
+Action:
+  - Use Review Rules to find shadowing rule
+  - Reorder or refine rules for better coverage
+```
+
+### Why This Is Invaluable
+
+**Extending AWS Network Firewall Monitoring:**
+
+This feature builds upon AWS Network Firewall's robust monitoring foundation by adding rule-level analytics:
+
+**What This Feature Adds to Your AWS Monitoring:**
+- **Data-Driven Decisions**: Remove rules confidently with evidence
+- **Capacity Management**: Free up capacity by removing unused rules
+- **Performance Insights**: Understand which rules do the heavy lifting
+- **Security Validation**: Identify overly-broad rules needing refinement
+- **Shadow Detection**: Find rules that may be blocked by earlier rules
+- **Deployment Awareness**: Won't flag recently deployed rules as unused
+
+### Use Cases
+
+**Ongoing Optimization:**
+- Run monthly to identify unused rules
+- Monitor rule effectiveness over time
+- Track impact of rule changes
+
+**Pre-Deployment Validation:**
+- Export rule group IaC with Test Mode enabled (v1.26.0)
+- Deploy and run usage analysis
+- Identify false positives before enforcing
+- Export production version rule group IaC with confidence
+
+**Capacity Planning:**
+- Identify low-value rules for removal
+- Make room for new rules without hitting 30,000 limit
+- Prioritize most effective rules
+
+**Security Audits:**
+- Document which rules are actually protecting you
+- Identify gaps in coverage
+- Demonstrate compliance with usage data
+
+### Technical Details
+
+**CloudWatch Logs Insights Query:**
+- Aggregates SID hit counts server-side
+- Returns total hits and last hit timestamp per SID
+- Efficient pagination for large rule groups (>10,000 rules)
+- Typical query time: 10-60 seconds depending on time range
+
+**Analysis Window:**
+- 7 days: Fast analysis, recent trends
+- 30 days: Balanced view (recommended default)
+- 60 days: Longer-term patterns
+- 90 days: Comprehensive historical view
+
+**Privacy and Security:**
+- **Read-Only**: Only queries logs, never modifies anything
+- **Standard AWS Auth**: Uses same credentials as AWS CLI
+- **No Stored Credentials**: Application never stores AWS credentials
+- **Minimal Permissions**: Only CloudWatch Logs read access required
+
+### Benefits Summary
+
+- 🎯 **Actionable Insights**: Priority-ranked recommendations with expected impact
+- 📊 **Visual Analytics**: Health scores, charts, color-coded tables
+- 🔍 **Deep Visibility**: Understand your rule group performance
+- 💰 **Cost Optimization**: Remove unnecessary rules, improve efficiency
+- 🔒 **Security Enhancement**: Identify and refine overly-broad rules
+- ⏱️ **Time Savings**: Automated analysis vs. manual CloudWatch queries
+- 📈 **Continuous Improvement**: Regular monitoring for ongoing optimization
+
+> 🌟 **Game Changer**: This feature complements the AWS Network Firewall [**Monitoring and Observability**](https://docs.aws.amazon.com/network-firewall/latest/developerguide/nwfw-using-dashboard.html) dashboard by providing invaluable insights into your Network Firewall's rule behavior vs. traffic behavior.
+
+---
+
+## Rule Group Analysis
 
 ![Rule Analysis](images/analysis.png)
 
@@ -1537,6 +1843,7 @@ Suricata internally classifies rules by their keywords and protocol:
 - ✅ Toggle selection for workflow flexibility
 
 ### Advanced Features
+- ✅ **CloudWatch Rule Usage Analysis** *(v1.27.0)*: Production rule effectiveness analytics ⭐ NEW
 - ✅ **Rule Templates** *(v1.24.0)*: 14 pre-built security patterns
 - ✅ **Rule Filtering** *(v1.22.0)*: Non-destructive rule hiding
 - ✅ **Advanced Editor** *(v1.19.0, Scintilla v1.23.0)*: Code folding and IDE features
@@ -1548,6 +1855,11 @@ Suricata internally classifies rules by their keywords and protocol:
 - ✅ **Rev Keyword Support** *(v1.9.0)*: Automatic rule versioning
 
 ### Analysis and Validation
+- ✅ CloudWatch Logs integration for production usage analytics
+- ✅ Per-rule hit counts and traffic percentages
+- ✅ Unused rule detection with confidence levels
+- ✅ Overly-broad rule identification
+- ✅ Rule effectiveness and efficiency tier analysis
 - ✅ Rule conflict analysis with shadow detection
 - ✅ AWS Network Firewall compliance validation
 - ✅ Protocol layering detection
@@ -1699,6 +2011,7 @@ The application follows a modular architecture with specialized managers:
 - **domain_importer.py**: Bulk domain processing
 - **stateful_rule_importer.py**: AWS rule group imports *(v1.18.7)*
 - **rule_analyzer.py**: Conflict detection and reporting
+- **rule_usage_analyzer.py**: CloudWatch usage analytics *(v1.27.0)*
 - **flow_tester.py**: Network traffic simulation
 - **advanced_editor.py**: IDE-style text editor *(v1.19.0)*
 - **revision_manager.py**: Per-rule revision history and rollback *(v1.25.0)*
@@ -1753,6 +2066,9 @@ The application follows a modular architecture with specialized managers:
 19. 🚀 **Import from AWS**: Use AWS Rule Group Import to edit existing rules
 20. 🔄 **Round-Trip**: Import from AWS → Edit → Export → Deploy
 21. 📦 **Capacity Planning**: Monitor capacity for AWS limits (30,000 max)
+22. 📊 **Monitor Usage**: Run CloudWatch analysis monthly to identify unused rules
+23. 🎯 **Optimize Performance**: Use Rule Effectiveness tab to refine overly-broad rules
+24. 🔍 **Shadow Detection**: Combine low-frequency findings with Review Rules feature
 
 ---
 

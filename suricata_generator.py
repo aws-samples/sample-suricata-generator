@@ -49,6 +49,10 @@ class SuricataRuleGenerator:
         self.file_manager = FileManager()  # File operations manager
         self.domain_importer = DomainImporter(self)  # Domain import functionality
         self.stateful_rule_importer = StatefulRuleImporter(self)  # Stateful rule group import functionality
+        
+        # Import domain_list_importer after domain_importer is initialized
+        from domain_list_importer import DomainListImporter
+        self.domain_list_importer = DomainListImporter(self)  # AWS Domain List import functionality
         self.search_manager = SearchManager(self)  # Search functionality manager
         self.ui_manager = UIManager(self)  # UI components manager
         self.rule_filter = RuleFilter()  # Rule filtering manager
@@ -2544,6 +2548,27 @@ class SuricataRuleGenerator:
     
 
     
+    def import_domain_list(self):
+        """Import domain list with source selection (file or AWS)"""
+        # Show source selection dialog
+        source = self.domain_list_importer.show_import_source_dialog()
+        
+        if source == 'file':
+            # File import - use existing bulk import dialog
+            self.domain_importer.show_bulk_import_dialog()
+        
+        elif source == 'aws':
+            # AWS import workflow - now returns list of rule groups
+            rule_groups_list = self.domain_list_importer.browse_aws_domain_lists()
+            if rule_groups_list:
+                # Handle single or multiple selections
+                if len(rule_groups_list) == 1:
+                    # Single selection - use existing single import method
+                    self.domain_list_importer.import_from_aws(rule_groups_list[0])
+                else:
+                    # Multiple selections - use new multi-import method
+                    self.domain_list_importer.import_from_aws_multi(rule_groups_list)
+    
     def on_closing(self):
         """Handle application closing"""
         if self.modified and not self.ask_save_changes():
@@ -2551,7 +2576,7 @@ class SuricataRuleGenerator:
         self.root.destroy()
 
     def export_file(self):
-        """Export rules as Terraform or CloudFormation template with optional test mode"""
+        """Export rules as Terraform, CloudFormation, or AWS direct deploy with optional test mode"""
         if not self.rules:
             messagebox.showwarning("Warning", "No rules to export.")
             return
@@ -2561,10 +2586,123 @@ class SuricataRuleGenerator:
         if not export_options:
             return  # User cancelled
         
-        export_format = export_options['format']  # 'terraform' or 'cloudformation'
+        export_format = export_options['format']  # 'terraform', 'cloudformation', or 'aws'
         test_mode = export_options['test_mode']  # True or False
+        run_analyzer = export_options.get('run_analyzer', False)  # True or False
         
-        # STEP 2: Show file save dialog with appropriate defaults
+        # STEP 1.5: Run analyzer if requested (before proceeding to export)
+        if run_analyzer:
+            # Run EXISTING analyzer (no changes to analyzer itself)
+            actual_rules = [r for r in self.rules if not getattr(r, 'is_comment', False) and not getattr(r, 'is_blank', False)]
+            
+            # Create progress dialog for analysis
+            progress_dialog = tk.Toplevel(self.root)
+            progress_dialog.title("Analyzing Rules")
+            progress_dialog.geometry("400x170")
+            progress_dialog.transient(self.root)
+            progress_dialog.grab_set()
+            progress_dialog.resizable(False, False)
+            
+            # Center the progress dialog
+            progress_dialog.geometry("+%d+%d" % (self.root.winfo_rootx() + 200, self.root.winfo_rooty() + 200))
+            
+            # Progress frame
+            progress_frame = ttk.Frame(progress_dialog)
+            progress_frame.pack(fill=tk.BOTH, expand=True, padx=20, pady=20)
+            
+            # Status label
+            status_label = ttk.Label(progress_frame, text=f"Analyzing {len(actual_rules)} rules for conflicts...")
+            status_label.pack(pady=(0, 10))
+            
+            # Progress bar
+            progress_bar = ttk.Progressbar(progress_frame, mode='determinate', length=350)
+            progress_bar.pack(pady=(0, 10))
+            
+            # Progress text label
+            progress_text = ttk.Label(progress_frame, text="0%")
+            progress_text.pack(pady=(0, 10))
+            
+            # Cancel button
+            cancel_requested = [False]
+            
+            def on_cancel():
+                cancel_requested[0] = True
+                progress_dialog.destroy()
+            
+            cancel_button = ttk.Button(progress_frame, text="Cancel", command=on_cancel)
+            cancel_button.pack()
+            
+            # Force dialog to display
+            progress_dialog.update()
+            
+            # Perform analysis
+            conflicts = self.rule_analyzer.analyze_rule_conflicts(
+                self.rules, self.variables, 
+                progress_bar, progress_text, progress_dialog, cancel_requested
+            )
+            
+            # Close progress dialog
+            try:
+                progress_dialog.destroy()
+            except:
+                pass
+            
+            # Check if cancelled
+            if cancel_requested[0]:
+                return
+            
+            # Count conflicts by severity (conflicts is a dict with categories)
+            critical_count = len(conflicts.get('critical', []))
+            warning_count = len(conflicts.get('warning', []))
+            info_count = len(conflicts.get('info', []))
+            
+            # Add other categories to warning/info counts
+            warning_count += len(conflicts.get('protocol_layering', []))
+            warning_count += len(conflicts.get('sticky_buffer_order', []))
+            warning_count += len(conflicts.get('udp_flow_established', []))
+            warning_count += len(conflicts.get('contradictory_flow', []))
+            warning_count += len(conflicts.get('packet_drop_flow_pass', []))
+            warning_count += len(conflicts.get('priority_strict_order', []))
+            
+            # Add AWS-specific critical issues
+            critical_count += len(conflicts.get('reject_ip_protocol', []))
+            critical_count += len(conflicts.get('unsupported_keywords', []))
+            critical_count += len(conflicts.get('pcre_restrictions', []))
+            
+            # Add asymmetric flow issues to appropriate severity
+            for issue in conflicts.get('asymmetric_flow', []):
+                if issue.get('severity') == 'critical':
+                    critical_count += 1
+                else:
+                    warning_count += 1
+            
+            # Add protocol keyword mismatches to appropriate severity
+            for issue in conflicts.get('protocol_keyword_mismatch', []):
+                if issue.get('severity') == 'warning':
+                    warning_count += 1
+                else:
+                    info_count += 1
+            
+            # Port/protocol mismatches go to info
+            info_count += len(conflicts.get('port_protocol_mismatch', []))
+            
+            # Show summary dialog with categorized counts
+            choice = self.show_export_analysis_summary(critical_count, warning_count, info_count, conflicts)
+            
+            if choice == 'view_report':
+                self.show_analysis_report(conflicts)
+                return  # Stop export flow, let user review
+            elif choice == 'cancel':
+                return  # User wants to fix issues first
+            # else 'continue' - proceed with export
+        
+        # STEP 2: Handle AWS export format separately
+        if export_format == 'aws':
+            # Show AWS configuration dialog
+            self.show_aws_rule_group_config_dialog(test_mode)
+            return
+        
+        # STEP 3: Show file save dialog with appropriate defaults for Terraform/CloudFormation
         if export_format == 'terraform':
             initial_filename = "network-firewall-rules_test.tf" if test_mode else "network-firewall-rules.tf"
             file_extension = ".tf"
@@ -2713,15 +2851,15 @@ class SuricataRuleGenerator:
                 messagebox.showerror("Export Error", f"Failed to export {export_format} template to {filename}:\n\n{str(e)}")
     
     def show_export_options_dialog(self):
-        """Show export options dialog with format, test mode, and prerequisite warning
+        """Show export options dialog with format, test mode, analyzer option, and prerequisite warning
         
         Returns:
-            dict: {'format': 'terraform'|'cloudformation', 'test_mode': bool}
+            dict: {'format': 'terraform'|'cloudformation'|'aws', 'test_mode': bool, 'run_analyzer': bool}
             or None if cancelled
         """
         dialog = tk.Toplevel(self.root)
         dialog.title("Export Options")
-        dialog.geometry("480x260")  # Initial size (will grow if test mode checked)
+        dialog.geometry("480x350")  # Initial size (will grow if test mode checked)
         dialog.transient(self.root)
         dialog.grab_set()
         dialog.resizable(True, True)
@@ -2745,11 +2883,25 @@ class SuricataRuleGenerator:
         ttk.Radiobutton(main_frame, text="CloudFormation (.cft)", 
                        variable=format_var, value='cloudformation').pack(anchor=tk.W, padx=20, pady=(5, 0))
         
+        # AWS option - disable if boto3 not installed
+        aws_frame = ttk.Frame(main_frame)
+        aws_frame.pack(fill=tk.X, pady=(5, 0))
+        
+        aws_radio = ttk.Radiobutton(aws_frame, text="AWS Network Firewall (Direct Deploy)", 
+                       variable=format_var, value='aws')
+        aws_radio.pack(anchor=tk.W, padx=20)
+        
+        if not HAS_BOTO3:
+            aws_radio.config(state='disabled')
+            ttk.Label(aws_frame,
+                     text="Requires boto3 - run: pip install boto3",
+                     font=("TkDefaultFont", 9), foreground="#999999").pack(anchor=tk.W, padx=(45, 0))
+        
         # Separator
         ttk.Separator(main_frame, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=15)
         
-        # Test mode option
-        ttk.Label(main_frame, text="Testing Options:", 
+        # Options section
+        ttk.Label(main_frame, text="Options:", 
                  font=("TkDefaultFont", 10, "bold")).pack(anchor=tk.W, pady=(0, 5))
         
         test_mode_var = tk.BooleanVar(value=False)
@@ -2766,6 +2918,22 @@ class SuricataRuleGenerator:
             foreground="#666666"
         )
         info_label.pack(anchor=tk.W, padx=40, pady=(2, 0))
+        
+        # Analyzer option
+        run_analyzer_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(
+            main_frame,
+            text="Analyze rules before export",
+            variable=run_analyzer_var
+        ).pack(anchor=tk.W, padx=20, pady=(5, 0))
+        
+        analyzer_info_label = ttk.Label(
+            main_frame,
+            text="Run rule conflict analysis before proceeding with export",
+            font=("TkDefaultFont", 8),
+            foreground="#666666"
+        )
+        analyzer_info_label.pack(anchor=tk.W, padx=40, pady=(2, 0))
         
         # Preview frame (shows when test mode checked)
         preview_frame = ttk.LabelFrame(main_frame, text="Preview (First 3 Rules)")
@@ -2899,7 +3067,8 @@ class SuricataRuleGenerator:
         def on_continue():
             result[0] = {
                 'format': format_var.get(),
-                'test_mode': test_mode_var.get()
+                'test_mode': test_mode_var.get(),
+                'run_analyzer': run_analyzer_var.get()
             }
             dialog.destroy()
         
@@ -2913,6 +3082,472 @@ class SuricataRuleGenerator:
         
         dialog.wait_window()
         return result[0]
+    
+    def show_export_analysis_summary(self, critical: int, warnings: int, info_count: int, 
+                                    conflicts: list) -> str:
+        """Show lightweight summary of analysis results
+        
+        Args:
+            critical: Total count of issues (used as total when warnings/info_count are 0)
+            warnings: Count of warnings (0 if not categorized)
+            info_count: Count of informational findings (0 if not categorized)
+            conflicts: Full conflicts list (for View Report button)
+            
+        Returns:
+            str: 'view_report', 'continue', or 'cancel'
+        """
+        
+        dialog = tk.Toplevel(self.root)
+        dialog.title("Rule Analysis Results")
+        dialog.geometry("450x280")
+        dialog.transient(self.root)
+        dialog.grab_set()
+        
+        main_frame = ttk.Frame(dialog)
+        main_frame.pack(fill=tk.BOTH, expand=True, padx=20, pady=20)
+        
+        # Status
+        ttk.Label(main_frame, text="✓ Analysis Complete", 
+                 font=("TkDefaultFont", 11, "bold")).pack(pady=(0, 15))
+        
+        # Findings summary
+        findings_frame = ttk.LabelFrame(main_frame, text="Findings")
+        findings_frame.pack(fill=tk.X, pady=(0, 15))
+        
+        # Always show categorized breakdown with all 3 categories
+        findings_text = (
+            f"• Critical Issues: {critical}\n"
+            f"• Warnings: {warnings}\n"
+            f"• Informational: {info_count}"
+        )
+        
+        ttk.Label(findings_frame, text=findings_text, 
+                 font=("TkDefaultFont", 10)).pack(padx=15, pady=15)
+        
+        # Message
+        ttk.Label(main_frame, 
+                 text="You can review the full report now or proceed with export.",
+                 font=("TkDefaultFont", 9)).pack(pady=(0, 20))
+        
+        # Buttons
+        button_frame = ttk.Frame(main_frame)
+        button_frame.pack(fill=tk.X)
+        
+        result = [None]
+        
+        def on_view():
+            result[0] = 'view_report'
+            dialog.destroy()
+        
+        def on_continue():
+            result[0] = 'continue'
+            dialog.destroy()
+        
+        def on_cancel():
+            result[0] = 'cancel'
+            dialog.destroy()
+        
+        ttk.Button(button_frame, text="View Report", 
+                  command=on_view).pack(side=tk.LEFT, padx=5)
+        ttk.Button(button_frame, text="Continue", 
+                  command=on_continue).pack(side=tk.LEFT, padx=5)
+        ttk.Button(button_frame, text="Cancel", 
+                  command=on_cancel).pack(side=tk.RIGHT, padx=5)
+        
+        dialog.wait_window()
+        return result[0]
+    
+    def sanitize_rule_group_name(self, filename: str) -> str:
+        """Convert filename to AWS-compliant rule group name
+        
+        AWS Requirements:
+        - 1-128 characters
+        - Valid: a-z, A-Z, 0-9, - (hyphen)
+        - Cannot start/end with hyphen
+        - No consecutive hyphens (--)
+        
+        Args:
+            filename: Original filename (may include .suricata extension)
+            
+        Returns:
+            str: AWS-compliant rule group name
+        """
+        
+        # Step 1: Remove file extension
+        if filename.endswith('.suricata'):
+            name = filename[:-9]  # Remove .suricata
+        else:
+            name = filename
+        
+        # Step 2: Replace invalid characters with hyphens
+        # Valid: alphanumeric and hyphen
+        # Invalid: spaces, underscores, special chars → all become hyphens
+        sanitized = ''
+        for char in name:
+            if char.isalnum():
+                sanitized += char
+            elif char in (' ', '_', '.'):
+                sanitized += '-'
+            # else: skip invalid characters
+        
+        # Step 3: Remove consecutive hyphens
+        while '--' in sanitized:
+            sanitized = sanitized.replace('--', '-')
+        
+        # Step 4: Remove leading/trailing hyphens
+        sanitized = sanitized.strip('-')
+        
+        # Step 5: Ensure not empty (fallback)
+        if not sanitized:
+            sanitized = 'suricata-generator-rg'
+        
+        # Step 6: Truncate to 128 characters
+        if len(sanitized) > 128:
+            sanitized = sanitized[:128]
+            # Re-check trailing hyphen after truncation
+            sanitized = sanitized.rstrip('-')
+        
+        # Step 7: Convert to lowercase (AWS best practice)
+        sanitized = sanitized.lower()
+        
+        return sanitized
+    
+    def validate_rule_group_name(self, name: str) -> Tuple[bool, str]:
+        """Validate AWS rule group name
+        
+        Args:
+            name: Name to validate
+            
+        Returns:
+            Tuple of (is_valid, error_message)
+        """
+        if not name:
+            return (False, "Rule group name is required")
+        
+        if len(name) > 128:
+            return (False, "Name cannot exceed 128 characters")
+        
+        if not re.match(r'^[a-zA-Z0-9-]+$', name):
+            return (False, "Only a-z, A-Z, 0-9, and - allowed")
+        
+        if name.startswith('-'):
+            return (False, "Cannot start with hyphen")
+        
+        if name.endswith('-'):
+            return (False, "Cannot end with hyphen")
+        
+        if '--' in name:
+            return (False, "Cannot contain consecutive hyphens (--)")
+        
+        return (True, "Valid rule group name")
+    
+    def show_aws_rule_group_config_dialog(self, test_mode: bool):
+        """Show AWS configuration dialog with pre-validation
+        
+        Args:
+            test_mode: True if test mode export, False for production
+        """
+        # Check for unsaved changes and prompt to save
+        if self.modified:
+            response = messagebox.askyesno(
+                "Unsaved Changes",
+                "You have unsaved changes.\n\n"
+                "Would you like to save your file before deploying to AWS?\n\n"
+                "Recommended: Yes (preserves change history and file state)",
+                icon='question'
+            )
+            
+            if response:  # Yes - save first
+                if not self.save_file():
+                    return  # Save failed or cancelled
+            # No - proceed without saving
+        
+        # Check boto3 availability
+        if not HAS_BOTO3:
+            response = messagebox.askyesno(
+                "boto3 Required",
+                "AWS deployment requires the 'boto3' library.\n\n"
+                "Would you like to see installation instructions?"
+            )
+            if response:
+                self.ui_manager.show_boto3_install_help()
+            return
+        
+        # Pre-populate rule group name
+        if self.current_file:
+            # Use current filename
+            base_name = os.path.basename(self.current_file)
+            sanitized_name = self.sanitize_rule_group_name(base_name)
+        else:
+            # Use default name for unsaved files
+            sanitized_name = "suricata-generator-rg"
+        
+        # Append "-test" suffix if test mode is enabled
+        if test_mode:
+            sanitized_name = f"{sanitized_name}-test"
+        
+        # Create dialog
+        dialog = tk.Toplevel(self.root)
+        dialog.title("AWS Network Firewall - Deploy Rule Group")
+        dialog.geometry("650x580")  # Increased height for region selector
+        dialog.transient(self.root)
+        dialog.grab_set()
+        dialog.resizable(True, False)
+        
+        # Center dialog
+        dialog.geometry("+%d+%d" % (
+            self.root.winfo_rootx() + 150,
+            self.root.winfo_rooty() + 100
+        ))
+        
+        # Main frame
+        main_frame = ttk.Frame(dialog)
+        main_frame.pack(fill=tk.BOTH, expand=True, padx=20, pady=20)
+        
+        # Title
+        ttk.Label(main_frame, text="Deploy to AWS Network Firewall",
+                 font=("TkDefaultFont", 12, "bold")).pack(pady=(0, 15))
+        
+        # Region selector section
+        region_frame = ttk.LabelFrame(main_frame, text="AWS Region")
+        region_frame.pack(fill=tk.X, pady=(0, 15))
+        
+        region_selector_frame = ttk.Frame(region_frame)
+        region_selector_frame.pack(fill=tk.X, padx=10, pady=10)
+        
+        ttk.Label(region_selector_frame, text="Region:").pack(side=tk.LEFT, padx=(0, 5))
+        
+        # Get default region and populate selector
+        try:
+            import boto3
+            session = boto3.Session()
+            default_region = session.region_name or 'us-east-1'
+        except:
+            default_region = 'us-east-1'
+        
+        # All AWS standard commercial regions (excludes China and GovCloud)
+        aws_regions = [
+            # US Regions
+            'us-east-1', 'us-east-2', 'us-west-1', 'us-west-2',
+            # Canada Regions
+            'ca-central-1', 'ca-west-1',
+            # Europe Regions
+            'eu-west-1', 'eu-west-2', 'eu-west-3', 'eu-central-1', 'eu-central-2',
+            'eu-north-1', 'eu-south-1', 'eu-south-2',
+            # Asia Pacific Regions
+            'ap-south-1', 'ap-south-2', 'ap-southeast-1', 'ap-southeast-2',
+            'ap-southeast-3', 'ap-southeast-4', 'ap-northeast-1', 'ap-northeast-2',
+            'ap-northeast-3', 'ap-east-1',
+            # South America Regions
+            'sa-east-1',
+            # Middle East Regions
+            'me-south-1', 'me-central-1',
+            # Africa Regions
+            'af-south-1',
+            # Israel Regions
+            'il-central-1'
+        ]
+        
+        selected_region_var = tk.StringVar(value=default_region)
+        region_combo = ttk.Combobox(region_selector_frame, textvariable=selected_region_var,
+                                    values=aws_regions, state="readonly", width=20)
+        region_combo.pack(side=tk.LEFT)
+        
+        # Name input section
+        name_frame = ttk.LabelFrame(main_frame, text="Rule Group Name")
+        name_frame.pack(fill=tk.X, pady=(0, 15))
+        
+        name_input_frame = ttk.Frame(name_frame)
+        name_input_frame.pack(fill=tk.X, padx=10, pady=10)
+        
+        ttk.Label(name_input_frame, text="Name:").pack(side=tk.LEFT, padx=(0, 5))
+        
+        # Validation indicator frame
+        validation_frame = ttk.Frame(name_input_frame)
+        validation_frame.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        
+        # Text entry with validation
+        name_var = tk.StringVar(value=sanitized_name)
+        name_entry = ttk.Entry(validation_frame, textvariable=name_var, width=50)
+        name_entry.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        
+        # Validation indicator (✓ or ✗)
+        validation_icon = ttk.Label(validation_frame, text="✓", foreground="green")
+        validation_icon.pack(side=tk.LEFT, padx=(5, 0))
+        
+        # Character counter
+        char_count_label = ttk.Label(name_frame, text="0/128 characters",
+                                     font=("TkDefaultFont", 8), foreground="#666666")
+        char_count_label.pack(anchor=tk.E, padx=10, pady=(0, 5))
+        
+        # Validation message
+        validation_msg = ttk.Label(name_frame, text="Valid rule group name",
+                                  font=("TkDefaultFont", 8), foreground="green")
+        validation_msg.pack(anchor=tk.W, padx=10, pady=(0, 5))
+        
+        # Requirements section
+        req_frame = ttk.LabelFrame(main_frame, text="AWS Requirements")
+        req_frame.pack(fill=tk.X, pady=(0, 15))
+        
+        req_text = (
+            "• 1-128 characters\n"
+            "• Valid characters: a-z, A-Z, 0-9, - (hyphen)\n"
+            "• Cannot start or end with hyphen\n"
+            "• Cannot contain consecutive hyphens (--)"
+        )
+        ttk.Label(req_frame, text=req_text, font=("TkDefaultFont", 9),
+                 justify=tk.LEFT).pack(anchor=tk.W, padx=10, pady=10)
+        
+        # Summary section
+        summary_frame = ttk.LabelFrame(main_frame, text="Deployment Summary")
+        summary_frame.pack(fill=tk.X, pady=(0, 15))
+        
+        # Calculate statistics
+        rule_count = len([r for r in self.rules 
+                         if not getattr(r, 'is_comment', False) 
+                         and not getattr(r, 'is_blank', False)])
+        capacity = rule_count + 100
+        
+        mode_text = "Test Mode (alert-only)" if test_mode else "Production"
+        
+        # Create summary with some values bolded for emphasis
+        summary_label = tk.Text(summary_frame, wrap=tk.WORD, font=("TkDefaultFont", 9),
+                               height=4, width=50, relief=tk.FLAT,
+                               cursor="arrow", borderwidth=0, highlightthickness=0)
+        summary_label.pack(anchor=tk.W, padx=10, pady=10)
+        
+        # Configure tags for bold text
+        summary_label.tag_configure("bold", font=("TkDefaultFont", 9, "bold"))
+        
+        # Function to update summary with current region
+        def update_summary(*args):
+            """Update deployment summary with selected region"""
+            current_region = selected_region_var.get()
+            
+            summary_label.config(state=tk.NORMAL)
+            summary_label.delete(1.0, tk.END)
+            
+            # Insert summary text with selective bolding
+            summary_label.insert(tk.END, f"• Rules to export: {rule_count}\n")
+            summary_label.insert(tk.END, "• Export mode: ")
+            summary_label.insert(tk.END, mode_text, "bold")
+            summary_label.insert(tk.END, f"\n• Capacity required: {capacity}\n")
+            summary_label.insert(tk.END, "• Target region: ")
+            summary_label.insert(tk.END, current_region, "bold")
+            
+            summary_label.config(state=tk.DISABLED)
+        
+        # Initial summary display
+        update_summary()
+        
+        # Bind region change to update summary
+        selected_region_var.trace_add('write', update_summary)
+        
+        # Buttons
+        button_frame = ttk.Frame(main_frame)
+        button_frame.pack(fill=tk.X, pady=(10, 0))
+        
+        # Will be enabled/disabled based on validation
+        deploy_button = ttk.Button(button_frame, text="Deploy", state="normal")
+        
+        # Real-time validation
+        def validate_name(*args):
+            """Validate rule group name in real-time"""
+            name = name_var.get()
+            
+            # Update character counter
+            char_count_label.config(text=f"{len(name)}/128 characters")
+            
+            # Validate
+            is_valid, error_msg = self.validate_rule_group_name(name)
+            
+            # Update UI based on validation
+            if is_valid:
+                validation_icon.config(text="✓", foreground="green")
+                validation_msg.config(text=error_msg, foreground="green")
+                name_entry.config(foreground="black")
+                deploy_button.config(state="normal")
+            else:
+                validation_icon.config(text="✗", foreground="red")
+                validation_msg.config(text=error_msg, foreground="red")
+                name_entry.config(foreground="red")
+                deploy_button.config(state="disabled")
+        
+        # Bind validation
+        name_var.trace_add('write', validate_name)
+        
+        # Initial validation
+        validate_name()
+        
+        # Deploy button handler
+        def on_deploy():
+            """Handle Deploy button click with validation and overwrite detection"""
+            rule_group_name = name_var.get().strip()
+            
+            # Validate name one final time
+            is_valid, _ = self.validate_rule_group_name(rule_group_name)
+            if not is_valid:
+                return
+            
+            # Check for undefined variables (same validation as Terraform/CloudFormation export)
+            used_vars = self.file_manager.scan_rules_for_variables(self.rules)
+            undefined_vars = []
+            
+            for var in used_vars:
+                if var == '$EXTERNAL_NET':
+                    continue  # Skip $EXTERNAL_NET (auto-defined by AWS)
+                
+                if var not in self.variables:
+                    undefined_vars.append(var)
+                else:
+                    # Handle both dict and string formats
+                    var_data = self.variables[var]
+                    if isinstance(var_data, dict):
+                        var_def = var_data.get('definition', '')
+                    else:
+                        var_def = var_data
+                    
+                    if not var_def.strip():
+                        undefined_vars.append(var)
+            
+            if undefined_vars:
+                var_list = '\n'.join(f"  • {var}" for var in undefined_vars)
+                messagebox.showerror(
+                    "Undefined Variables",
+                    f"Cannot deploy with undefined variables:\n\n{var_list}\n\n"
+                    "Please define these variables in the Variables tab before deploying."
+                )
+                return
+            
+            # Close config dialog
+            dialog.destroy()
+            
+            # Get selected region
+            selected_region = selected_region_var.get()
+            
+            # Proceed with deployment with selected region
+            self.file_manager.deploy_to_aws(
+                self.rules, 
+                self.variables, 
+                rule_group_name, 
+                test_mode,
+                self,
+                selected_region
+            )
+        
+        deploy_button.config(command=on_deploy)
+        
+        def show_aws_help():
+            """Open AWS setup guide"""
+            self.ui_manager.show_aws_setup_help(default_tab='iam')
+        
+        ttk.Button(button_frame, text="Help", command=show_aws_help).pack(side=tk.LEFT)
+        ttk.Button(button_frame, text="Cancel", command=dialog.destroy).pack(side=tk.RIGHT)
+        deploy_button.pack(side=tk.RIGHT, padx=(0, 5))
+        
+        # Focus on name entry
+        name_entry.focus()
+        name_entry.select_range(0, tk.END)
 
     
     def get_version_number(self) -> str:
@@ -3429,10 +4064,65 @@ class SuricataRuleGenerator:
                 messagebox.showerror("Security Validation Error", str(e))
                 return
             
+            # Check if user removed the "#" character (uncommented the rule)
+            new_text = self.comment_var.get().strip()
+            if new_text and not new_text.startswith('#'):
+                # User removed comment marker - try to parse as a rule
+                potential_rule = SuricataRule.from_string(new_text)
+                
+                if potential_rule:
+                    # Successfully parsed - validate the rule
+                    validation_errors = self._validate_parsed_rule(potential_rule)
+                    
+                    if not validation_errors:
+                        # Valid rule - convert from comment to active rule
+                        # Save state for undo
+                        self.save_undo_state()
+                        
+                        # Replace the comment with the parsed rule
+                        self.rules[self.selected_rule_index] = potential_rule
+                        
+                        self.refresh_table()
+                        self.modified = True
+                        self.auto_detect_variables()
+                        self.update_status_bar()
+                        
+                        # Reselect the updated rule
+                        items = self.tree.get_children()
+                        if self.selected_rule_index is not None and self.selected_rule_index < len(items):
+                            self.tree.selection_set(items[self.selected_rule_index])
+                        
+                        messagebox.showinfo("Success", f"Comment at line {updated_line_num} converted to active rule successfully.")
+                        return
+                    else:
+                        # Invalid rule - show error and keep as comment with error marker
+                        error_summary = ', '.join(validation_errors)
+                        messagebox.showerror("Validation Error", 
+                            f"Cannot uncomment line {updated_line_num}.\n\n"
+                            f"Validation errors: {error_summary}\n\n"
+                            "The line will remain commented.")
+                        # Update comment text with error marker
+                        rule.comment_text = f"# [VALIDATION ERROR: {error_summary}] {new_text}"
+                        self.refresh_table()
+                        self.modified = True
+                        self.update_status_bar()
+                        return
+                else:
+                    # Failed to parse - show error and keep as comment with error marker
+                    messagebox.showerror("Parse Error",
+                        f"Cannot uncomment line {updated_line_num}.\n\n"
+                        "Failed to parse as valid Suricata rule.\n\n"
+                        "The line will remain commented.")
+                    rule.comment_text = f"# [PARSE ERROR] {new_text}"
+                    self.refresh_table()
+                    self.modified = True
+                    self.update_status_bar()
+                    return
+            
             # Save state for undo
             self.save_undo_state()
             
-            # Save comment
+            # Normal comment update (user didn't remove "#")
             rule.comment_text = self.comment_var.get()
             self.refresh_table()
             self.modified = True
@@ -4327,6 +5017,7 @@ class SuricataRuleGenerator:
         # Track changes for history
         enabled_rules = []
         disabled_rules = []
+        failed_to_parse = []
         
         # Process each selected rule
         for index in indices:
@@ -4334,27 +5025,43 @@ class SuricataRuleGenerator:
                 rule = self.rules[index]
                 
                 if getattr(rule, 'is_comment', False):
-                    # Try to convert comment back to rule if it contains directional indicators
+                    # Try to convert comment back to rule
                     comment_text = rule.comment_text.strip()
                     if comment_text.startswith('# '):
                         potential_rule_text = comment_text[2:]  # Remove "# "
                         
-                        # Check if it contains directional indicators
-                        if any(direction in potential_rule_text for direction in ['->', '<>']):
-                            try:
-                                # Try to parse it back into a rule
-                                restored_rule = SuricataRule.from_string(potential_rule_text)
-                                if restored_rule:
-                                    self.rules[index] = restored_rule
-                                    enabled_rules.append({
-                                        'line': index + 1,
-                                        'action': restored_rule.action,
-                                        'sid': restored_rule.sid,
-                                        'message': restored_rule.message
-                                    })
-                            except:
-                                # If parsing fails, leave as comment
-                                pass
+                        # Try to parse it back into a rule
+                        restored_rule = SuricataRule.from_string(potential_rule_text)
+                        if restored_rule:
+                            # Successfully parsed - validate the rule
+                            validation_errors = self._validate_parsed_rule(restored_rule)
+                            
+                            if not validation_errors:
+                                # Valid rule - restore it
+                                self.rules[index] = restored_rule
+                                enabled_rules.append({
+                                    'line': index + 1,
+                                    'action': restored_rule.action,
+                                    'sid': restored_rule.sid,
+                                    'message': restored_rule.message
+                                })
+                            else:
+                                # Invalid rule - keep as comment but update text to show errors
+                                error_summary = ', '.join(validation_errors)
+                                rule.comment_text = f"# [VALIDATION ERROR: {error_summary}] {potential_rule_text}"
+                                failed_to_parse.append({
+                                    'line': index + 1,
+                                    'text': potential_rule_text[:50] + '...' if len(potential_rule_text) > 50 else potential_rule_text,
+                                    'errors': validation_errors
+                                })
+                        else:
+                            # Failed to parse - keep as comment but mark it
+                            rule.comment_text = f"# [PARSE ERROR] {potential_rule_text}"
+                            failed_to_parse.append({
+                                'line': index + 1,
+                                'text': potential_rule_text[:50] + '...' if len(potential_rule_text) > 50 else potential_rule_text,
+                                'errors': ['Failed to parse as Suricata rule']
+                            })
                 elif getattr(rule, 'is_blank', False):
                     # Skip blank lines
                     continue
@@ -4383,9 +5090,52 @@ class SuricataRuleGenerator:
         self.update_status_bar()
         
         # Show feedback message
-        count = len([i for i in indices if i < len(self.rules)])
-        rule_text = "rule" if count == 1 else "rules"
-        messagebox.showinfo("Toggle Complete", f"Toggled {count} {rule_text} between enabled/disabled state.")
+        success_count = len(enabled_rules) + len(disabled_rules)
+        if failed_to_parse:
+            # Show detailed error message
+            error_details = []
+            for failure in failed_to_parse[:3]:  # Show first 3
+                error_details.append(f"Line {failure['line']}: {', '.join(failure['errors'])}")
+            
+            error_msg = f"Toggled {success_count} rule(s) successfully.\n\n"
+            error_msg += f"Failed to uncomment {len(failed_to_parse)} rule(s) due to validation errors:\n\n"
+            error_msg += '\n'.join(error_details)
+            if len(failed_to_parse) > 3:
+                error_msg += f"\n... and {len(failed_to_parse) - 3} more"
+            error_msg += "\n\nInvalid rules remain commented with [VALIDATION ERROR] or [PARSE ERROR] prefix."
+            messagebox.showwarning("Toggle Completed with Errors", error_msg)
+        else:
+            rule_text = "rule" if success_count == 1 else "rules"
+            messagebox.showinfo("Toggle Complete", f"Toggled {success_count} {rule_text} between enabled/disabled state.")
+    
+    def _validate_parsed_rule(self, rule: SuricataRule) -> list:
+        """Validate a parsed rule for common syntax errors
+        
+        Args:
+            rule: SuricataRule object to validate
+            
+        Returns:
+            List of validation error messages (empty if valid)
+        """
+        errors = []
+        
+        # Validate action
+        if rule.action.lower() not in SuricataConstants.SUPPORTED_ACTIONS:
+            errors.append(f"invalid action '{rule.action}'")
+        
+        # Validate protocol
+        if rule.protocol.lower() not in SuricataConstants.SUPPORTED_PROTOCOLS:
+            errors.append(f"invalid protocol '{rule.protocol}'")
+        
+        # Validate source port (basic check)
+        if not self.validate_port_list(rule.src_port):
+            errors.append(f"invalid source port '{rule.src_port}'")
+        
+        # Validate destination port (basic check)
+        if not self.validate_port_list(rule.dst_port):
+            errors.append(f"invalid destination port '{rule.dst_port}'")
+        
+        return errors
     
     def on_ctrl_g_key(self, event):
         """Handle Ctrl+G key - only show dialog when tree view has focus"""

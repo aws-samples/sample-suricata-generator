@@ -5,7 +5,7 @@ Handles all file I/O operations including:
 - Loading/saving .suricata files
 - Variable file management (.var files)
 - History file management (.history files)
-- Export functionality (Terraform/CloudFormation)
+- Export functionality (Terraform/CloudFormation/AWS)
 """
 
 import os
@@ -14,6 +14,8 @@ import re
 import urllib.request
 import urllib.error
 from typing import List, Optional
+from tkinter import ttk, messagebox
+import tkinter as tk
 from suricata_rule import SuricataRule
 from constants import SuricataConstants, SecurityConstants, ValidationMessages
 from security_validator import validate_file_operation, security_validator
@@ -1043,3 +1045,599 @@ EOF
         except (OSError, IOError, ValueError, json.JSONDecodeError):
             # If post-processing fails, leave the original file unchanged
             pass
+    
+    def deploy_to_aws(self, rules: List, variables: dict, rule_group_name: str, 
+                     test_mode: bool, parent_app, region: str = None) -> bool:
+        """Deploy rules directly to AWS Network Firewall
+        
+        Args:
+            rules: List of SuricataRule objects
+            variables: Variable definitions dictionary
+            rule_group_name: AWS-compliant rule group name
+            test_mode: If True, convert all actions to 'alert'
+            parent_app: Reference to parent application for progress updates
+            region: AWS region to deploy to (optional, uses default if not specified)
+            
+        Returns:
+            bool: True if deployment succeeded
+            
+        Raises:
+            NoCredentialsError: AWS credentials not configured
+            ClientError: AWS API error (permissions, limits, etc.)
+        """
+        try:
+            import boto3
+            from botocore.exceptions import ClientError, NoCredentialsError
+        except ImportError:
+            raise ImportError("boto3 is required for AWS deployment")
+        
+        # Create progress dialog
+        progress_dialog = tk.Toplevel(parent_app.root)
+        progress_dialog.title("Deploying to AWS")
+        progress_dialog.geometry("400x120")
+        progress_dialog.transient(parent_app.root)
+        progress_dialog.grab_set()
+        
+        # Center dialog
+        progress_dialog.geometry("+%d+%d" % (
+            parent_app.root.winfo_rootx() + 200,
+            parent_app.root.winfo_rooty() + 200
+        ))
+        
+        progress_frame = ttk.Frame(progress_dialog)
+        progress_frame.pack(fill=tk.BOTH, expand=True, padx=20, pady=20)
+        
+        ttk.Label(progress_frame, text="Deploying rule group to AWS...").pack(pady=20)
+        progress_bar = ttk.Progressbar(progress_frame, mode='indeterminate')
+        progress_bar.pack(pady=10)
+        progress_bar.start(10)
+        
+        # Force dialog to display
+        progress_dialog.update()
+        
+        try:
+            # STEP 1: Convert rules if test mode
+            export_rules = self._prepare_rules_for_export(rules, test_mode)
+            
+            # STEP 2: Calculate capacity
+            actual_capacity = len([r for r in export_rules 
+                                 if not getattr(r, 'is_comment', False) 
+                                 and not getattr(r, 'is_blank', False)])
+            capacity = actual_capacity + 100
+            
+            # STEP 3: Generate rules string (reuse existing logic with normalized line endings)
+            rules_lines = []
+            for rule in export_rules:
+                if getattr(rule, 'is_blank', False):
+                    rules_lines.append('')
+                elif getattr(rule, 'is_comment', False):
+                    # Strip any \r characters to ensure Unix line endings
+                    clean_comment = rule.comment_text.replace('\r\n', '\n').replace('\r', '')
+                    rules_lines.append(clean_comment)
+                else:
+                    # Strip any \r characters from rule strings
+                    clean_rule = rule.to_string().replace('\r\n', '\n').replace('\r', '')
+                    rules_lines.append(clean_rule)
+            
+            rules_string = '\n'.join(rules_lines)
+            
+            # STEP 4: Build RuleGroup structure
+            rule_group = {
+                'RulesSource': {
+                    'RulesString': rules_string
+                },
+                'StatefulRuleOptions': {
+                    'RuleOrder': 'STRICT_ORDER'
+                }
+            }
+            
+            # STEP 5: Add variables if they exist
+            rule_variables = self._build_rule_variables(variables, export_rules)
+            if rule_variables:
+                rule_group['RuleVariables'] = rule_variables
+            
+            # STEP 6: Build ReferenceSets
+            reference_sets = self._build_reference_sets(variables, export_rules)
+            
+            # STEP 7: Create boto3 client with specified region
+            client = boto3.client('network-firewall', region_name=region)
+            
+            # STEP 8: Check if rule group exists (for overwrite detection)
+            rule_group_exists = False
+            rule_group_arn = None
+            update_token = None
+            
+            try:
+                existing_rg = client.describe_rule_group(
+                    RuleGroupName=rule_group_name,
+                    Type='STATEFUL'
+                )
+                
+                # Rule group exists - show overwrite confirmation
+                should_proceed = self._show_overwrite_confirmation_dialog(
+                    rule_group_name, 
+                    existing_rg,
+                    parent_app
+                )
+                
+                if not should_proceed:
+                    progress_dialog.destroy()
+                    return False  # User declined to overwrite
+                
+                # Extract info needed for update
+                rule_group_exists = True
+                rule_group_arn = existing_rg['RuleGroupResponse']['RuleGroupArn']
+                update_token = existing_rg['UpdateToken']
+                    
+            except client.exceptions.ResourceNotFoundException:
+                # Rule group doesn't exist - safe to create
+                rule_group_exists = False
+            
+            # STEP 9: Create or update rule group based on existence
+            # Get current date for description
+            from datetime import datetime
+            current_date = datetime.now().strftime('%Y-%m-%d')
+            
+            if rule_group_exists:
+                # Update existing rule group
+                api_params = {
+                    'UpdateToken': update_token,
+                    'RuleGroupArn': rule_group_arn,
+                    'RuleGroup': rule_group,
+                    'Description': f'Updated by Suricata Generator v{self.version} on {current_date}',
+                    'Type': 'STATEFUL'
+                }
+                
+                # Only add ReferenceSets if there are actual references (AWS requirement)
+                if reference_sets:
+                    api_params['ReferenceSets'] = reference_sets
+                
+                response = client.update_rule_group(**api_params)
+            else:
+                # Create new rule group
+                api_params = {
+                    'RuleGroupName': rule_group_name,
+                    'Type': 'STATEFUL',
+                    'RuleGroup': rule_group,
+                    'Capacity': capacity,
+                    'Description': f'Created by Suricata Generator v{self.version} on {current_date}'
+                }
+                
+                # Only add ReferenceSets if there are actual references (AWS requirement)
+                if reference_sets:
+                    api_params['ReferenceSets'] = reference_sets
+                
+                response = client.create_rule_group(**api_params)
+            
+            # Close progress dialog
+            progress_dialog.destroy()
+            
+            # STEP 10: Show success dialog
+            self._show_deployment_success(
+                rule_group_name, 
+                response,
+                actual_capacity,
+                parent_app
+            )
+            
+            # STEP 11: Log deployment if tracking enabled
+            if parent_app.tracking_enabled:
+                export_details = {
+                    'format': 'aws',
+                    'test_mode': test_mode,
+                    'rule_group_name': rule_group_name,
+                    'arn': response['RuleGroupResponse']['RuleGroupArn'],
+                    'rule_count': actual_capacity,
+                    'capacity': capacity
+                }
+                action = 'test_export' if test_mode else 'production_export'
+                parent_app.add_history_entry(action, export_details)
+            
+            return True
+            
+        except NoCredentialsError:
+            progress_dialog.destroy()
+            messagebox.showerror(
+                "AWS Credentials Not Found",
+                "AWS credentials are not configured.\n\n"
+                "To use AWS export, configure credentials using:\n"
+                "• AWS CLI: aws configure\n"
+                "• Environment variables\n"
+                "• IAM role (if on AWS)\n\n"
+                "See Help > AWS Setup for detailed instructions."
+            )
+            return False
+        except ClientError as e:
+            progress_dialog.destroy()
+            error_code = e.response.get('Error', {}).get('Code', 'Unknown')
+            error_message = e.response.get('Error', {}).get('Message', str(e))
+            
+            if error_code == 'AccessDeniedException':
+                messagebox.showerror(
+                    "Insufficient AWS Permissions",
+                    "Your AWS credentials lack permission to create rule groups.\n\n"
+                    "Required IAM actions:\n"
+                    "• network-firewall:CreateRuleGroup\n"
+                    "• network-firewall:UpdateRuleGroup\n\n"
+                    "See Help > AWS Setup for complete IAM policy."
+                )
+            elif error_code == 'LimitExceededException':
+                messagebox.showerror(
+                    "AWS Account Limit Exceeded",
+                    f"AWS account limit reached.\n\n"
+                    f"Error: {error_message}\n\n"
+                    "You may have reached the limit for:\n"
+                    "• Total rule groups per account\n"
+                    "• Total capacity units used\n\n"
+                    "Consider deleting unused rule groups or requesting a limit increase."
+                )
+            elif error_code == 'InvalidRequestException':
+                messagebox.showerror(
+                    "Invalid Request",
+                    f"AWS rejected the request.\n\n"
+                    f"Error: {error_message}\n\n"
+                    "This may be due to:\n"
+                    "• Invalid rule syntax\n"
+                    "• Unsupported features\n"
+                    "• Validation errors"
+                )
+            else:
+                messagebox.showerror(
+                    "AWS Deployment Error",
+                    f"Failed to deploy rule group.\n\n"
+                    f"Error Code: {error_code}\n"
+                    f"Message: {error_message}"
+                )
+            return False
+        except Exception as e:
+            progress_dialog.destroy()
+            messagebox.showerror(
+                "Deployment Error",
+                f"An unexpected error occurred:\n\n{str(e)}"
+            )
+            return False
+    
+    def _build_rule_variables(self, variables: dict, export_rules: List) -> dict:
+        """Build RuleVariables section for AWS API
+        
+        Args:
+            variables: Variable definitions dictionary
+            export_rules: List of rules to export (for usage analysis)
+            
+        Returns:
+            dict: RuleVariables structure for AWS API
+        """
+        if not variables:
+            return {}
+        
+        # Analyze variable usage to determine correct types
+        variable_usage = self.analyze_variable_usage(export_rules)
+        
+        rule_variables = {}
+        
+        for var_name, var_data in variables.items():
+            # Extract definition (handle both formats)
+            if isinstance(var_data, dict):
+                definition = var_data.get("definition", "")
+            else:
+                definition = var_data
+            
+            if not definition.strip():
+                continue
+            
+            clean_name = var_name.lstrip('$@')
+            var_type = self.get_variable_type_from_usage(var_name, variable_usage)
+            
+            if var_type == "IP Set":
+                # Strip brackets if present before splitting
+                clean_def = definition.strip()
+                if clean_def.startswith('[') and clean_def.endswith(']'):
+                    clean_def = clean_def[1:-1]
+                cidrs = [cidr.strip() for cidr in clean_def.split(',') if cidr.strip()]
+                
+                if "IPSets" not in rule_variables:
+                    rule_variables["IPSets"] = {}
+                rule_variables["IPSets"][clean_name] = {"Definition": cidrs}
+            
+            elif var_type == "Port Set":
+                # Strip brackets if present before splitting
+                clean_def = definition.strip()
+                if clean_def.startswith('[') and clean_def.endswith(']'):
+                    clean_def = clean_def[1:-1]
+                ports = [port.strip() for port in clean_def.split(',') if port.strip()]
+                
+                if "PortSets" not in rule_variables:
+                    rule_variables["PortSets"] = {}
+                rule_variables["PortSets"][clean_name] = {"Definition": ports}
+        
+        return rule_variables
+    
+    def _build_reference_sets(self, variables: dict, export_rules: List) -> dict:
+        """Build ReferenceSets section for AWS API
+        
+        Args:
+            variables: Variable definitions dictionary
+            export_rules: List of rules to export (for usage analysis)
+            
+        Returns:
+            dict: ReferenceSets structure for AWS API
+        """
+        if not variables:
+            return {}
+        
+        # Analyze variable usage to determine correct types
+        variable_usage = self.analyze_variable_usage(export_rules)
+        
+        reference_sets = {}
+        
+        for var_name, var_data in variables.items():
+            # Extract definition (handle both formats)
+            if isinstance(var_data, dict):
+                definition = var_data.get("definition", "")
+            else:
+                definition = var_data
+            
+            if not definition.strip():
+                continue
+            
+            clean_name = var_name.lstrip('$@')
+            var_type = self.get_variable_type_from_usage(var_name, variable_usage)
+            
+            if var_type == "Reference":
+                reference_sets[clean_name] = {"ReferenceArn": definition}
+        
+        return reference_sets
+    
+    def _show_overwrite_confirmation_dialog(self, rule_group_name: str, existing_rg: dict,
+                                           parent_app) -> bool:
+        """Show confirmation dialog when rule group already exists
+        
+        Args:
+            rule_group_name: Name of existing rule group
+            existing_rg: Existing rule group details from describe_rule_group
+            parent_app: Reference to parent application for dialog creation
+            
+        Returns:
+            bool: True if user confirms overwrite, False otherwise
+        """
+        from tkinter import messagebox
+        
+        # Extract existing rule group details
+        rg_response = existing_rg.get('RuleGroupResponse', {})
+        existing_capacity = rg_response.get('Capacity', 'Unknown')
+        existing_associations = rg_response.get('NumberOfAssociations', 0)
+        
+        # Detect existing format (standard 5-tuple vs Suricata)
+        rules_source = existing_rg.get('RuleGroup', {}).get('RulesSource', {})
+        is_standard_format = 'StatefulRules' in rules_source
+        is_suricata_format = 'RulesString' in rules_source
+        
+        if is_standard_format:
+            existing_format = "Standard 5-tuple"
+        elif is_suricata_format:
+            existing_format = "Suricata format"
+        else:
+            existing_format = "Unknown"
+        
+        # Build warning message
+        warning_message = (
+            f"⚠️  A rule group named '{rule_group_name}' already exists in AWS.\n\n"
+            f"Existing Rule Group Details:\n"
+            f"• Capacity: {existing_capacity}\n"
+            f"• Format: {existing_format}\n"
+            f"• Firewall Associations: {existing_associations}\n\n"
+            f"Deploying will OVERWRITE the existing rule group with your current rules.\n\n"
+        )
+        
+        # Add format conversion note if converting from standard to Suricata
+        if is_standard_format:
+            warning_message += (
+                "ℹ️  Note: The existing rule group uses standard 5-tuple format.\n"
+                "Deploying will convert it to Suricata format.\n\n"
+            )
+        
+        # Build dialog with bold text support if associations exist
+        if existing_associations > 0:
+            # Create custom dialog to support bold text for CRITICAL
+            dialog = tk.Toplevel(parent_app.root)
+            dialog.title("Confirm Overwrite")
+            dialog.geometry("550x400")
+            dialog.transient(parent_app.root)
+            dialog.grab_set()
+            
+            # Center dialog
+            dialog.geometry("+%d+%d" % (
+                parent_app.root.winfo_rootx() + 150,
+                parent_app.root.winfo_rooty() + 150
+            ))
+            
+            main_frame = ttk.Frame(dialog)
+            main_frame.pack(fill=tk.BOTH, expand=True, padx=20, pady=20)
+            
+            # Create text widget for formatted message
+            text_widget = tk.Text(main_frame, wrap=tk.WORD, font=("TkDefaultFont", 9),
+                                 relief=tk.FLAT, cursor="arrow",
+                                 height=16, width=60, borderwidth=0, highlightthickness=0)
+            text_widget.pack(fill=tk.BOTH, expand=True, pady=(0, 15))
+            
+            # Configure tags
+            text_widget.tag_configure("bold", font=("TkDefaultFont", 9, "bold"))
+            text_widget.tag_configure("critical", font=("TkDefaultFont", 9, "bold"), foreground="red")
+            
+            # Insert message with formatting
+            text_widget.insert(tk.END, f"⚠️  A rule group named '{rule_group_name}' already exists in AWS.\n\n")
+            text_widget.insert(tk.END, "Existing Rule Group Details:\n")
+            text_widget.insert(tk.END, f"• Capacity: {existing_capacity}\n")
+            text_widget.insert(tk.END, f"• Format: {existing_format}\n")
+            text_widget.insert(tk.END, f"• Firewall Associations: {existing_associations}\n\n")
+            text_widget.insert(tk.END, "Deploying will OVERWRITE the existing rule group with your current rules.\n\n")
+            
+            # Add format conversion note if needed
+            if is_standard_format:
+                text_widget.insert(tk.END, "ℹ️  Note: The existing rule group uses standard 5-tuple format.\n")
+                text_widget.insert(tk.END, "Deploying will convert it to Suricata format.\n\n")
+            
+            # Add CRITICAL warning with bold formatting
+            text_widget.insert(tk.END, "⚠️  ")
+            text_widget.insert(tk.END, "CRITICAL:", "critical")
+            text_widget.insert(tk.END, f" This rule group is currently attached to {existing_associations} firewall(s).\n")
+            text_widget.insert(tk.END, "Overwriting will immediately affect live traffic on these firewalls!\n\n")
+            
+            text_widget.insert(tk.END, "Are you sure you want to overwrite the existing rule group?")
+            
+            # Make read-only
+            text_widget.config(state=tk.DISABLED)
+            
+            # Buttons
+            button_frame = ttk.Frame(main_frame)
+            button_frame.pack(fill=tk.X)
+            
+            result = [False]
+            
+            def on_yes():
+                result[0] = True
+                dialog.destroy()
+            
+            def on_no():
+                result[0] = False
+                dialog.destroy()
+            
+            ttk.Button(button_frame, text="Yes", command=on_yes).pack(side=tk.RIGHT, padx=(5, 0))
+            ttk.Button(button_frame, text="No", command=on_no).pack(side=tk.RIGHT)
+            
+            dialog.wait_window()
+            return result[0]
+        else:
+            # No associations - use standard messagebox
+            warning_message += "Are you sure you want to overwrite the existing rule group?"
+            
+            response = messagebox.askyesno(
+                "Confirm Overwrite",
+                warning_message,
+                icon='warning'
+            )
+            
+            return response
+    
+    def _show_deployment_success(self, rule_group_name: str, response: dict, 
+                                 rule_count: int, parent_app):
+        """Show success dialog after deployment with clickable AWS console link
+        
+        Args:
+            rule_group_name: Name of deployed rule group
+            response: AWS API response
+            rule_count: Number of rules deployed
+            parent_app: Reference to parent application for dialog creation
+        """
+        import webbrowser
+        import boto3
+        
+        arn = response['RuleGroupResponse']['RuleGroupArn']
+        
+        # Get region from boto3 session
+        session = boto3.Session()
+        region = session.region_name or 'us-east-1'
+        
+        # Construct AWS console URL for the rule group
+        console_url = f"https://{region}.console.aws.amazon.com/vpcconsole/home?region={region}#NetworkFirewallRuleGroups:"
+        
+        # Create custom dialog
+        dialog = tk.Toplevel(parent_app.root)
+        dialog.title("✓ Deployment Successful")
+        dialog.geometry("550x350")
+        dialog.transient(parent_app.root)
+        dialog.grab_set()
+        
+        # Center dialog
+        dialog.geometry("+%d+%d" % (
+            parent_app.root.winfo_rootx() + 150,
+            parent_app.root.winfo_rooty() + 150
+        ))
+        
+        main_frame = ttk.Frame(dialog)
+        main_frame.pack(fill=tk.BOTH, expand=True, padx=20, pady=20)
+        
+        # Success title
+        title_label = ttk.Label(
+            main_frame, 
+            text="✓ Deployment Successful",
+            font=("TkDefaultFont", 12, "bold"),
+            foreground="green"
+        )
+        title_label.pack(pady=(0, 15))
+        
+        # Details frame
+        details_frame = ttk.LabelFrame(main_frame, text="Deployment Details")
+        details_frame.pack(fill=tk.X, pady=(0, 15))
+        
+        details_text = (
+            f"Rule Group: {rule_group_name}\n"
+            f"Status: Active\n"
+            f"Rules Deployed: {rule_count}\n"
+            f"ARN: {arn}"
+        )
+        
+        details_label = ttk.Label(
+            details_frame,
+            text=details_text,
+            justify=tk.LEFT,
+            font=("TkDefaultFont", 9)
+        )
+        details_label.pack(anchor=tk.W, padx=10, pady=10)
+        
+        # AWS Console link section
+        console_frame = ttk.LabelFrame(main_frame, text="View in AWS Console")
+        console_frame.pack(fill=tk.X, pady=(0, 15))
+        
+        # Instruction text
+        console_text = ttk.Label(
+            console_frame,
+            text="Network Firewall → Rule Groups →",
+            font=("TkDefaultFont", 9)
+        )
+        console_text.pack(anchor=tk.W, padx=10, pady=(10, 5))
+        
+        # Clickable rule group name (as a button styled like a link)
+        def open_console():
+            webbrowser.open(console_url)
+        
+        link_button = tk.Button(
+            console_frame,
+            text=rule_group_name,
+            fg="blue",
+            cursor="hand2",
+            relief=tk.FLAT,
+            font=("TkDefaultFont", 9, "underline"),
+            command=open_console,
+            borderwidth=0,
+            highlightthickness=0
+        )
+        link_button.pack(anchor=tk.W, padx=10, pady=(0, 10))
+        
+        # Add hover effect
+        def on_enter(e):
+            link_button.config(fg="dark blue")
+        
+        def on_leave(e):
+            link_button.config(fg="blue")
+        
+        link_button.bind("<Enter>", on_enter)
+        link_button.bind("<Leave>", on_leave)
+        
+        # Close button
+        button_frame = ttk.Frame(main_frame)
+        button_frame.pack(fill=tk.X)
+        
+        close_button = ttk.Button(
+            button_frame,
+            text="Close",
+            command=dialog.destroy
+        )
+        close_button.pack(side=tk.RIGHT)
+        
+        # Focus the close button
+        close_button.focus()
+        
+        # Bind Enter key to close
+        dialog.bind('<Return>', lambda e: dialog.destroy())
+        dialog.bind('<Escape>', lambda e: dialog.destroy())

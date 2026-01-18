@@ -1,5 +1,272 @@
 # Release Notes
 
+## Version 1.27.7 - January 18, 2026
+
+### New Feature: AWS Domain List Import
+- **Import Domain Lists Directly from AWS Network Firewall**: New capability to browse and import Domain List rule groups from your AWS account without requiring manual CLI exports
+  - **Source Selection Dialog**: Enhanced "Import Domain List" menu item now presents import source options (text file or AWS Domain List)
+  - **AWS Browser Integration**: Visual browser for Domain List rule groups with search, region selection, and expandable details
+    - Filters to show only Domain List type rule groups (grays out 5-tuple/Suricata format groups)
+    - Real-time search filtering by rule group name
+    - Expandable rows show capacity, domain count, target types, action, description, and ARN
+    - **Multi-Select Support**: Select multiple Domain List rule groups to combine in a single import
+      - Use Ctrl+Click or Shift+Click to select multiple rule groups
+      - Combined domains automatically deduplicated by consolidation algorithm
+      - Mixed action detection (ALLOWLIST + DENYLIST) with default to first selected
+      - Protocol union (HTTP_HOST + TLS_SNI combined from all selections)
+      - Comprehensive metadata listing all source rule groups
+  - **Protocol Selection**: Enhanced bulk import dialog with HTTP/TLS protocol checkboxes
+    - Pre-checked based on AWS TargetTypes (HTTP_HOST → HTTP, TLS_SNI → TLS)
+    - User can override selections (uncheck unwanted protocols)
+    - Validation prevents importing with zero protocols selected
+    - Rule count preview updates dynamically based on protocol selection
+  - **AWS Configuration Mapping**: Automatic mapping from AWS Domain List format to Suricata rules
+    - ALLOWLIST → pass action (default), DENYLIST → drop action (default)
+    - HTTP_HOST → generates HTTP protocol rules with http.host matching
+    - TLS_SNI → generates TLS protocol rules with tls.sni matching
+    - Both targets → generates both HTTP and TLS rules (user can customize)
+  - **Domain Normalization**: Strips leading dots from AWS wildcard format (`.example.com` → `example.com`) before consolidation algorithm
+    - Critical for consolidation to work correctly (AWS uses `.domain` format, algorithm expects `domain` format)
+    - Generated rules use `dotprefix; content:".domain"` to preserve wildcard matching behavior
+  - **Metadata Preservation**: Automatically adds metadata comment header with:
+    - Original rule group name and ARN
+    - AWS action (ALLOWLIST/DENYLIST)
+    - Target types (HTTP_HOST, TLS_SNI)
+    - Evaluation order conversion (DNSORDER → STRICT_ORDER)
+    - Domain normalization note
+  - **Full Feature Integration**: Works seamlessly with all existing bulk import features
+    - Domain consolidation algorithm (reduces rule count)
+    - Alert on pass option (for logging)
+    - Strict domain matching option
+    - SID management
+    - Change tracking
+    - Undo support
+  - **Graceful Degradation**: AWS import option automatically grayed out when boto3 not installed - text file import always available
+  - **Consistent UI**: Browser layout matches existing "Import Stateful Rule Group" pattern for familiar user experience
+
+### Technical Implementation
+- **New Module**: `domain_list_importer.py` with DomainListImporter class
+- **Enhanced Module**: Updated `domain_importer.py` to support AWS imports via optional parameters
+  - Modified `show_bulk_import_dialog()` signature to accept pre-loaded domains, protocols, metadata
+  - Enhanced `generate_domain_rules()` with protocol filtering parameter
+- **Main Application**: Added `import_domain_list()` method to route between file and AWS imports
+- **UI Integration**: Updated menu handler in `ui_manager.py` to call new routing method
+- **Architecture**: Follows established pattern from stateful rule group importer (separate AWS module)
+
+### User Impact
+- **Streamlined Workflow**: Import Domain Lists in seconds instead of minutes with CLI commands
+- **No AWS CLI Required**: Direct import through AWS SDK (boto3)
+- **Protocol Flexibility**: Customize which protocols to generate (HTTP only, TLS only, or both)
+- **Visual Discovery**: Browse and search Domain List rule groups with expandable details
+- **Production Ready**: Complete metadata preservation and robust error handling
+- **Zero Learning Curve**: Familiar interface matching existing AWS import features
+
+---
+
+## Version 1.27.6 - January 16, 2026
+
+### Enhancement: Health Score Optimization
+- **Improved Health Score Formula**: Optimized the rule group health score calculation to provide better incentives for rule quality and monitoring coverage
+  - **Multi-Component Formula**: Balanced scoring system with base points, positive rewards, and targeted penalties
+    - **Formula**: `Score = Base + Effectiveness + Usage - Broad Penalty - Visibility Penalty`
+    - **Base Points**: 20 points for using Suricata formatted rules
+    - **Effectiveness Component**: 0-50 points = `(Medium + High rules / Logged rules) × 50`
+      - Rewards quality rules that trigger regularly (medium/high frequency)
+      - Removes unused and low-frequency rules from numerator to focus on effective rules
+    - **Usage Component**: 0-30 points = `(Rules with hits / Logged rules) × 30`
+      - Rewards ANY rule usage (even if low frequency)
+      - Separate from effectiveness to distinguish "rarely used" from "never used"
+    - **Broad Rule Penalty**: 0-15 points = `min(15, broad_rule_count × 4)`
+      - Penalizes rules handling >10% of total traffic (security risk)
+      - Maximum -15 points (capped at ~4 broad rules)
+    - **Visibility Penalty**: 0-15 points = Balanced hybrid approach
+      - Formula: `min(15, (absolute_count × 1.0 + percentage × 0.5) / 2)`
+      - Combines absolute count (1pt per unlogged rule) with percentage (0.5pt per %)
+      - Penalizes monitoring blind spots from unlogged rules (pass without 'alert', drop/reject with 'noalert')
+      - Maximum -15 points
+      - Example: 10 unlogged rules at 20% = 10 points penalty
+  - **Why It's Better**: Separates effectiveness (quality) from usage (any activity) for more nuanced scoring
+    - Removing unused rules improves BOTH effectiveness (+50 pts potential) and usage (+30 pts potential)
+    - Low-frequency rules improve usage score but not effectiveness score (encourages optimization)
+    - Unlogged rules now explicitly penalized (were previously excluded from calculations)
+  - **Grading Scale**: Intuitive score interpretation
+    - 80-100: Excellent (outstanding rule group health)
+    - 60-79: Good (solid rule group with minor optimization opportunities)
+    - 40-59: Fair (acceptable but room for improvement)
+    - 0-39: Poor (needs significant optimization work)
+  - **UI Updates**: Enhanced Summary tab with comprehensive scoring breakdown
+    - **Your Current Score Breakdown**: Shows all 5 components with actual point calculations
+    - **Scoring Formula**: Complete mathematical formulas with explanations
+    - **How to Improve Your Score**: Specific recommendations with projected point gains
+    - **Category Labels Updated**: Added hits/day criteria for clarity (e.g., "High-Traffic Rules (≥10 hits/day)")
+    - **Removed Outdated Text**: Eliminated misleading note about unlogged rules being "excluded from calculations" (they're now included via visibility penalty)
+
+### Technical Implementation
+- **rule_usage_analyzer.py**: Completely rewrote `_calculate_health_score()` with five-component formula
+- **ui_manager.py**: Enhanced `_populate_scoring_explanation()` with detailed component breakdowns and recommendations
+- **ui_manager.py**: Updated Quick Statistics labels with hits/day thresholds for user clarity
+- **Backward Compatible**: New formula applies automatically to cached results without requiring re-analysis
+
+### User Impact
+- **Better Incentives**: Score always rewards removing unused/low-frequency rules and fixing broad rules
+- **Clearer Categories**: Hits/day thresholds make tier classifications immediately understandable
+- **Monitoring Best Practices**: Visibility penalty encourages enabling logging for all rules
+- **Actionable Insights**: "How to Improve" section shows exactly which actions will increase score and by how many points
+- **No Confusion**: Removed outdated text that incorrectly stated unlogged rules were excluded from calculations
+
+---
+
+## Version 1.27.5 - January 15, 2026
+
+### Bug Fixes: Search/Replace and Comment Toggle
+- **Fixed Search/Replace IndexError**: Corrected critical bug causing IndexError when performing find and replace operations
+  - **Root Cause**: After a replacement, code attempted to delete from `search_results` list using an index that became out of range after table refresh
+  - **Impact**: Users received IndexError exception when clicking "Replace" button during search operations, preventing successful replacements
+  - **Solution**: Removed problematic `del self.search_results[self.current_search_index]` line since search results are rebuilt after table refresh anyway
+  - **Technical Fix**: Modified `replace_current()` method in `search_manager.py` to rely on search result rebuilding rather than manual list deletion
+- **Fixed Comment Toggle and Uncomment Validation**: Enhanced spacebar toggle and find/replace to properly validate uncommenting operations
+  - **Root Cause**: Toggle function only attempted to uncomment rules with directional indicators (-> or <>), and find/replace didn't validate syntax when removing comment markers
+  - **Impact**: Users couldn't use spacebar to uncomment valid rules, and bulk find/replace to remove "#" markers would leave invalid rules as active (causing deployment failures)
+  - **Solution**: Implemented comprehensive validation for all uncommenting operations
+    - Added `_validate_parsed_rule()` method to validate action, protocol, and port fields
+    - Enhanced `toggle_rule_disabled()` to always attempt parsing and validate before uncommenting
+    - Enhanced `_replace_in_rule()` in search_manager to detect, parse, and validate when replacements remove comment markers
+  - **Smart Error Handling**: Invalid rules remain commented with descriptive error markers
+    - `# [VALIDATION ERROR: invalid action 'pasz'] pasz tcp any any -> any any (...)`
+    - `# [PARSE ERROR] malformed rule text`
+  - **Bulk Operation Support**: Handles thousands of lines gracefully with individual validation for each uncommented line
+  - **User Feedback**: Shows detailed summary of successful toggles and failed validations with line numbers and specific errors
+
+### Technical Implementation
+- **search_manager.py**: Fixed `replace_current()` method index management
+- **search_manager.py**: Enhanced `_replace_in_rule()` with uncomment detection and validation
+- **suricata_generator.py**: Added `_validate_parsed_rule()` validation method
+- **suricata_generator.py**: Enhanced `toggle_rule_disabled()` with comprehensive parsing and validation
+
+### User Impact
+- **Working Replace Function**: Find and replace operations complete successfully without errors
+- **Reliable Comment Toggle**: Spacebar now properly uncomments valid rules while protecting against invalid syntax
+- **Safe Bulk Operations**: Find/replace removing "#" markers across thousands of lines validates each line individually
+- **Clear Error Reporting**: Users see exactly which lines failed validation and why
+- **Production Safety**: Invalid rules prevented from becoming active, avoiding AWS deployment failures
+
+---
+
+## Version 1.27.4 - January 15, 2026
+
+### Enhancement: CloudWatch Analysis Region Selector
+- **AWS Region Selection for Rule Usage Analysis**: Added region selector to the "Configure Rule Usage Analysis" window for multi-region CloudWatch analysis
+  - **Region Dropdown**: New region selector positioned at the top of the configuration dialog, above the CloudWatch Log Group section
+  - **Common Regions**: Dropdown includes 11 commonly-used AWS regions (us-east-1, us-east-2, us-west-1, us-west-2, eu-west-1, eu-central-1, ap-southeast-1, ap-southeast-2, ap-northeast-1, ca-central-1, sa-east-1)
+  - **Smart Defaults**: Automatically detects default region from boto3 session or uses last selected region from current session
+  - **Session Memory**: Selected region remembered during session (same behavior as other analysis parameters)
+  - **Consistent Design**: Region selector matches the implementation used in Import/Export Rule Group features
+- **Multi-Region Support**: Users can now analyze CloudWatch Logs from different AWS regions without changing their default AWS credentials configuration
+- **Dialog Sizing**: Increased window height from 540 to 600 pixels to accommodate the new region selector section while ensuring all buttons remain visible
+
+### Technical Implementation
+- **Region Parameter**: Added `region` parameter to `analyze_rules()` method in rule_usage_analyzer.py
+- **CloudWatch Client**: CloudWatch Logs client now accepts region override: `boto3.client('logs', region_name=region)`
+- **Data Flow**: Region selection passes through entire call chain: configuration dialog → run_usage_analysis() → analyze_rules()
+- **Fallback Support**: Falls back to default credentials region if no region specified for backward compatibility
+
+### User Impact
+- **Multi-Region Flexibility**: Analyze rule usage across different AWS regions from a single application instance
+- **Simplified Workflow**: No need to change AWS CLI configuration or environment variables to analyze different regions
+- **Professional Quality**: Region selector matches AWS console patterns and user expectations
+
+---
+
+## Version 1.27.3 - January 14, 2026
+
+### New Feature: Direct Rule Group Import from AWS
+- **Import Rule Groups Directly from AWS Network Firewall**: New capability to browse and import rule groups from your AWS account without requiring manual CLI exports
+  - **Unified Import Dialog**: Enhanced "Import Stateful Rule Group" menu item now presents import source options (JSON file or AWS direct)
+  - **Browse AWS Rule Groups**: Visual browser with search, sorting, and expandable details for rule groups in your AWS account
+    - Shows STATEFUL rule groups (STATELESS grayed out and non-selectable)
+    - Expandable rows with on-demand details (capacity, rule count, last modified, description)
+    - Real-time search filtering and sortable columns (Name, Type)
+  - **Import Preview**: Comprehensive preview dialog shows rule group metadata, rules, and variables before importing
+  - **Graceful Degradation**: AWS import option automatically disabled when boto3 not installed - JSON file import always available
+  - **Streamlined Workflow**: Eliminates 4-step manual CLI process (export → navigate → select → import) with single menu selection
+- **AWS Setup Guide Updates**: Enhanced Help > AWS Setup documentation to cover both CloudWatch analysis and rule group import
+  - Updated IAM policy includes network-firewall:ListRuleGroups and network-firewall:DescribeRuleGroup permissions
+  - Connection test now validates both CloudWatch Logs and Network Firewall access
+
+### User Impact
+- **Faster Workflow**: Browse and import rule groups in seconds instead of minutes with CLI commands
+- **No AWS CLI Required**: Direct import works through AWS SDK (boto3) without requiring AWS CLI installation
+- **Visual Discovery**: Search and browse rule groups with expandable details for informed selection
+- **Production Ready**: Complete metadata preservation and robust error handling for enterprise use
+
+---
+
+## Version 1.27.2 - January 14, 2026
+
+### New Feature: AWS Network Firewall Direct Deploy Export
+- **Deploy Rule Groups Directly to AWS**: New AWS export option enables deploying rule groups directly to AWS Network Firewall without intermediate IaC
+  - **File Menu Integration**: Added "AWS Network Firewall (Direct Deploy)" option to File > Export dialog
+  - **Smart Name Sanitization**: Automatically converts filenames to AWS-compliant rule group names
+  - **Real-Time Validation**: Name field validation with instant feedback (✓ valid or ✗ invalid with specific error)
+  - **Deployment Summary**: Pre-deployment summary shows rules count, export mode (test or prod), capacity, and target region
+  - **Overwrite Detection**: Detects existing rule groups and shows confirmation dialog before overwriting
+  - **Format Conversion**: Automatic conversion from AWS standard 5-tuple format to Suricata format when overwriting (when applicable)
+  - **Critical Warnings**: Bold red "CRITICAL:" warnings when rule group is attached to live firewalls
+  - **Success Dialog**: Confirmation dialog with clickable hyperlink to AWS console for immediate verification
+    - Rule group name is a blue underlined link that opens AWS console to the Rule Groups page
+    - Region automatically detected from AWS credentials
+    - Hover effect on link for enhanced UX
+  - **Test Mode Support**: Works with existing test mode feature (converts all actions to 'alert')
+  - **Change Tracking**: Export operations logged in change history when tracking enabled
+- **AWS Setup Guide**: Updated Help > AWS Setup documentation to include export feature requirements
+  - Added CreateRuleGroup and UpdateRuleGroup permissions to IAM policy
+  - Updated permission breakdown and security notes sections
+  - Enhanced connection testing to verify export permissions
+
+### Technical Implementation
+- **Modular Design**: New export path alongside existing Terraform and CloudFormation exports
+- **boto3 Integration**: Uses AWS SDK for direct API calls to Network Firewall service
+- **Comprehensive Error Handling**: Graceful handling of credentials, permissions, limits, and network issues
+- **Variable Conversion**: Automatic conversion of $ and @ variables to AWS RuleVariables and ReferenceSets
+- **Zero Breaking Changes**: All existing export functionality preserved
+
+### User Impact
+- **Streamlined Workflow**: Deploy to AWS with fewer steps (no intermediate .tf or .cft files needed)
+- **Instant Verification**: Clickable link enables immediate confirmation in AWS console
+- **Safer Overwrites**: Clear warnings prevent accidental modifications to live firewalls
+- **Professional Experience**: Visual emphasis on important values and critical warnings
+
+---
+
+## Version 1.27.1 - January 12, 2026
+
+### Enhancement: Rule Usage Analysis - Double-Click Navigation
+- **Double-Click to Jump to Rule**: Added double-click navigation from analysis results tables back to the main program
+  - **Seamless Navigation**: Double-click any rule in analysis tables to instantly jump to that rule in the main editor
+  - **Closes Results Window**: Analysis window automatically closes when navigating to rule for uncluttered workflow
+  - **Selects and Focuses Rule**: Target rule is automatically selected, focused, and scrolled into view in main program
+  - **Multiple Table Support**: Works across all relevant analysis tabs:
+    - **Unused Rules**: All 3 sub-tabs (Confirmed Unused, Recently Deployed, Unknown Age)
+    - **Low-Frequency Tab**: Rules with <10 hits or <1 hit/day
+    - **Effectiveness Tab**: Top 20 performing rules (Pareto analysis)
+    - **Unlogged Tab**: Rules that don't write to CloudWatch logs
+  - **Quick Editing**: Enables rapid workflow of identify-in-analysis → jump-to-rule → edit → save
+  - **Professional UX**: Standard double-click behavior familiar from file browsers and IDEs
+
+### Technical Implementation
+- **Reusable Helper Method**: Added `_jump_to_rule_in_main_editor()` method in ui_manager.py
+- **Four Double-Click Handlers**: Added handlers to each table in specified tabs
+- **Consistent Behavior**: All handlers extract line number from appropriate column and call helper method
+- **Window Management**: Properly closes results window, brings main window to front, and ensures focus
+
+### User Impact
+- **Improved Workflow**: Eliminates manual searching for rules identified in analysis results
+- **Time Savings**: Single double-click replaces multi-step "note SID → close window → find rule" process
+- **Enhanced Usability**: Makes rule usage analysis feature more actionable and productive
+- **Natural Interaction**: Double-click is intuitive and requires no additional training
+
+---
+
 ## Version 1.27.0 - January 11, 2026
 
 ### Major New Feature: CloudWatch Rule Usage Analysis

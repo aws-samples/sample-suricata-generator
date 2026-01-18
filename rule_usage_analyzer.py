@@ -119,7 +119,8 @@ class RuleUsageAnalyzer:
         min_days_in_production: int = 14,
         progress_callback=None,
         cancel_flag=None,
-        rules: Optional[List] = None
+        rules: Optional[List] = None,
+        region: Optional[str] = None
     ) -> Optional[Dict]:
         """Analyze rule usage from CloudWatch Logs
         
@@ -132,6 +133,7 @@ class RuleUsageAnalyzer:
             progress_callback: Optional callback function(current, total, status_text, batch_info=None)
             cancel_flag: Optional list with single boolean element to check for cancellation
             rules: Optional list of SuricataRule objects (needed to detect unlogged rules)
+            region: Optional AWS region to use (uses default credentials region if not specified)
             
         Returns:
             Dict with comprehensive analysis results, or None if cancelled/failed
@@ -144,8 +146,8 @@ class RuleUsageAnalyzer:
             end_time = datetime.now()
             start_time = end_time - timedelta(days=time_range_days)
             
-            # Create CloudWatch Logs client
-            client = boto3.client('logs')
+            # Create CloudWatch Logs client with specified region
+            client = boto3.client('logs', region_name=region) if region else boto3.client('logs')
             
             # Submit query
             if progress_callback:
@@ -316,11 +318,14 @@ class RuleUsageAnalyzer:
             
             # Calculate health score using only logged rules
             # Unlogged rules are excluded because they can't be tracked via CloudWatch
+            # But we penalize for visibility gaps (unlogged rules create monitoring blind spots)
             health_score = self._calculate_health_score(
                 len(logged_file_sids),  # Only count logged rules
                 len(unused_sids),
                 categories['low_freq'],
-                broad_rule_count  # Now counting broad rules
+                broad_rule_count,  # Count broad rules
+                len(unlogged_sids),  # Visibility penalty for unlogged rules
+                len(file_sids)  # Total including unlogged for percentage calculation
             )
             
             # Store and return results in format expected by UI
@@ -764,24 +769,38 @@ class RuleUsageAnalyzer:
         total_rules: int,
         unused_rules: int,
         low_freq_rules: int,
-        broad_rules: int
+        broad_rules: int,
+        unlogged_rules: int = 0,
+        total_rules_including_unlogged: int = None
     ) -> int:
-        """Calculate overall rule group health score (0-100) using linear deductions
+        """Calculate overall rule group health score (0-100)
         
-        Uses continuous linear deductions for all categories to provide
-        granular feedback and reward all improvements. Every reduction in
-        unused, low-frequency, or broad rules results in a higher score.
+        IMPROVED FORMULA (Option C + Option 5):
+        Separates unused and low-frequency rules for clearer scoring.
         
-        Scoring methodology:
-        - Unused rules: 1 point deducted per 1% (capped at 30 points for ≥30%)
-        - Low-frequency rules: 1 point deducted per 1% (capped at 20 points for ≥20%)
-        - Broad rules: 1 point deducted per 1% (capped at 20 points for ≥20%)
+        Components:
+        - Base: 20 points (for having rules deployed)
+        - Effectiveness: 0-50 points (reward medium/high-frequency rules)
+        - Usage: 0-30 points (reward ANY usage, strongly penalize unused)
+        - Broad penalty: 0-15 points (penalize security risks)
+        - Visibility penalty: 0-15 points (penalize monitoring blind spots)
+        
+        Maximum: 100 points (naturally, no scaling needed)
+        Minimum: 0 points (negative scores floored at 0)
+        
+        Grading scale:
+        - 80-100: Excellent (outstanding effectiveness)
+        - 60-79: Good (solid effectiveness)
+        - 40-59: Fair (acceptable, room for improvement)
+        - 0-39: Poor (needs significant work)
         
         Args:
-            total_rules: Total number of rules (logged rules only)
-            unused_rules: Number of unused rules
-            low_freq_rules: Number of low-frequency rules
+            total_rules: Total number of logged rules
+            unused_rules: Number of unused rules (0 hits)
+            low_freq_rules: Number of low-frequency rules (<10 hits)
             broad_rules: Number of overly-broad rules (>10% traffic)
+            unlogged_rules: Number of unlogged rules (monitoring blind spots)
+            total_rules_including_unlogged: Total rules including unlogged (for visibility %)
             
         Returns:
             Integer score from 0-100
@@ -789,29 +808,48 @@ class RuleUsageAnalyzer:
         if total_rules == 0:
             return 0
         
-        # Start with perfect score
-        score = 100.0
+        total_for_pct = total_rules_including_unlogged if total_rules_including_unlogged else total_rules
         
-        # Linear deduction for unused rules (0-30 points)
-        # 0% unused = 0 deduction, 30%+ unused = -30 deduction
-        unused_percent = (unused_rules / total_rules) * 100
-        unused_deduction = min(30, unused_percent)
-        score -= unused_deduction
+        # Calculate effective rules (medium/high frequency)
+        effective_rules = total_rules - unused_rules - low_freq_rules
+        effective_rules = max(0, effective_rules)
         
-        # Linear deduction for low-frequency rules (0-20 points)
-        # 0% low-freq = 0 deduction, 20%+ low-freq = -20 deduction
-        low_freq_percent = (low_freq_rules / total_rules) * 100
-        low_freq_deduction = min(20, low_freq_percent)
-        score -= low_freq_deduction
+        # Calculate used rules (any hits, including low-freq)
+        used_rules = total_rules - unused_rules
+        used_rules = max(0, used_rules)
         
-        # Linear deduction for overly-broad rules (0-20 points)
-        # 0% broad = 0 deduction, 20%+ broad = -20 deduction
-        # Broad rules are security risks and should be split into more specific rules
-        broad_percent = (broad_rules / total_rules) * 100
-        broad_deduction = min(20, broad_percent)
-        score -= broad_deduction
+        # Base score: 20 points for having rules deployed
+        base = 20.0
         
-        # Ensure score is within bounds and return as integer
+        # Effectiveness reward: 0-50 points
+        # Rewards having rules that are medium/high frequency
+        effectiveness_ratio = effective_rules / total_rules if total_rules > 0 else 0
+        effectiveness_reward = effectiveness_ratio * 50.0
+        
+        # Usage reward: 0-30 points
+        # Rewards ANY usage (even low-frequency), strongly penalizes unused
+        usage_ratio = used_rules / total_rules if total_rules > 0 else 0
+        usage_reward = usage_ratio * 30.0
+        
+        # Broad rules penalty: 0-15 points
+        # Penalize rules handling >10% of traffic (security concern)
+        broad_penalty = min(15, broad_rules * 4)
+        
+        # Visibility penalty: 0-15 points (Balanced Hybrid - Option 5)
+        # Penalize unlogged rules (monitoring blind spots)
+        # Scale-aware: balances absolute count with percentage
+        if unlogged_rules > 0:
+            unlogged_pct = (unlogged_rules / total_for_pct) * 100
+            absolute_component = unlogged_rules * 1.0
+            percentage_component = unlogged_pct * 0.5
+            visibility_penalty = min(15, (absolute_component + percentage_component) / 2)
+        else:
+            visibility_penalty = 0
+        
+        # Calculate final score
+        score = base + effectiveness_reward + usage_reward - broad_penalty - visibility_penalty
+        
+        # Ensure bounds [0, 100]
         return int(max(0, min(100, score)))
     
     def get_health_status(self, score: int) -> str:
@@ -823,11 +861,11 @@ class RuleUsageAnalyzer:
         Returns:
             String label: "Poor", "Fair", "Good", or "Excellent"
         """
-        if score >= 90:
+        if score >= 80:
             return "Excellent"
-        elif score >= 75:
+        elif score >= 60:
             return "Good"
-        elif score >= 50:
+        elif score >= 40:
             return "Fair"
         else:
             return "Poor"

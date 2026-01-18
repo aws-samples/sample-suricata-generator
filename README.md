@@ -1,6 +1,6 @@
 # Suricata Rule Generator for AWS Network Firewall
 
-**Current Version: 1.27.0**
+**Current Version: 1.27.7**
 
 A GUI application for creating, editing, and managing Suricata rules - specifically designed for AWS Network Firewall deployments using strict rule ordering.
 
@@ -866,20 +866,102 @@ Rule Templates provide pre-configured security patterns that generate complete S
 
 ## Bulk Domain Import
 
-![Bulk Domain Import](images/bulk_domain_import.png)
+> 📦 **Import hundreds of domains** and automatically generate rules for each one - now with AWS Domain List import in v1.27.7!
 
-> 📦 **Import hundreds of domains** and automatically generate rules for each one.
+### Two Import Methods ⭐ NEW
 
-### Basic Usage
+![Import Domain List](images/import_domain_list.png)
+
+**Method 1: AWS Domain List Import** ⭐ **NEW in v1.27.7**
+- Browse and import Domain List rule groups directly from AWS
+- No CLI commands or file exports needed
+- Visual search and protocol customization
+- Multi-select support to combine multiple rule groups in one import
+
+**Method 2: Text File Import** (Original Method)
+- Import domains from local text files
+- One domain per line format
+- Useful for custom domain lists
+
+### Method 1: AWS Domain List Import (New)
+
+**Requirements:**
+- boto3 installed: `pip install boto3`
+- AWS credentials configured
+- IAM permissions for Network Firewall
+
+**Workflow:**
 1. **File > Import Domain List**
-2. Select text file (one domain per line)
-3. Configure settings:
+2. **Select "Import from AWS Domain List Rule Group"**
+3. **Browse Domain Lists:**
+   - Search and filter by rule group name
+   - Select AWS region from dropdown
+   - Expand to see capacity, domain count, target types, action
+   - Only Domain List types selectable (5-tuple/Suricata grayed out)
+   - **Select one or more Domain List rule groups:**
+     - Single-click to select one rule group
+     - Ctrl+Click to add/remove additional rule groups
+     - Shift+Click to select range of rule groups
+     - Non-Domain List types automatically deselected if selected
+4. **Click Import** (with or without expanding)
+5. **Review Preview:**
+   - **Single Selection**: Shows standard preview with rule group metadata
+   - **Multiple Selection**: Shows combined preview with:
+     - Total rule groups being combined
+     - Total domains across all groups
+     - Combined target types (union of HTTP_HOST/TLS_SNI)
+     - Mixed action warning (if ALLOWLIST + DENYLIST selected)
+     - List of all rule groups with details
+6. **Configure Bulk Import:**
+   - **Protocol Selection**: HTTP and/or TLS (pre-checked based on combined AWS TargetTypes)
+   - Action defaults to first rule group's action (with warning if mixed)
+   - All existing bulk import options available
+   - Source description shows number of combined groups
+7. **Import**: Rules generated with metadata comments listing all sources
+
+**AWS Configuration Mapping:**
+- **ALLOWLIST** → pass action (default)
+- **DENYLIST** → drop action (default)
+- **HTTP_HOST** → Pre-checks HTTP rules checkbox
+- **TLS_SNI** → Pre-checks TLS rules checkbox
+- **Both targets** → Both checkboxes pre-checked
+
+**Domain Normalization:**
+- AWS wildcard format (`.example.com`) automatically normalized to `example.com`
+- Generated rules use `dotprefix; content:".example.com"` to preserve wildcard behavior
+- Critical for consolidation algorithm to work correctly
+
+**Benefits:**
+- ⚡ **Streamlined Workflow**: Import Domain Lists in seconds
+- 🔍 **Visual Discovery**: Browse and search Domain Lists
+- 🎯 **Protocol Flexibility**: Choose which protocols to generate (HTTP, TLS, or both)
+- 🔗 **Multi-Select Support**: Combine multiple Domain List rule groups in one import
+- 📊 **Full Integration**: Works with consolidation, SID management, change tracking
+- 🌐 **Multi-Region**: Select AWS region in browser dialog
+- 🔄 **Automatic Deduplication**: Consolidation removes duplicates across combined groups
+
+### Method 2: Text File Import
+
+**Basic Usage:**
+1. **File > Import Domain List**
+2. **Select "Import from text file"**
+3. Choose text file (one domain per line)
+4. **Configure Bulk Import:**
    - **Action**: pass, drop, or reject
    - **Starting SID**: First SID to use
    - **Message Template**: Use {domain} as placeholder
    - **Alert on Pass**: Control logging for pass rules
    - **Strict Domain List**: Exact match vs wildcard matching
-4. **Import**: Click to generate rules
+   - **Protocol Selection**: HTTP and/or TLS checkboxes (both checked by default)
+     - Uncheck to generate only HTTP or only TLS rules
+     - Validation prevents importing with zero protocols selected
+     - Rule count preview updates based on selection
+5. **Import**: Click to generate rules
+
+**Protocol Defaults (Text File):**
+- Both HTTP and TLS checkboxes pre-checked by default
+- User can customize to generate single-protocol rules if desired
+- Same consolidation and preview features as AWS import
 
 ### Domain Consolidation *(Automatic)*
 
@@ -911,28 +993,78 @@ Savings: 8 rules → 2 rules (75% reduction)
 ### Rule Generation Logic
 
 **All Actions:**
-- Creates 2 rules per domain (TLS + HTTP)
+- Creates 2 rules per domain (TLS + HTTP) when both selected
 - Matches both encrypted and unencrypted traffic
 
 **Pass Action with Alert on Pass** *(default)*:
-- 2 rules with embedded alert keyword
+- Includes embedded alert keyword
 - Provides logging without separate alert rules
 
 **Pass Action without Alert on Pass:**
-- 2 pass rules + 2 alert rules = 4 rules per domain
 - Separate rules for pass and alert actions
 
 ---
 
 ## AWS Rule Group Import
 
-> 📥 **Import existing AWS Network Firewall rule groups** for editing and enhancement - new in v1.18.7!
+> 📥 **Import existing AWS Network Firewall rule groups** for editing and enhancement - Direct AWS connectivity in v1.27.3!
 
-![Import Rule Group](images/import_rule_group.png)
+![Import](images/import.png)
 
-### Generating the JSON Export
+### Two Import Methods
 
-Use AWS CLI to export your rule group:
+**Method 1: Direct AWS Import** ⭐ **NEW in v1.27.3**
+- Browse and import directly from your AWS account
+- No CLI commands needed
+- Visual search and selection
+- Instant preview before importing
+
+**Method 2: JSON File Import** (Original Method)
+- Export rule group using AWS CLI
+- Import the JSON file
+- Useful for offline workflows
+
+### Method 1: Direct AWS Import (Recommended)
+
+![Import_aws](images/import_aws.png)
+
+**Requirements:**
+- boto3 installed: `pip install boto3`
+- AWS credentials configured
+- IAM permissions for Network Firewall (see Help > AWS Setup)
+
+**Workflow:**
+1. **File > Import Stateful Rule Group**
+2. **Select "Import from AWS"** in the import options dialog
+3. **Browse Rule Groups:**
+   - Search and filter by name
+   - Sort by name or type
+   - Click ▶ to expand and view details (capacity, rule count, description)
+   - STATEFUL rule groups are selectable
+   - STATELESS rule groups shown grayed out (not supported)
+4. **Select Rule Group** and click "Preview Import"
+5. **Review Preview:**
+   - Complete metadata (ARN, capacity, description, region)
+   - Rules count and first 10 rules preview
+   - Variables count and preview
+   - Import summary
+6. **Click "Import"** to complete
+
+**Benefits:**
+- ⚡ **Faster:** No CLI commands or file management
+- 🔍 **Visual:** Browse and search all rule groups
+- 📊 **Informed:** Preview details before importing
+- 🎯 **Direct:** Single-menu workflow
+- 🌐 **Multi-Region:** Select region from dropdown
+
+### Method 2: JSON File Import
+
+**When to Use:**
+- Working offline without AWS connectivity
+- Importing rule groups from shared JSON files
+- Scripted/automated workflows
+
+**Generating the JSON Export:**
 
 ```bash
 # Using ARN
@@ -947,30 +1079,36 @@ aws network-firewall describe-rule-group \
   > my_rule_group.json
 ```
 
-### Importing the Rule Group
+**Importing the JSON File:**
 
 1. **File > Import Stateful Rule Group**
-2. Select the JSON file from AWS CLI
-3. Review preview showing:
-   - Rule group metadata
-   - Rule and variable counts
-   - First 10 rules preview
-   - Any SID conflicts detected
-4. Click "Import"
+2. **Select "Import from JSON File"** in the import options dialog
+3. Browse and select the JSON file
+4. Review preview
+5. Click "Import"
 
-### Import Features
+### Import Features (Both Methods)
+
+![Import_rule_group](images/import_rule_group.png)
 
 **Complete Data Import:**
 - ✅ Rules converted from AWS 5-tuple to Suricata format
 - ✅ IPSets imported as IP Set variables ($HOME_NET)
 - ✅ PortSets imported as Port Set variables ($WEB_PORTS)
 - ✅ Metadata preserved in comment header
+- ✅ ReferenceSets (@variables) imported correctly
 
 **Smart Processing:**
-- Auto-renumbers duplicate SIDs within JSON
+- Auto-renumbers duplicate SIDs within import
 - Forces new file (prompts to save current work first)
 - Type validation (only STATEFUL rule groups)
 - Variable prefix conversion (HOME_NET → $HOME_NET)
+- Format detection (Standard 5-tuple vs Suricata)
+
+**Region Selection:** *(Direct AWS Import only)*
+- Dropdown selector in browse dialog
+- Choose from 11 common regions
+- Remembers last selected region during session
 
 ### Use Cases
 - 🔧 Edit existing AWS rules in GUI
@@ -978,10 +1116,40 @@ aws network-firewall describe-rule-group \
 - 📝 Add organization and comments
 - 🎯 Quickly begin using Suricata-formatted rules
 - 🔨 Apply bulk modifications to AWS rule groups
+- 🌍 Multi-region rule management
+
+### Setup for Direct AWS Import
+
+**Prerequisites:**
+1. Install boto3: `pip install boto3`
+2. Configure AWS credentials (one of):
+   - AWS CLI: `aws configure`
+   - Environment variables
+   - IAM role (if on AWS)
+3. Verify connection: Help > AWS Setup > Testing tab
+
+**Required IAM Permissions:**
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [{
+    "Effect": "Allow",
+    "Action": [
+      "network-firewall:ListRuleGroups",
+      "network-firewall:DescribeRuleGroup"
+    ],
+    "Resource": "arn:aws:network-firewall:*:*:*"
+  }]
+}
+```
+
+> 💡 **Help Available:** Click Help button in import dialog or visit Help > AWS Setup for complete setup guide.
 
 ---
 
 ## Rule Filtering
+
+![Filter](images/filter.png)
 
 > 🎯 **Focus on relevant rules** by temporarily hiding others - essential for large rule sets!
 
@@ -1548,29 +1716,102 @@ The analysis engine detects common rule issues that can cause unexpected behavio
 
 ## Infrastructure Export
 
-> 🏗️ **Deploy to AWS** with infrastructure as code templates.
+> 🏗️ **Deploy to AWS** with infrastructure as code templates or direct deployment.
 
-Generate AWS Network Firewall resources for deployment:
+Generate AWS Network Firewall resources for deployment in multiple formats:
 
 ### Export Formats
-- **Terraform (.tf)**: Complete resource definition
-- **CloudFormation (.cft)**: JSON template
+- **Terraform (.tf)**: Complete resource definition for Terraform workflows
+- **CloudFormation (.cft)**: JSON template for CloudFormation stacks
+- **AWS Network Firewall (Direct Deploy)**: Deploy directly to AWS ⭐ **NEW in v1.27.2**
 
-### Alert-Only Test Mode *(New in v1.26.0)* 🧪
+### AWS Network Firewall Direct Deploy ⭐ NEW
 
-![Rule Analysis](images/export.png)
+![export_aws](images/export_aws.png)
+
+> 🚀 **Deploy rule groups directly to AWS** without intermediate IaC files!
+
+**How to Use:**
+1. **File > Export** - Export Options dialog appears
+2. **Select "AWS Network Firewall (Direct Deploy)"**
+3. **Optional: Enable Test Mode** - Convert all actions to 'alert' for safe testing
+4. **Optional: Run Analyzer** - Pre-validate rules before deployment
+5. **Click Continue** - Configure deployment settings
+6. **AWS Configuration Dialog:**
+   - Rule group name (auto-sanitized from filename)
+   - Real-time validation (AWS naming requirements)
+   - Deployment summary (rules count, capacity, mode, region)
+7. **Click Deploy** - Direct deployment to AWS Network Firewall
+
+**Features:**
+
+**Smart Name Handling:**
+- Auto-sanitizes current filename for AWS compliance
+- Real-time validation with visual feedback (✓/✗)
+- Character counter (128 char limit)
+- AWS naming rules enforced:
+  - Valid: a-z, A-Z, 0-9, - (hyphen)
+  - Cannot start/end with hyphen
+  - No consecutive hyphens (--)
+
+**Overwrite Protection:**
+- Detects existing rule groups before deployment
+- Shows comprehensive confirmation dialog:
+  - Existing capacity and rule count
+  - Format detection (Standard 5-tuple vs Suricata)
+  - Firewall associations (⚠️ CRITICAL if attached)
+  - Format conversion notice (if converting to Suricata)
+- User must confirm before overwriting
+
+**Pre-Deployment Options:**
+- **Test Mode:** Convert all actions to 'alert' (same as other exports)
+- **Analyze Before Export:** Run rule analyzer first
+  - Shows summary (critical/warnings/info counts)
+  - Option to view full report or continue
+  - Helps catch issues before deployment
+
+**Deployment Details:**
+- Automatically calculated capacity
+- Shows target AWS region
+- Preserves all variables (IPSets, PortSets, ReferenceSets)
+- Uses STRICT_ORDER rule evaluation
+- Adds version metadata to description
+
+**Success Confirmation:**
+- Shows deployed rule group details
+- Displays ARN and status
+- Clickable link to AWS Console
+- Integrated with change tracking
+
+**Benefits:**
+- ⚡ **Instant Deployment:** No intermediate files needed
+- 🔄 **Round-Trip Workflow:** Import → Edit → Deploy seamlessly
+- 🛡️ **Safe Overwrites:** Clear warnings for live firewalls
+- 🎯 **Format Conversion:** Automatically handles Standard to Suricata conversion
+- ✅ **Pre-Validation:** Optional analyzer check before deployment
+- 📊 **Full Integration:** Works with test mode and change tracking
+
+**Requirements:**
+- boto3 installed: `pip install boto3`
+- AWS credentials configured
+- IAM permissions: `CreateRuleGroup`, `UpdateRuleGroup`, `DescribeRuleGroup`
+- See Help > AWS Setup for complete setup guide
+
+### Alert-Only Test Mode *(Works with ALL export formats)* 🧪
+
+![Export](images/export.png)
 
 > 🧪 **Test rules safely in production** without risk of service disruption!
 
 Export rules with all actions converted to 'alert' for safe testing while preserving original action information in CloudWatch logs.
 
 **How to Use:**
-1. **File > Export** - New Export Options dialog appears
-2. **Select Format** - Choose Terraform or CloudFormation
+1. **File > Export** - Export Options dialog appears
+2. **Select Format** - Choose Terraform, CloudFormation, or AWS Direct Deploy
 3. **Check Test Mode** - ☑️ "Export for testing (alert-only)"
-4. **Review Preview** - See first 3 converted rules with [TEST-ACTION] prefixes
+4. **Review Preview** - See first 3 converted rules with [TEST-ACTION] prefixes (Terraform/CloudFormation only)
 5. **Read Prerequisites** - Review AWS policy configuration requirements
-6. **Export** - Save with suggested _test suffix
+6. **Export/Deploy** - Save file or deploy directly to AWS
 
 **Action Preservation:**
 - **[TEST-PASS]** → Would have allowed traffic
@@ -1615,20 +1856,38 @@ For test mode to work, your AWS Network Firewall **POLICY** must be configured:
 ### Export Features
 
 **File > Export**
-- Export Options dialog with format and test mode selection
-- Generates complete infrastructure code
+- Export Options dialog with format selection (Terraform, CloudFormation, AWS Direct)
+- Test mode option (applies to all formats)
+- Optional pre-export rule analysis
+- Generates complete infrastructure code or deploys directly
 
-**What's Included:**
+**What's Included (All Formats):**
 - ⚙️ **Dynamic Capacity**: Auto-calculated from rule count
 - 🔗 **Variable Integration**: IP sets, port sets, reference sets
 - 📋 **STRICT_ORDER**: Configured automatically
-- 📝 **Version Info**: Generator version in descriptions
+- 📝 **Version Info**: Generator version in metadata
 - 🔒 **Proper Escaping**: Handles special characters
+- 🛡️ **Validation**: Checks for undefined variables before export
 
-**CloudFormation Validation:**
+**Format-Specific Features:**
+
+**Terraform (.tf):**
+- Complete resource definition with variables
+- No size limits
+- Best for large rule sets (500+ rules)
+
+**CloudFormation (.cft):**
+- JSON template with validation
 - **51.2 KB Limit**: Warns if requires S3 upload
 - **1 MB Limit**: Blocks if exceeds absolute maximum
 - **Size Guidance**: Shows remaining capacity
+
+**AWS Direct Deploy:**
+- Immediate deployment to AWS
+- Smart name sanitization
+- Overwrite detection and confirmation
+- Format conversion support
+- Success confirmation with AWS Console link
 
 **Terraform Example:**
 ```hcl
@@ -1650,12 +1909,28 @@ resource "aws_networkfirewall_rule_group" "suricata_rules" {
 }
 ```
 
-### Deployment Workflow
+### Deployment Workflows
+
+**IaC Workflow (Terraform/CloudFormation):**
 1. Generate rules in GUI
 2. Define variables in Variables tab
 3. Export as Terraform or CloudFormation
 4. Deploy to AWS using your IaC pipeline
 5. Re-import from AWS for future edits
+
+**Direct Deploy Workflow (AWS):**
+1. Generate rules in GUI
+2. Define variables in Variables tab
+3. File > Export > AWS Network Firewall (Direct Deploy)
+4. Configure name and options
+5. Click Deploy - instant deployment to AWS
+6. Re-import from AWS for future edits
+
+**Round-Trip Workflow:**
+1. Import from AWS (browse or JSON file)
+2. Edit rules in Suricata Generator
+3. Export back to AWS (direct deploy)
+4. Repeat as needed
 
 ---
 
@@ -1844,6 +2119,8 @@ Suricata internally classifies rules by their keywords and protocol:
 
 ### Advanced Features
 - ✅ **CloudWatch Rule Usage Analysis** *(v1.27.0)*: Production rule effectiveness analytics ⭐ NEW
+- ✅ **AWS Direct Import** *(v1.27.3)*: Browse and import rule groups directly from AWS ⭐ NEW
+- ✅ **AWS Direct Deploy** *(v1.27.2)*: Deploy rule groups directly to AWS Network Firewall ⭐ NEW
 - ✅ **Rule Templates** *(v1.24.0)*: 14 pre-built security patterns
 - ✅ **Rule Filtering** *(v1.22.0)*: Non-destructive rule hiding
 - ✅ **Advanced Editor** *(v1.19.0, Scintilla v1.23.0)*: Code folding and IDE features
@@ -1870,9 +2147,13 @@ Suricata internally classifies rules by their keywords and protocol:
 
 ### Import and Export
 - ✅ Infrastructure as code export (Terraform, CloudFormation)
+- ✅ AWS Network Firewall direct deploy ⭐ NEW
 - ✅ Bulk domain import with consolidation
+- ✅ AWS rule group direct import (browse AWS) ⭐ NEW
 - ✅ AWS rule group import from CLI JSON
 - ✅ AWS best practices template loading
+- ✅ Test mode export (all formats)
+- ✅ Pre-export rule analysis
 - ✅ Change history export
 
 ### User Interface
@@ -2009,6 +2290,7 @@ The application follows a modular architecture with specialized managers:
 - **search_manager.py**: Search functionality
 - **rule_filter.py**: Rule filtering system *(v1.22.0)*
 - **domain_importer.py**: Bulk domain processing
+- **domain_list_importer.py**: AWS Domain List imports *(v1.27.7)*
 - **stateful_rule_importer.py**: AWS rule group imports *(v1.18.7)*
 - **rule_analyzer.py**: Conflict detection and reporting
 - **rule_usage_analyzer.py**: CloudWatch usage analytics *(v1.27.0)*

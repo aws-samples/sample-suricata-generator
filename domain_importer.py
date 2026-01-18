@@ -83,8 +83,60 @@ class DomainImporter:
         except Exception as e:
             messagebox.showerror("Error", f"Failed to read domain file: {str(e)}")
     
-    def show_bulk_import_dialog(self, domains: List[str]):
-        """Show dialog for bulk domain import configuration"""
+    def show_bulk_import_dialog(self, domains_list: Optional[List[str]] = None,
+                                default_action: str = 'pass',
+                                source_description: Optional[str] = None,
+                                metadata_comment: Optional[str] = None,
+                                protocols: Optional[List[str]] = None,
+                                aws_target_types: Optional[List[str]] = None):
+        """Show dialog for bulk domain import configuration
+        
+        Args:
+            domains_list: Pre-loaded domains (if importing from AWS)
+            default_action: Default action to pre-select
+            source_description: Description of import source for UI
+            metadata_comment: Comment header to add to imported rules
+            protocols: List of protocols to generate rules for (['http'], ['tls'], or ['http', 'tls'])
+            aws_target_types: Original AWS target types for display (optional)
+        """
+        # If domains_list not provided, read from file
+        if domains_list is None:
+            filename = filedialog.askopenfilename(
+                title="Select Domain List File",
+                filetypes=[("Text files", "*.txt"), ("Suricata files", "*.suricata"), ("All files", "*.*")]
+            )
+            
+            if not filename:
+                return
+            
+            try:
+                with open(filename, 'r', encoding='utf-8') as f:
+                    domains_list = [line.strip() for line in f.readlines() if line.strip()]
+                
+                if not domains_list:
+                    messagebox.showwarning("Warning", "No domains found in the file.")
+                    return
+                
+                source_description = f"Text File ({filename.split('/')[-1].split('\\')[-1]})"
+                protocols = ['http', 'tls']  # Default to both
+                
+            except FileNotFoundError:
+                messagebox.showerror("File Not Found", f"Domain file not found: {filename}")
+                return
+            except PermissionError:
+                messagebox.showerror("Permission Error", f"Cannot read domain file: {filename}")
+                return
+            except UnicodeDecodeError:
+                messagebox.showerror("File Encoding Error", 
+                    f"Cannot read domain file due to encoding issues: {filename}\n\n"
+                    "Please ensure the file is saved in UTF-8 format.")
+                return
+            except Exception as e:
+                messagebox.showerror("Error", f"Failed to read domain file: {str(e)}")
+                return
+        
+        # Use domains_list for the rest of the function
+        domains = domains_list
         # Check current selection state to determine insertion position
         selection = self.parent.tree.selection()
         insert_index = None
@@ -116,7 +168,7 @@ class DomainImporter:
         
         dialog = tk.Toplevel(self.parent.root)
         dialog.title("Bulk Domain Import")
-        dialog.geometry("500x650")  # Increased height for additional features and info labels
+        dialog.geometry("500x750")  # Increased height for protocol selection
         dialog.transient(self.parent.root)
         dialog.grab_set()
         
@@ -124,6 +176,15 @@ class DomainImporter:
         dialog.geometry("+%d+%d" % (self.parent.root.winfo_rootx() + 50, self.parent.root.winfo_rooty() + 50))
         
         result = [False]
+        
+        # Import source display (NEW)
+        if source_description:
+            source_frame = ttk.Frame(dialog)
+            source_frame.pack(fill=tk.X, padx=10, pady=(5, 0))
+            ttk.Label(source_frame, text="Import Source:",
+                     font=("TkDefaultFont", 9)).pack(side=tk.LEFT)
+            ttk.Label(source_frame, text=source_description,
+                     font=("TkDefaultFont", 9, "bold")).pack(side=tk.LEFT, padx=(5, 0))
         
         # Domain list preview
         ttk.Label(dialog, text=f"Found {len(domains)} domains:").pack(pady=5)
@@ -147,9 +208,9 @@ class DomainImporter:
         config_frame = ttk.LabelFrame(dialog, text="Rule Configuration")
         config_frame.pack(fill=tk.X, padx=10, pady=5)
         
-        # Action selection
+        # Action selection (pre-populated from default_action parameter)
         ttk.Label(config_frame, text="Action:").grid(row=0, column=0, sticky=tk.W, padx=5, pady=5)
-        action_var = tk.StringVar(value="pass")
+        action_var = tk.StringVar(value=default_action)
         action_combo = ttk.Combobox(config_frame, textvariable=action_var,
                                    values=["pass", "drop", "reject"], state="readonly")
         action_combo.grid(row=0, column=1, sticky=tk.W, padx=5, pady=5)
@@ -185,9 +246,41 @@ class DomainImporter:
         create_tooltip(strict_domain_checkbox, 
                       "Matches only exact domain (no subdomains)\nusing startswith/endswith keywords")
         
+        # Protocol Selection Section (NEW)
+        protocol_frame = ttk.LabelFrame(config_frame, text="Protocol Selection")
+        protocol_frame.grid(row=4, column=0, columnspan=3, sticky=tk.W+tk.E, padx=5, pady=10)
+        
+        # Protocol checkboxes (pre-checked based on protocols parameter)
+        generate_http_var = tk.BooleanVar(value='http' in (protocols or ['http', 'tls']))
+        generate_tls_var = tk.BooleanVar(value='tls' in (protocols or ['http', 'tls']))
+        
+        http_checkbox = ttk.Checkbutton(
+            protocol_frame,
+            text="Generate HTTP rules (http.host)",
+            variable=generate_http_var
+        )
+        http_checkbox.grid(row=0, column=0, sticky=tk.W, padx=10, pady=5)
+        
+        tls_checkbox = ttk.Checkbutton(
+            protocol_frame,
+            text="Generate TLS rules (tls.sni)",
+            variable=generate_tls_var
+        )
+        tls_checkbox.grid(row=1, column=0, sticky=tk.W, padx=10, pady=5)
+        
+        # Show AWS target types if from AWS import
+        if aws_target_types:
+            target_info = ttk.Label(
+                protocol_frame,
+                text=f"AWS Target Types: {', '.join(aws_target_types)}",
+                font=("TkDefaultFont", 8),
+                foreground="#666666"
+            )
+            target_info.grid(row=2, column=0, sticky=tk.W, padx=10, pady=5)
+        
         # Rule count preview frame
         preview_frame = ttk.Frame(config_frame)
-        preview_frame.grid(row=4, column=0, columnspan=3, sticky=tk.W+tk.E, padx=5, pady=5)
+        preview_frame.grid(row=5, column=0, columnspan=3, sticky=tk.W+tk.E, padx=5, pady=5)
         
         # Rule count labels
         standard_count_label = ttk.Label(preview_frame, text="", font=("TkDefaultFont", 8))
@@ -198,7 +291,7 @@ class DomainImporter:
         
         # Info label
         info_label = ttk.Label(config_frame, text="", font=("TkDefaultFont", 8))
-        info_label.grid(row=5, column=0, columnspan=3, sticky=tk.W, padx=5, pady=5)
+        info_label.grid(row=6, column=0, columnspan=3, sticky=tk.W, padx=5, pady=5)
         
         # Insertion position feedback
         position_frame = ttk.LabelFrame(dialog, text="Insertion Position")
@@ -214,6 +307,25 @@ class DomainImporter:
                 action = action_var.get()
                 alert_on_pass = alert_on_pass_var.get()
                 strict_domain = strict_domain_var.get()
+                
+                # Get protocol selection
+                protocols_selected = []
+                if generate_http_var.get():
+                    protocols_selected.append('http')
+                if generate_tls_var.get():
+                    protocols_selected.append('tls')
+                
+                protocol_count = len(protocols_selected)
+                
+                if protocol_count == 0:
+                    # No protocols selected - show error
+                    standard_count_label.config(
+                        text="⚠️  Please select at least one protocol",
+                        foreground="red"
+                    )
+                    consolidation_count_label.config(text="")
+                    info_label.config(text="")
+                    return
                 
                 # Update message template based on action and alert settings
                 current_message = message_var.get()
@@ -237,18 +349,19 @@ class DomainImporter:
                 else:
                     alert_on_pass_checkbox.config(state="disabled")
                 
-                # Update info text based on action and alert setting
+                # Calculate rules per domain based on action, alert setting, and protocol count
                 if action == "pass":
                     if alert_on_pass:
-                        info_text = "For 'pass' action: Creates Pass rules with alert keyword (2 rules per domain)\nFor other actions: Creates single rules (2 rules per domain)"
-                        rules_per_domain = 2
+                        rules_per_domain = protocol_count  # 1 rule per protocol
+                        info_text = f"Creates Pass rules with alert keyword ({protocol_count} rule{'s' if protocol_count > 1 else ''} per domain)"
                     else:
-                        info_text = "For 'pass' action: Creates Alert + Pass rule pairs (4 rules per domain)\nFor other actions: Creates single rules (2 rules per domain)"
-                        rules_per_domain = 4
+                        rules_per_domain = protocol_count * 2  # Alert + Pass for each protocol
+                        info_text = f"Creates Alert + Pass rule pairs ({protocol_count * 2} rules per domain)"
                 else:
-                    info_text = "For 'pass' action: Creates Pass rules (2 rules per domain)\nFor other actions: Creates single rules (2 rules per domain)"
-                    rules_per_domain = 2
-                info_label.config(text=info_text)
+                    rules_per_domain = protocol_count  # 1 rule per protocol
+                    info_text = f"Creates single rules ({protocol_count} rule{'s' if protocol_count > 1 else ''} per domain)"
+                
+                info_label.config(text=info_text, foreground="black")
                 
                 # Calculate standard rule count (without consolidation)
                 standard_total = len(domains) * rules_per_domain
@@ -304,6 +417,8 @@ class DomainImporter:
         action_combo.bind('<<ComboboxSelected>>', lambda e: update_rule_count_preview())
         alert_on_pass_checkbox.config(command=update_rule_count_preview)
         strict_domain_checkbox.config(command=update_rule_count_preview)
+        http_checkbox.config(command=update_rule_count_preview)
+        tls_checkbox.config(command=update_rule_count_preview)
         
         # Initial preview update
         update_rule_count_preview()
@@ -313,12 +428,31 @@ class DomainImporter:
         button_frame.pack(fill=tk.X, padx=10, pady=10)
         
         def on_import():
+            nonlocal insert_index  # Declare as nonlocal so we can modify the outer scope variable
             try:
                 start_sid = int(sid_var.get())
                 action = action_var.get()
                 message_template = message_var.get()
                 alert_on_pass = alert_on_pass_var.get()
                 strict_domain = strict_domain_var.get()
+                
+                # Validate at least one protocol selected
+                protocols_selected = []
+                if generate_http_var.get():
+                    protocols_selected.append('http')
+                if generate_tls_var.get():
+                    protocols_selected.append('tls')
+                
+                if not protocols_selected:
+                    messagebox.showerror(
+                        "Protocol Selection Required",
+                        "Please select at least one protocol to generate rules.\n\n"
+                        "Check either:\n"
+                        "• Generate HTTP rules, or\n"
+                        "• Generate TLS rules, or\n"
+                        "• Both"
+                    )
+                    return
                 
                 # Close the import dialog first
                 dialog.destroy()
@@ -353,8 +487,38 @@ class DomainImporter:
                 # Force dialog to display
                 progress_dialog.update()
                 
-                # Generate rules for each domain with consolidation
-                new_rules = self.generate_domain_rules(domains, action, start_sid, message_template, alert_on_pass, strict_domain,
+                # Track initial insert_index for metadata and history
+                initial_insert_index = insert_index
+                
+                # Save state for undo BEFORE making any changes
+                self.parent.save_undo_state()
+                
+                # Add metadata comment if provided (from AWS import)
+                if metadata_comment:
+                    metadata_lines = metadata_comment.strip().split('\n')
+                    for line in metadata_lines:
+                        comment_rule = SuricataRule()
+                        comment_rule.is_comment = True
+                        comment_rule.comment_text = line
+                        if insert_index is not None:
+                            self.parent.rules.insert(insert_index, comment_rule)
+                            insert_index += 1
+                        else:
+                            self.parent.rules.append(comment_rule)
+                    
+                    # Add blank line after metadata
+                    blank_rule = SuricataRule()
+                    blank_rule.is_blank = True
+                    if insert_index is not None:
+                        self.parent.rules.insert(insert_index, blank_rule)
+                        insert_index += 1
+                    else:
+                        self.parent.rules.append(blank_rule)
+                
+                # Generate rules for each domain with consolidation and protocol filtering
+                new_rules = self.generate_domain_rules(domains, action, start_sid, message_template, 
+                                                       alert_on_pass, strict_domain,
+                                                       protocols_selected,
                                                        progress_bar, progress_text, progress_dialog)
                 
                 # Close progress dialog
@@ -374,11 +538,8 @@ class DomainImporter:
                     domain_details.append({'domain': domain, 'start_sid': current_sid, 'end_sid': end_sid})
                     current_sid += rules_per_domain
                 
-                # Save state for undo
-                self.parent.save_undo_state()
-                
-                # Determine insertion line for history tracking
-                history_line = insert_index + 1 if insert_index is not None else len(self.parent.rules) + 1
+                # Determine insertion line for history tracking (use initial index before metadata insertion)
+                history_line = initial_insert_index + 1 if initial_insert_index is not None else len(self.parent.rules) + 1
                 
                 # If tracking enabled, create baseline snapshots for all imported rules
                 if self.parent.tracking_enabled:
@@ -657,11 +818,14 @@ class DomainImporter:
             'individual_domains': sorted(individual_domains)
         }
     
-    def generate_domain_rules(self, domains: List[str], action: str, start_sid: int, message_template: str, alert_on_pass: bool = True, strict_domain: bool = False, progress_bar=None, progress_text=None, progress_dialog=None) -> List[SuricataRule]:
+    def generate_domain_rules(self, domains: List[str], action: str, start_sid: int, message_template: str, 
+                             alert_on_pass: bool = True, strict_domain: bool = False,
+                             protocols: Optional[List[str]] = None,
+                             progress_bar=None, progress_text=None, progress_dialog=None) -> List[SuricataRule]:
         """Generate Suricata rules for a list of domains based on specified action
         
-        For 'pass' action: Creates Pass rules with optional alert keyword (2 rules per domain)
-        For other actions: Creates single rules (2 rules per domain - TLS and HTTP)
+        For 'pass' action: Creates Pass rules with optional alert keyword (protocol count per domain)
+        For other actions: Creates single rules (protocol count per domain)
         
         Args:
             domains: List of domain names to create rules for
@@ -670,6 +834,7 @@ class DomainImporter:
             message_template: Template string with {domain} placeholder
             alert_on_pass: Whether to add alert keyword to pass rules
             strict_domain: Whether to use strict domain matching (exact match only, no subdomains)
+            protocols: List of protocols to generate (['http'], ['tls'], or ['http', 'tls'])
             progress_bar: Optional progress bar widget to update
             progress_text: Optional progress text label to update
             progress_dialog: Optional progress dialog to update
@@ -677,6 +842,9 @@ class DomainImporter:
         Returns:
             List of SuricataRule objects ready for insertion
         """
+        # Determine which protocols to generate
+        generate_http = protocols is None or 'http' in protocols
+        generate_tls = protocols is None or 'tls' in protocols
         # Apply domain consolidation when strict mode is disabled
         consolidation = None
         if not strict_domain:
@@ -714,224 +882,232 @@ class DomainImporter:
                 # Pass action with optional alert keyword to log and allow traffic
                 
                 if alert_on_pass:
-                    # Generate TLS message from template
-                    domain_display = domain if strict_domain else f"*.{domain}"
-                    if message_template == "Alert and pass traffic to domain {domain}":
-                        # Default template - use default message
-                        pass_tls_message = f"Alert and pass TLS traffic to domain {domain_display}"
-                    else:
-                        # Custom template - inject TLS into the message
-                        pass_tls_message = message_template.replace("{domain}", domain_display).replace("traffic", "TLS traffic")
+                    # Generate TLS rule (if selected)
+                    if generate_tls:
+                        domain_display = domain if strict_domain else f"*.{domain}"
+                        if message_template == "Alert and pass traffic to domain {domain}":
+                            # Default template - use default message
+                            pass_tls_message = f"Alert and pass TLS traffic to domain {domain_display}"
+                        else:
+                            # Custom template - inject TLS into the message
+                            pass_tls_message = message_template.replace("{domain}", domain_display).replace("traffic", "TLS traffic")
+                        
+                        if strict_domain:
+                            pass_tls_content = f'flow:to_server; tls.sni; content:"{domain}"; startswith; endswith; nocase; alert'
+                        else:
+                            pass_tls_content = f'flow:to_server; tls.sni; dotprefix; content:".{domain}"; endswith; nocase; alert'
+                        
+                        pass_tls_rule = SuricataRule(
+                            action="pass",
+                            protocol="tls",
+                            src_net="$HOME_NET",
+                            src_port="any",
+                            dst_net="any",
+                            dst_port="any",
+                            message=pass_tls_message,
+                            content=pass_tls_content,
+                            sid=current_sid
+                        )
+                        domain_rules.append(pass_tls_rule)
+                        current_sid += 1
                     
-                    if strict_domain:
-                        pass_tls_content = f'flow:to_server; tls.sni; content:"{domain}"; startswith; endswith; nocase; alert'
-                    else:
-                        pass_tls_content = f'flow:to_server; tls.sni; dotprefix; content:".{domain}"; endswith; nocase; alert'
-                    
-                    pass_tls_rule = SuricataRule(
-                        action="pass",
-                        protocol="tls",
-                        src_net="$HOME_NET",
-                        src_port="any",
-                        dst_net="any",
-                        dst_port="any",
-                        message=pass_tls_message,
-                        content=pass_tls_content,
-                        sid=current_sid
-                    )
-                    domain_rules.append(pass_tls_rule)
-                    current_sid += 1
-                    
-                    # Generate HTTP message from template
-                    domain_display = domain if strict_domain else f"*.{domain}"
-                    if message_template == "Alert and pass traffic to domain {domain}":
-                        # Default template - use default message
-                        pass_http_message = f"Alert and pass HTTP traffic to domain {domain_display}"
-                    else:
-                        # Custom template - inject HTTP into the message
-                        pass_http_message = message_template.replace("{domain}", domain_display).replace("traffic", "HTTP traffic")
-                    
-                    if strict_domain:
-                        pass_http_content = f'flow:to_server; http.host; content:"{domain}"; startswith; endswith; nocase; alert'
-                    else:
-                        pass_http_content = f'flow:to_server; http.host; dotprefix; content:".{domain}"; endswith; nocase; alert'
-                    
-                    pass_http_rule = SuricataRule(
-                        action="pass",
-                        protocol="http",
-                        src_net="$HOME_NET",
-                        src_port="any",
-                        dst_net="any",
-                        dst_port="any",
-                        message=pass_http_message,
-                        content=pass_http_content,
-                        sid=current_sid
-                    )
-                    domain_rules.append(pass_http_rule)
-                    current_sid += 1
+                    # Generate HTTP rule (if selected)
+                    if generate_http:
+                        domain_display = domain if strict_domain else f"*.{domain}"
+                        if message_template == "Alert and pass traffic to domain {domain}":
+                            # Default template - use default message
+                            pass_http_message = f"Alert and pass HTTP traffic to domain {domain_display}"
+                        else:
+                            # Custom template - inject HTTP into the message
+                            pass_http_message = message_template.replace("{domain}", domain_display).replace("traffic", "HTTP traffic")
+                        
+                        if strict_domain:
+                            pass_http_content = f'flow:to_server; http.host; content:"{domain}"; startswith; endswith; nocase; alert'
+                        else:
+                            pass_http_content = f'flow:to_server; http.host; dotprefix; content:".{domain}"; endswith; nocase; alert'
+                        
+                        pass_http_rule = SuricataRule(
+                            action="pass",
+                            protocol="http",
+                            src_net="$HOME_NET",
+                            src_port="any",
+                            dst_net="any",
+                            dst_port="any",
+                            message=pass_http_message,
+                            content=pass_http_content,
+                            sid=current_sid
+                        )
+                        domain_rules.append(pass_http_rule)
+                        current_sid += 1
                     
                 else:
                     # Create separate alert and pass rules
                     domain_display = domain if strict_domain else f"*.{domain}"
                     
-                    # Alert TLS rule
-                    if message_template == "Pass traffic to domain {domain}":
-                        alert_tls_message = f"Alert for TLS traffic to domain {domain_display}"
-                    else:
-                        alert_tls_message = message_template.replace("{domain}", domain_display).replace("traffic", "TLS traffic").replace("Pass", "Alert for")
+                    # Alert TLS rule (if selected)
+                    if generate_tls:
+                        if message_template == "Pass traffic to domain {domain}":
+                            alert_tls_message = f"Alert for TLS traffic to domain {domain_display}"
+                        else:
+                            alert_tls_message = message_template.replace("{domain}", domain_display).replace("traffic", "TLS traffic").replace("Pass", "Alert for")
+                        
+                        if strict_domain:
+                            alert_tls_content = f'flow:to_server; tls.sni; content:"{domain}"; startswith; endswith; nocase'
+                        else:
+                            alert_tls_content = f'flow:to_server; tls.sni; dotprefix; content:".{domain}"; endswith; nocase'
+                        
+                        alert_tls_rule = SuricataRule(
+                            action="alert",
+                            protocol="tls",
+                            src_net="$HOME_NET",
+                            src_port="any",
+                            dst_net="any",
+                            dst_port="any",
+                            message=alert_tls_message,
+                            content=alert_tls_content,
+                            sid=current_sid
+                        )
+                        domain_rules.append(alert_tls_rule)
+                        current_sid += 1
                     
-                    if strict_domain:
-                        alert_tls_content = f'flow:to_server; tls.sni; content:"{domain}"; startswith; endswith; nocase'
-                    else:
-                        alert_tls_content = f'flow:to_server; tls.sni; dotprefix; content:".{domain}"; endswith; nocase'
+                    # Pass TLS rule (if selected)
+                    if generate_tls:
+                        if message_template == "Pass traffic to domain {domain}":
+                            pass_tls_message = f"Pass TLS traffic to domain {domain_display}"
+                        else:
+                            pass_tls_message = message_template.replace("{domain}", domain_display).replace("traffic", "TLS traffic")
+                        
+                        if strict_domain:
+                            pass_tls_content = f'flow:to_server; tls.sni; content:"{domain}"; startswith; endswith; nocase'
+                        else:
+                            pass_tls_content = f'flow:to_server; tls.sni; dotprefix; content:".{domain}"; endswith; nocase'
+                        
+                        pass_tls_rule = SuricataRule(
+                            action="pass",
+                            protocol="tls",
+                            src_net="$HOME_NET",
+                            src_port="any",
+                            dst_net="any",
+                            dst_port="any",
+                            message=pass_tls_message,
+                            content=pass_tls_content,
+                            sid=current_sid
+                        )
+                        domain_rules.append(pass_tls_rule)
+                        current_sid += 1
                     
-                    alert_tls_rule = SuricataRule(
-                        action="alert",
-                        protocol="tls",
-                        src_net="$HOME_NET",
-                        src_port="any",
-                        dst_net="any",
-                        dst_port="any",
-                        message=alert_tls_message,
-                        content=alert_tls_content,
-                        sid=current_sid
-                    )
-                    domain_rules.append(alert_tls_rule)
-                    current_sid += 1
+                    # Alert HTTP rule (if selected)
+                    if generate_http:
+                        if message_template == "Pass traffic to domain {domain}":
+                            alert_http_message = f"Alert for HTTP traffic to domain {domain_display}"
+                        else:
+                            alert_http_message = message_template.replace("{domain}", domain_display).replace("traffic", "HTTP traffic").replace("Pass", "Alert for")
+                        
+                        if strict_domain:
+                            alert_http_content = f'flow:to_server; http.host; content:"{domain}"; startswith; endswith; nocase'
+                        else:
+                            alert_http_content = f'flow:to_server; http.host; dotprefix; content:".{domain}"; endswith; nocase'
+                        
+                        alert_http_rule = SuricataRule(
+                            action="alert",
+                            protocol="http",
+                            src_net="$HOME_NET",
+                            src_port="any",
+                            dst_net="any",
+                            dst_port="any",
+                            message=alert_http_message,
+                            content=alert_http_content,
+                            sid=current_sid
+                        )
+                        domain_rules.append(alert_http_rule)
+                        current_sid += 1
                     
-                    # Pass TLS rule
-                    if message_template == "Pass traffic to domain {domain}":
-                        pass_tls_message = f"Pass TLS traffic to domain {domain_display}"
-                    else:
-                        pass_tls_message = message_template.replace("{domain}", domain_display).replace("traffic", "TLS traffic")
-                    
-                    if strict_domain:
-                        pass_tls_content = f'flow:to_server; tls.sni; content:"{domain}"; startswith; endswith; nocase'
-                    else:
-                        pass_tls_content = f'flow:to_server; tls.sni; dotprefix; content:".{domain}"; endswith; nocase'
-                    
-                    pass_tls_rule = SuricataRule(
-                        action="pass",
-                        protocol="tls",
-                        src_net="$HOME_NET",
-                        src_port="any",
-                        dst_net="any",
-                        dst_port="any",
-                        message=pass_tls_message,
-                        content=pass_tls_content,
-                        sid=current_sid
-                    )
-                    domain_rules.append(pass_tls_rule)
-                    current_sid += 1
-                    
-                    # Alert HTTP rule
-                    if message_template == "Pass traffic to domain {domain}":
-                        alert_http_message = f"Alert for HTTP traffic to domain {domain_display}"
-                    else:
-                        alert_http_message = message_template.replace("{domain}", domain_display).replace("traffic", "HTTP traffic").replace("Pass", "Alert for")
-                    
-                    if strict_domain:
-                        alert_http_content = f'flow:to_server; http.host; content:"{domain}"; startswith; endswith; nocase'
-                    else:
-                        alert_http_content = f'flow:to_server; http.host; dotprefix; content:".{domain}"; endswith; nocase'
-                    
-                    alert_http_rule = SuricataRule(
-                        action="alert",
-                        protocol="http",
-                        src_net="$HOME_NET",
-                        src_port="any",
-                        dst_net="any",
-                        dst_port="any",
-                        message=alert_http_message,
-                        content=alert_http_content,
-                        sid=current_sid
-                    )
-                    domain_rules.append(alert_http_rule)
-                    current_sid += 1
-                    
-                    # Pass HTTP rule
-                    if message_template == "Pass traffic to domain {domain}":
-                        pass_http_message = f"Pass HTTP traffic to domain {domain_display}"
-                    else:
-                        pass_http_message = message_template.replace("{domain}", domain_display).replace("traffic", "HTTP traffic")
-                    
-                    if strict_domain:
-                        pass_http_content = f'flow:to_server; http.host; content:"{domain}"; startswith; endswith; nocase'
-                    else:
-                        pass_http_content = f'flow:to_server; http.host; dotprefix; content:".{domain}"; endswith; nocase'
-                    
-                    pass_http_rule = SuricataRule(
-                        action="pass",
-                        protocol="http",
-                        src_net="$HOME_NET",
-                        src_port="any",
-                        dst_net="any",
-                        dst_port="any",
-                        message=pass_http_message,
-                        content=pass_http_content,
-                        sid=current_sid
-                    )
-                    domain_rules.append(pass_http_rule)
-                    current_sid += 1
+                    # Pass HTTP rule (if selected)
+                    if generate_http:
+                        if message_template == "Pass traffic to domain {domain}":
+                            pass_http_message = f"Pass HTTP traffic to domain {domain_display}"
+                        else:
+                            pass_http_message = message_template.replace("{domain}", domain_display).replace("traffic", "HTTP traffic")
+                        
+                        if strict_domain:
+                            pass_http_content = f'flow:to_server; http.host; content:"{domain}"; startswith; endswith; nocase'
+                        else:
+                            pass_http_content = f'flow:to_server; http.host; dotprefix; content:".{domain}"; endswith; nocase'
+                        
+                        pass_http_rule = SuricataRule(
+                            action="pass",
+                            protocol="http",
+                            src_net="$HOME_NET",
+                            src_port="any",
+                            dst_net="any",
+                            dst_port="any",
+                            message=pass_http_message,
+                            content=pass_http_content,
+                            sid=current_sid
+                        )
+                        domain_rules.append(pass_http_rule)
+                        current_sid += 1
                 
             else:
-                # Generate single rules for TLS and HTTP (drop/reject/alert)
+                # Generate single rules for selected protocols (drop/reject/alert)
                 
-                # TLS rule - check if using default or custom template
-                domain_display = domain if strict_domain else f"*.{domain}"
-                if action == "drop" and message_template == "Domain drop rule for {domain}":
-                    tls_message = f"Domain drop rule for {domain_display}"
-                elif action == "reject" and message_template == "Domain reject rule for {domain}":
-                    tls_message = f"Domain reject rule for {domain_display}"
-                else:
-                    # Use custom template or non-drop/reject action
-                    tls_message = message_template.replace("{domain}", domain_display)
+                # TLS rule (if selected)
+                if generate_tls:
+                    domain_display = domain if strict_domain else f"*.{domain}"
+                    if action == "drop" and message_template == "Domain drop rule for {domain}":
+                        tls_message = f"Domain drop rule for {domain_display}"
+                    elif action == "reject" and message_template == "Domain reject rule for {domain}":
+                        tls_message = f"Domain reject rule for {domain_display}"
+                    else:
+                        # Use custom template or non-drop/reject action
+                        tls_message = message_template.replace("{domain}", domain_display)
+                    
+                    if strict_domain:
+                        tls_content = f'flow:to_server; tls.sni; content:"{domain}"; startswith; endswith; nocase'
+                    else:
+                        tls_content = f'flow:to_server; tls.sni; dotprefix; content:".{domain}"; endswith; nocase'
+                    tls_rule = SuricataRule(
+                        action=action,
+                        protocol="tls",
+                        src_net="$HOME_NET",
+                        src_port="any",
+                        dst_net="any",
+                        dst_port="any",
+                        message=tls_message,
+                        content=tls_content,
+                        sid=current_sid
+                    )
+                    domain_rules.append(tls_rule)
+                    current_sid += 1
                 
-                if strict_domain:
-                    tls_content = f'flow:to_server; tls.sni; content:"{domain}"; startswith; endswith; nocase'
-                else:
-                    tls_content = f'flow:to_server; tls.sni; dotprefix; content:".{domain}"; endswith; nocase'
-                tls_rule = SuricataRule(
-                    action=action,
-                    protocol="tls",
-                    src_net="$HOME_NET",
-                    src_port="any",
-                    dst_net="any",
-                    dst_port="any",
-                    message=tls_message,
-                    content=tls_content,
-                    sid=current_sid
-                )
-                domain_rules.append(tls_rule)
-                current_sid += 1
-                
-                # HTTP rule - check if using default or custom template
-                domain_display = domain if strict_domain else f"*.{domain}"
-                if action == "drop" and message_template == "Domain drop rule for {domain}":
-                    http_message = f"Domain drop rule for {domain_display}"
-                elif action == "reject" and message_template == "Domain reject rule for {domain}":
-                    http_message = f"Domain reject rule for {domain_display}"
-                else:
-                    # Use custom template or non-drop/reject action
-                    http_message = message_template.replace("{domain}", domain_display)
-                
-                if strict_domain:
-                    http_content = f'flow:to_server; http.host; content:"{domain}"; startswith; endswith; nocase'
-                else:
-                    http_content = f'flow:to_server; http.host; dotprefix; content:".{domain}"; endswith; nocase'
-                http_rule = SuricataRule(
-                    action=action,
-                    protocol="http",
-                    src_net="$HOME_NET",
-                    src_port="any",
-                    dst_net="any",
-                    dst_port="any",
-                    message=http_message,
-                    content=http_content,
-                    sid=current_sid
-                )
-                domain_rules.append(http_rule)
-                current_sid += 1
+                # HTTP rule (if selected)
+                if generate_http:
+                    domain_display = domain if strict_domain else f"*.{domain}"
+                    if action == "drop" and message_template == "Domain drop rule for {domain}":
+                        http_message = f"Domain drop rule for {domain_display}"
+                    elif action == "reject" and message_template == "Domain reject rule for {domain}":
+                        http_message = f"Domain reject rule for {domain_display}"
+                    else:
+                        # Use custom template or non-drop/reject action
+                        http_message = message_template.replace("{domain}", domain_display)
+                    
+                    if strict_domain:
+                        http_content = f'flow:to_server; http.host; content:"{domain}"; startswith; endswith; nocase'
+                    else:
+                        http_content = f'flow:to_server; http.host; dotprefix; content:".{domain}"; endswith; nocase'
+                    http_rule = SuricataRule(
+                        action=action,
+                        protocol="http",
+                        src_net="$HOME_NET",
+                        src_port="any",
+                        dst_net="any",
+                        dst_port="any",
+                        message=http_message,
+                        content=http_content,
+                        sid=current_sid
+                    )
+                    domain_rules.append(http_rule)
+                    current_sid += 1
             
             rules.extend(domain_rules)
         

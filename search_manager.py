@@ -563,10 +563,7 @@ class SearchManager:
             # Refresh the table
             self.parent.refresh_table(preserve_selection=False)
             
-            # Remove current match from results and find next
-            del self.search_results[self.current_search_index]
-            
-            # Re-perform search to update positions
+            # Re-perform search to update positions (after refresh, tree items change)
             all_items = self.parent.tree.get_children()
             self.search_results = []
             for item in all_items:
@@ -582,6 +579,7 @@ class SearchManager:
                         self.search_results.append(item)
             
             if self.search_results:
+                # Stay at current index, or wrap to 0 if beyond end
                 if self.current_search_index >= len(self.search_results):
                     self.current_search_index = 0
                 self.highlight_search_result()
@@ -639,8 +637,51 @@ class SearchManager:
                 old_text = rule.comment_text
                 new_text = self._perform_replacement(old_text, search_term, replace_text)
                 if new_text != old_text:
-                    rule.comment_text = new_text
-                    return True
+                    # Check if this uncommented a rule (removed "# " prefix)
+                    if old_text.startswith('# ') and new_text and not new_text.startswith('#'):
+                        # Attempt to parse as a rule
+                        try:
+                            from suricata_rule import SuricataRule
+                            potential_rule = SuricataRule.from_string(new_text)
+                            
+                            if potential_rule:
+                                # Validate the parsed rule
+                                validation_errors = self.parent._validate_parsed_rule(potential_rule)
+                                
+                                if not validation_errors:
+                                    # Valid rule - convert this comment to a rule
+                                    rule.is_comment = False
+                                    rule.comment_text = ""
+                                    rule.action = potential_rule.action
+                                    rule.protocol = potential_rule.protocol
+                                    rule.src_net = potential_rule.src_net
+                                    rule.src_port = potential_rule.src_port
+                                    rule.direction = potential_rule.direction
+                                    rule.dst_net = potential_rule.dst_net
+                                    rule.dst_port = potential_rule.dst_port
+                                    rule.message = potential_rule.message
+                                    rule.content = potential_rule.content
+                                    rule.sid = potential_rule.sid
+                                    rule.rev = potential_rule.rev
+                                    rule.original_options = potential_rule.original_options
+                                    return True
+                                else:
+                                    # Invalid rule - keep as comment with error marker
+                                    error_summary = ', '.join(validation_errors)
+                                    rule.comment_text = f"# [VALIDATION ERROR: {error_summary}] {new_text}"
+                                    return True
+                            else:
+                                # Failed to parse - keep as comment with error marker
+                                rule.comment_text = f"# [PARSE ERROR] {new_text}"
+                                return True
+                        except Exception:
+                            # Exception during parsing - keep as comment with error marker
+                            rule.comment_text = f"# [PARSE ERROR] {new_text}"
+                            return True
+                    else:
+                        # Normal comment text replacement (didn't uncomment a rule)
+                        rule.comment_text = new_text
+                        return True
             return False
         elif getattr(rule, 'is_blank', False):
             return False

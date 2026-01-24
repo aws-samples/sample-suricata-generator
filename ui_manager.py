@@ -5397,6 +5397,7 @@ Would you like to run a complete analysis?"""
         # Setup tabs
         self.setup_rule_editor_tab()
         self.setup_variables_tab()
+        self.setup_tags_tab()  # AWS Tags tab - NEW
         self.setup_history_tab()
         
         # Bind tab change event
@@ -5617,6 +5618,67 @@ Would you like to run a complete analysis?"""
         
         # Store reference in parent for access by other components
         self.parent.variables_tree = self.variables_tree
+    
+    def setup_tags_tab(self):
+        """Setup the AWS tags tab"""
+        # Create tags tab
+        tags_tab = ttk.Frame(self.notebook)
+        self.notebook.add(tags_tab, text="AWS Tags")
+        
+        # Description section
+        desc_frame = ttk.Frame(tags_tab)
+        desc_frame.pack(fill=tk.X, padx=5, pady=(5, 10))
+        
+        ttk.Label(desc_frame,
+                 text="Tags to apply to rule group when exporting to AWS",
+                 font=("TkDefaultFont", 9)).pack(anchor=tk.W)
+        
+        # Tags table frame
+        table_frame = ttk.Frame(tags_tab)
+        table_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+        
+        # Tags table
+        columns = ("Key", "Value")
+        tags_tree = ttk.Treeview(table_frame, columns=columns,
+                                 show="headings", height=8)
+        
+        tags_tree.heading("Key", text="Key")
+        tags_tree.heading("Value", text="Value")
+        
+        tags_tree.column("Key", width=200, stretch=False)
+        tags_tree.column("Value", width=400, stretch=True)
+        
+        # Scrollbar for tags table
+        tags_scrollbar = ttk.Scrollbar(table_frame, orient=tk.VERTICAL,
+                                       command=tags_tree.yview)
+        tags_tree.configure(yscrollcommand=tags_scrollbar.set)
+        
+        tags_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        tags_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        
+        # Bind double-click event to edit tag
+        tags_tree.bind("<Double-1>", self.on_tag_double_click)
+        
+        # Enable mouse wheel scrolling
+        tags_tree.bind("<MouseWheel>", self._on_tags_mousewheel)
+        tags_tree.bind("<Button-4>", self._on_tags_mousewheel)  # Linux scroll up
+        tags_tree.bind("<Button-5>", self._on_tags_mousewheel)  # Linux scroll down
+        
+        # Tags buttons
+        tags_buttons_frame = ttk.Frame(tags_tab)
+        tags_buttons_frame.pack(fill=tk.X, padx=5, pady=(0, 5))
+        
+        ttk.Button(tags_buttons_frame, text="Add Tag",
+                  command=self.add_tag).pack(side=tk.LEFT, padx=(0, 5))
+        ttk.Button(tags_buttons_frame, text="Add Common Tags",
+                  command=self.show_add_common_tags_dialog).pack(side=tk.LEFT, padx=(0, 5))
+        ttk.Button(tags_buttons_frame, text="Edit",
+                  command=self.edit_tag).pack(side=tk.LEFT, padx=(0, 5))
+        ttk.Button(tags_buttons_frame, text="Delete",
+                  command=self.delete_tag).pack(side=tk.LEFT, padx=(0, 5))
+        
+        # Store reference in parent for access by other components
+        self.parent.tags_tree = tags_tree
     
     def setup_history_tab(self):
         """Setup the change history tab"""
@@ -6978,6 +7040,19 @@ Would you like to run a complete analysis?"""
                     # Show the variable type for context
                     var_type = 'IP Set' if variable.startswith('$') else 'Port Set' if variable.startswith('@') else 'Reference'
                     self.parent.history_text.insert(tk.END, f"Deleted {var_type.lower()} variable {variable}\n")
+                elif action == 'tag_added':
+                    key = details.get('key', 'unknown')
+                    value = details.get('value', '')
+                    self.parent.history_text.insert(tk.END, f"Added tag: {key} = \"{value}\"\n")
+                elif action == 'tag_modified':
+                    key = details.get('key', 'unknown')
+                    old_value = details.get('old_value', '')
+                    new_value = details.get('new_value', '')
+                    self.parent.history_text.insert(tk.END, f"Modified tag {key}: \"{old_value}\" → \"{new_value}\"\n")
+                elif action == 'tag_deleted':
+                    key = details.get('key', 'unknown')
+                    value = details.get('value', '')
+                    self.parent.history_text.insert(tk.END, f"Deleted tag: {key} (was \"{value}\")\n")
                 elif action == 'rules_enabled':
                     rule_count = details.get('count', '?')
                     rules_info = details.get('rules', [])
@@ -7286,6 +7361,19 @@ Would you like to run a complete analysis?"""
                             variable = details.get('variable', 'unknown')
                             var_type = 'IP Set' if variable.startswith('$') else 'Port Set' if variable.startswith('@') else 'Reference'
                             self.parent.history_text.insert(tk.END, f"Deleted {var_type.lower()} variable {variable}\n")
+                        elif action == 'tag_added':
+                            key = details.get('key', 'unknown')
+                            value = details.get('value', '')
+                            self.parent.history_text.insert(tk.END, f"Added tag: {key} = \"{value}\"\n")
+                        elif action == 'tag_modified':
+                            key = details.get('key', 'unknown')
+                            old_value = details.get('old_value', '')
+                            new_value = details.get('new_value', '')
+                            self.parent.history_text.insert(tk.END, f"Modified tag {key}: \"{old_value}\" → \"{new_value}\"\n")
+                        elif action == 'tag_deleted':
+                            key = details.get('key', 'unknown')
+                            value = details.get('value', '')
+                            self.parent.history_text.insert(tk.END, f"Deleted tag: {key} (was \"{value}\")\n")
                         elif action == 'rules_enabled':
                             rule_count = details.get('count', '?')
                             rules_info = details.get('rules', [])
@@ -11281,6 +11369,471 @@ Would you like to run a complete analysis?"""
         
         ttk.Button(btn_frame, text="Run Analysis Now", command=run_analysis).pack(side=tk.LEFT, padx=5)
         ttk.Button(btn_frame, text="Close", command=dialog.destroy).pack(side=tk.LEFT, padx=5)
+    
+    # AWS Tags Tab Methods
+    def add_tag(self):
+        """Add a new AWS tag"""
+        self.show_add_tag_dialog()
+    
+    def show_add_tag_dialog(self):
+        """Show dialog for adding a new AWS tag"""
+        dialog = tk.Toplevel(self.parent.root)
+        dialog.title("Add AWS Tag")
+        dialog.geometry("500x400")
+        dialog.transient(self.parent.root)
+        dialog.grab_set()
+        
+        # Center dialog
+        dialog.geometry("+%d+%d" % (
+            self.parent.root.winfo_rootx() + 150,
+            self.parent.root.winfo_rooty() + 150
+        ))
+        
+        main_frame = ttk.Frame(dialog)
+        main_frame.pack(fill=tk.BOTH, expand=True, padx=20, pady=20)
+        
+        # Tag Key section
+        ttk.Label(main_frame, text="Tag Key:").pack(anchor=tk.W, pady=(0, 5))
+        
+        key_var = tk.StringVar()
+        key_entry = ttk.Entry(main_frame, textvariable=key_var, width=50)
+        key_entry.pack(fill=tk.X, pady=(0, 5))
+        
+        # Key requirements
+        key_req_frame = ttk.Frame(main_frame)
+        key_req_frame.pack(fill=tk.X, pady=(0, 10))
+        
+        key_req_text = (
+            "Requirements:\n"
+            "• 1-128 characters\n"
+            "• Valid: a-z, A-Z, 0-9, space, + - = . _ : / @\n"
+            "• Cannot start with aws: (reserved prefix)"
+        )
+        ttk.Label(key_req_frame, text=key_req_text,
+                 font=("TkDefaultFont", 8), foreground="#666666",
+                 justify=tk.LEFT).pack(anchor=tk.W)
+        
+        # Tag Value section
+        ttk.Label(main_frame, text="Tag Value:").pack(anchor=tk.W, pady=(10, 5))
+        
+        value_var = tk.StringVar()
+        value_entry = ttk.Entry(main_frame, textvariable=value_var, width=50)
+        value_entry.pack(fill=tk.X, pady=(0, 5))
+        
+        # Value requirements
+        value_req_text = (
+            "Requirements:\n"
+            "• 0-256 characters (empty allowed)\n"
+            "• Valid: a-z, A-Z, 0-9, space, + - = . _ : / @"
+        )
+        ttk.Label(main_frame, text=value_req_text,
+                 font=("TkDefaultFont", 8), foreground="#666666",
+                 justify=tk.LEFT).pack(anchor=tk.W, pady=(0, 15))
+        
+        # Buttons
+        button_frame = ttk.Frame(main_frame)
+        button_frame.pack(fill=tk.X)
+        
+        def save_tag():
+            key = key_var.get().strip()
+            value = value_var.get().strip()
+            
+            # Validate key
+            key_valid, key_error = self.parent.file_manager.validate_tag_key(key)
+            if not key_valid:
+                messagebox.showerror("Validation Error", key_error)
+                return
+            
+            # Validate value
+            value_valid, value_error = self.parent.file_manager.validate_tag_value(value)
+            if not value_valid:
+                messagebox.showerror("Validation Error", value_error)
+                return
+            
+            # Check for duplicate key
+            if key in self.parent.tags:
+                messagebox.showerror("Duplicate Key",
+                    f"Tag key '{key}' already exists.\n\n"
+                    "Tag keys must be unique. Please choose a different key or edit the existing tag.")
+                return
+            
+            # Add tag
+            self.parent.tags[key] = value
+            
+            # Track change
+            if self.parent.tracking_enabled:
+                self.parent.add_history_entry('tag_added', {
+                    'key': key,
+                    'value': value
+                })
+            
+            # Refresh display
+            self.parent.refresh_tags_table()
+            self.parent.modified = True
+            
+            dialog.destroy()
+        
+        ttk.Button(button_frame, text="Save", command=save_tag).pack(side=tk.RIGHT, padx=(5, 0))
+        ttk.Button(button_frame, text="Cancel", command=dialog.destroy).pack(side=tk.RIGHT)
+        
+        # Focus on key entry
+        key_entry.focus()
+    
+    def show_add_common_tags_dialog(self):
+        """Show dialog for adding common AWS tags"""
+        dialog = tk.Toplevel(self.parent.root)
+        dialog.title("Add Common Tags")
+        dialog.geometry("500x500")
+        dialog.transient(self.parent.root)
+        dialog.grab_set()
+        
+        # Center dialog
+        dialog.geometry("+%d+%d" % (
+            self.parent.root.winfo_rootx() + 150,
+            self.parent.root.winfo_rooty() + 100
+        ))
+        
+        main_frame = ttk.Frame(dialog)
+        main_frame.pack(fill=tk.BOTH, expand=True, padx=20, pady=20)
+        
+        # Title
+        ttk.Label(main_frame,
+                 text="Select tags to add to your rule group:",
+                 font=("TkDefaultFont", 10)).pack(anchor=tk.W, pady=(0, 10))
+        
+        # Create container for canvas and scrollbar (to ensure proper width filling)
+        canvas_container = ttk.Frame(main_frame)
+        canvas_container.pack(fill=tk.X, pady=(0, 10))
+        
+        # Scrollable frame for checkboxes
+        canvas = tk.Canvas(canvas_container, height=280)
+        scrollbar = ttk.Scrollbar(canvas_container, orient=tk.VERTICAL, command=canvas.yview)
+        scrollable_frame = ttk.Frame(canvas)
+        
+        scrollable_frame.bind(
+            "<Configure>",
+            lambda e: canvas.configure(scrollregion=canvas.bbox("all"))
+        )
+        
+        canvas.create_window((0, 0), window=scrollable_frame, anchor="nw")
+        canvas.configure(yscrollcommand=scrollbar.set)
+        
+        canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        
+        # Common tags (ManagedBy excluded - it's automatic on new files)
+        common_tags = [
+            "Environment",
+            "Owner",
+            "CostCenter",
+            "Project",
+            "Application",
+            "Team",
+            "CreatedBy",
+            "Compliance",
+            "DataClassification"
+        ]
+        
+        # Create checkbox variables
+        tag_vars = {}
+        
+        for tag_key in sorted(common_tags):
+            # Check if tag already exists (disable if it does)
+            already_exists = tag_key in self.parent.tags
+            
+            var = tk.BooleanVar(value=False)
+            tag_vars[tag_key] = var
+            
+            label_text = tag_key
+            if already_exists:
+                label_text += " (already defined)"
+            
+            cb = ttk.Checkbutton(scrollable_frame, text=label_text, variable=var)
+            cb.pack(anchor=tk.W, padx=10, pady=3)
+            
+            if already_exists:
+                cb.config(state="disabled")
+        
+        # Note
+        ttk.Label(main_frame,
+                 text="Note: Tags will be created with empty values. You can edit values after adding.",
+                 font=("TkDefaultFont", 8), foreground="#666666",
+                 wraplength=450).pack(pady=(10, 5))
+        
+        ttk.Label(main_frame,
+                 text="ManagedBy is added automatically on new files and doesn't need to be selected here.",
+                 font=("TkDefaultFont", 8), foreground="#666666",
+                 wraplength=450).pack(pady=(0, 15))
+        
+        # Define button functions first (before creating button_frame)
+        def select_all():
+            for tag_key, var in tag_vars.items():
+                if tag_key not in self.parent.tags:  # Only select if not already exists
+                    var.set(True)
+        
+        def select_none():
+            for var in tag_vars.values():
+                var.set(False)
+        
+        def add_selected():
+            # Get selected tags
+            selected = [key for key, var in tag_vars.items()
+                       if var.get() and key not in self.parent.tags]
+            
+            if not selected:
+                messagebox.showwarning("No Selection",
+                    "Please select at least one tag to add.")
+                return
+            
+            # Add selected tags with empty values
+            for tag_key in selected:
+                self.parent.tags[tag_key] = ""
+                
+                # Track change
+                if self.parent.tracking_enabled:
+                    self.parent.add_history_entry('tag_added', {
+                        'key': tag_key,
+                        'value': "",
+                        'source': 'common_tags'
+                    })
+            
+            # Refresh display
+            self.parent.refresh_tags_table()
+            self.parent.modified = True
+            
+            # Show success message
+            tag_word = "tag" if len(selected) == 1 else "tags"
+            messagebox.showinfo("Tags Added",
+                f"Successfully added {len(selected)} {tag_word}.\n\n"
+                "You can now edit the values in the AWS Tags tab.")
+            
+            dialog.destroy()
+        
+        # Select All/None buttons (first row)
+        select_frame = ttk.Frame(main_frame)
+        select_frame.pack(fill=tk.X, pady=(0, 10))
+        
+        ttk.Button(select_frame, text="Select All", command=select_all).pack(side=tk.LEFT, padx=5)
+        ttk.Button(select_frame, text="Select None", command=select_none).pack(side=tk.LEFT, padx=5)
+        
+        # Add Selected/Cancel buttons (second row at bottom)
+        button_frame = ttk.Frame(main_frame)
+        button_frame.pack(fill=tk.X, pady=(10, 0))
+        
+        ttk.Button(button_frame, text="Add Selected",
+                  command=add_selected).pack(side=tk.RIGHT, padx=(5, 0))
+        ttk.Button(button_frame, text="Cancel",
+                  command=dialog.destroy).pack(side=tk.RIGHT)
+    
+    def edit_tag(self):
+        """Edit selected AWS tag"""
+        selection = self.parent.tags_tree.selection()
+        if not selection:
+            messagebox.showwarning("Warning", "Please select a tag to edit.")
+            return
+        
+        item = selection[0]
+        values = self.parent.tags_tree.item(item, "values")
+        tag_key = values[0]
+        tag_value = values[1]
+        
+        self.show_edit_tag_dialog(tag_key, tag_value)
+    
+    def show_edit_tag_dialog(self, original_key: str, original_value: str):
+        """Show dialog for editing an existing AWS tag
+        
+        Args:
+            original_key: Current tag key
+            original_value: Current tag value
+        """
+        dialog = tk.Toplevel(self.parent.root)
+        dialog.title("Edit AWS Tag")
+        dialog.geometry("500x350")
+        dialog.transient(self.parent.root)
+        dialog.grab_set()
+        
+        # Center dialog
+        dialog.geometry("+%d+%d" % (
+            self.parent.root.winfo_rootx() + 150,
+            self.parent.root.winfo_rooty() + 150
+        ))
+        
+        main_frame = ttk.Frame(dialog)
+        main_frame.pack(fill=tk.BOTH, expand=True, padx=20, pady=20)
+        
+        # Tag Key section (editable)
+        ttk.Label(main_frame, text="Tag Key:").pack(anchor=tk.W, pady=(0, 5))
+        
+        key_var = tk.StringVar(value=original_key)
+        key_entry = ttk.Entry(main_frame, textvariable=key_var, width=50)
+        key_entry.pack(fill=tk.X, pady=(0, 5))
+        
+        # Key requirements
+        key_req_frame = ttk.Frame(main_frame)
+        key_req_frame.pack(fill=tk.X, pady=(0, 10))
+        
+        key_req_text = (
+            "Requirements:\n"
+            "• 1-128 characters\n"
+            "• Valid: a-z, A-Z, 0-9, space, + - = . _ : / @\n"
+            "• Cannot start with aws: (reserved prefix)"
+        )
+        ttk.Label(key_req_frame, text=key_req_text,
+                 font=("TkDefaultFont", 8), foreground="#666666",
+                 justify=tk.LEFT).pack(anchor=tk.W)
+        
+        # Tag Value section (editable)
+        ttk.Label(main_frame, text="Tag Value:").pack(anchor=tk.W, pady=(10, 5))
+        
+        value_var = tk.StringVar(value=original_value)
+        value_entry = ttk.Entry(main_frame, textvariable=value_var, width=50)
+        value_entry.pack(fill=tk.X, pady=(0, 5))
+        
+        # Value requirements
+        value_req_text = (
+            "Requirements:\n"
+            "• 0-256 characters (empty allowed)\n"
+            "• Valid: a-z, A-Z, 0-9, space, + - = . _ : / @"
+        )
+        ttk.Label(main_frame, text=value_req_text,
+                 font=("TkDefaultFont", 8), foreground="#666666",
+                 justify=tk.LEFT).pack(anchor=tk.W, pady=(0, 15))
+        
+        # Buttons
+        button_frame = ttk.Frame(main_frame)
+        button_frame.pack(fill=tk.X)
+        
+        def save_changes():
+            key = key_var.get().strip()
+            value = value_var.get().strip()
+            
+            # Validate key
+            key_valid, key_error = self.parent.file_manager.validate_tag_key(key)
+            if not key_valid:
+                messagebox.showerror("Validation Error", key_error)
+                return
+            
+            # Validate value
+            value_valid, value_error = self.parent.file_manager.validate_tag_value(value)
+            if not value_valid:
+                messagebox.showerror("Validation Error", value_error)
+                return
+            
+            # Check for duplicate key (only if key changed)
+            if key != original_key and key in self.parent.tags:
+                messagebox.showerror("Duplicate Key",
+                    f"Tag key '{key}' already exists.\n\n"
+                    "Tag keys must be unique. Please choose a different key.")
+                return
+            
+            # If key changed, delete old key and add new one
+            if key != original_key:
+                old_value = self.parent.tags.get(original_key, "")
+                del self.parent.tags[original_key]
+                self.parent.tags[key] = value
+                
+                # Track change as delete + add
+                if self.parent.tracking_enabled:
+                    self.parent.add_history_entry('tag_deleted', {
+                        'key': original_key,
+                        'value': old_value
+                    })
+                    self.parent.add_history_entry('tag_added', {
+                        'key': key,
+                        'value': value
+                    })
+            else:
+                # Only value changed
+                old_value = self.parent.tags[original_key]
+                self.parent.tags[original_key] = value
+                
+                # Track change
+                if self.parent.tracking_enabled:
+                    self.parent.add_history_entry('tag_modified', {
+                        'key': original_key,
+                        'old_value': old_value,
+                        'new_value': value
+                    })
+            
+            self.parent.refresh_tags_table()
+            self.parent.modified = True
+            dialog.destroy()
+        
+        ttk.Button(button_frame, text="Save", command=save_changes).pack(side=tk.RIGHT, padx=(5, 0))
+        ttk.Button(button_frame, text="Cancel", command=dialog.destroy).pack(side=tk.RIGHT)
+        
+        # Focus on value entry
+        value_entry.focus()
+        value_entry.select_range(0, tk.END)
+    
+    def delete_tag(self):
+        """Delete selected AWS tag with confirmation"""
+        selection = self.parent.tags_tree.selection()
+        if not selection:
+            messagebox.showwarning("Warning", "Please select a tag to delete.")
+            return
+        
+        item = selection[0]
+        tag_key = self.parent.tags_tree.item(item, "values")[0]
+        
+        # Confirmation dialog
+        if messagebox.askyesno("Confirm Delete", f"Delete tag '{tag_key}'?"):
+            # Store old value for change tracking
+            old_value = self.parent.tags.get(tag_key, "")
+            
+            # Delete tag
+            if tag_key in self.parent.tags:
+                del self.parent.tags[tag_key]
+                
+                # Track change
+                if self.parent.tracking_enabled:
+                    self.parent.add_history_entry('tag_deleted', {
+                        'key': tag_key,
+                        'value': old_value
+                    })
+                
+                # Refresh display
+                self.parent.refresh_tags_table()
+                self.parent.modified = True
+    
+    def on_tag_double_click(self, event):
+        """Handle double-click events on tags tree items"""
+        item = self.parent.tags_tree.identify_row(event.y)
+        if not item:
+            return
+        
+        # Get the tag key and value from the double-clicked item
+        values = self.parent.tags_tree.item(item, "values")
+        if not values:
+            return
+        
+        tag_key = values[0]
+        tag_value = values[1]
+        
+        # Show edit dialog
+        self.show_edit_tag_dialog(tag_key, tag_value)
+    
+    def _on_tags_mousewheel(self, event):
+        """Handle mouse wheel scrolling for tags table"""
+        try:
+            # Windows and MacOS
+            if event.delta:
+                delta = -1 * (event.delta / 120)
+            # Linux
+            elif event.num == 4:
+                delta = -1
+            elif event.num == 5:
+                delta = 1
+            else:
+                delta = 0
+            
+            # Only scroll if there are enough items to require scrolling
+            if len(self.parent.tags_tree.get_children()) > 8:  # More items than visible height
+                self.parent.tags_tree.yview_scroll(int(delta), "units")
+                
+        except (AttributeError, tk.TclError):
+            # Ignore any scrolling errors
+            pass
     
     def _populate_scoring_explanation(self, parent_frame, analysis_results):
         """Populate the scoring methodology explanation section

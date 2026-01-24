@@ -38,6 +38,7 @@ class SuricataRuleGenerator:
         self.undo_state = None  # Previous state for undo functionality
         self.placeholder_item = None  # Placeholder row for new rule insertion
         self.variables = {}  # Dictionary to store network variables
+        self.tags = {}  # Dictionary to store AWS tags
         self.clipboard = []  # Clipboard for copy/paste functionality
         self.has_header = False  # Whether file has our header
         self.created_timestamp = None  # Original creation timestamp
@@ -65,12 +66,17 @@ class SuricataRuleGenerator:
         # Build the user interface
         self.ui_manager.setup_ui()
         
+        # Add default tags when program first opens (blank canvas)
+        self.add_default_tags()
         
         # Always start with blank canvas - don't auto-load default rules or create headers
         self.refresh_table()
         self.ui_manager.show_rule_editor()
         self.set_default_editor_values()
         self.add_placeholder_row()  # Show placeholder by default
+        
+        # Refresh tags table to show default tags on initial load
+        self.refresh_tags_table()
     
     def auto_detect_variables(self):
         """Auto-detect variables from current rules and populate Variables tab
@@ -248,6 +254,21 @@ class SuricataRuleGenerator:
                     item = self.variables_tree.insert("", tk.END, values=(var, var_type, display_definition, auto_description), tags=("external_net",))
             else:
                 item = self.variables_tree.insert("", tk.END, values=(var, var_type, definition, description))
+    
+    def refresh_tags_table(self):
+        """Refresh the AWS tags table display"""
+        # Safety check: Only refresh if tags_tree exists (UI has been initialized)
+        if not hasattr(self, 'tags_tree'):
+            return
+        
+        # Clear existing items
+        for item in self.tags_tree.get_children():
+            self.tags_tree.delete(item)
+        
+        # Populate with current tags (sorted by key)
+        for key in sorted(self.tags.keys()):
+            value = self.tags[key]
+            self.tags_tree.insert("", tk.END, values=(key, value))
     
     def get_variable_type(self, var_name):
         """Determine variable type based on usage context"""
@@ -526,8 +547,9 @@ class SuricataRuleGenerator:
         undefined_vars = [var for var in undefined_vars if var != '$EXTERNAL_NET']
         stats['undefined_vars'] = len(undefined_vars)
         
-        # Count unique reference sets (variables starting with @)
-        reference_sets = [var for var in used_vars if var.startswith('@')]
+        # Count unique IP Set References (@variables) - count ALL defined @ variables in self.variables
+        # AWS limit (5 references per rule group) applies to defined references, not just used ones
+        reference_sets = [var for var in self.variables.keys() if var.startswith('@')]
         stats['reference_sets'] = len(reference_sets)
         
         return stats
@@ -1890,6 +1912,7 @@ class SuricataRuleGenerator:
         
         self.rules.clear()
         self.variables.clear()
+        self.tags.clear()
         self.has_header = False
         self.created_timestamp = None
         self.pending_history.clear()
@@ -1899,8 +1922,12 @@ class SuricataRuleGenerator:
             self.create_header()
             self.add_history_entry('file_created')
         
+        # Add default tags for new files
+        self.add_default_tags()
+        
         self.refresh_table()
         self.auto_detect_variables()
+        self.refresh_tags_table()
         self.current_file = None
         self.modified = False
         self.update_status_bar()
@@ -1914,6 +1941,26 @@ class SuricataRuleGenerator:
         self.set_default_editor_values()
         self.selected_rule_index = len(self.rules)  # Set to insert after header if present
         self.add_placeholder_row()  # Show placeholder by default
+    
+    def add_default_tags(self):
+        """Add default tag to new files (only if not already present)
+        
+        Automatically adds:
+        - ManagedBy: SuricataGenerator
+        
+        Tag is only added if it doesn't already exist (preserves user edits).
+        """
+        # Add ManagedBy tag if not present
+        if 'ManagedBy' not in self.tags:
+            self.tags['ManagedBy'] = 'SuricataGenerator'
+            
+            # Track change if tracking enabled
+            if self.tracking_enabled:
+                self.add_history_entry('tag_added', {
+                    'key': 'ManagedBy',
+                    'value': 'SuricataGenerator',
+                    'source': 'default'
+                })
     
     def open_file(self):
         """Open an existing .suricata file"""
@@ -1942,6 +1989,36 @@ class SuricataRuleGenerator:
             self.current_file = filename
             self.modified = False
             self.selected_rule_index = None
+            
+            # Load tags from .var file and detect if upgrading from v1.0
+            var_filename = filename.replace('.suricata', '.var')
+            if not var_filename.endswith('.var'):
+                var_filename += '.var'
+            
+            # Detect .var file format before loading
+            was_v1_format = False
+            if os.path.exists(var_filename):
+                try:
+                    with open(var_filename, 'r', encoding='utf-8') as f:
+                        import json
+                        raw_data = json.load(f)
+                    # Use file_manager's format detection
+                    format_version = self.file_manager.detect_var_format(raw_data)
+                    was_v1_format = (format_version == '1.0')
+                except:
+                    pass  # If can't read/parse, assume v2.0 or missing
+            
+            # Load tags from .var file
+            _, self.tags = self.file_manager.load_variables_file(filename)
+            
+            # If upgrading from v1.0 format, add default ManagedBy tag
+            if was_v1_format and 'ManagedBy' not in self.tags:
+                self.tags['ManagedBy'] = 'SuricataGenerator'
+                # Mark as modified so user knows to save the upgrade
+                self.modified = True
+            
+            # Refresh tags table to display loaded tags
+            self.refresh_tags_table()
             
             # Check for existing history file and auto-enable tracking
             self.check_and_enable_existing_tracking()
@@ -2040,7 +2117,7 @@ class SuricataRuleGenerator:
                         pass  # If move fails, continue anyway
             
             success = self.file_manager.save_rules_to_file(
-                filename, self.rules, self.variables, 
+                filename, self.rules, self.variables, self.tags,
                 self.has_header, self.tracking_enabled, self.pending_history
             )
             
@@ -2062,6 +2139,12 @@ class SuricataRuleGenerator:
                     self.pending_history.clear()
                 
                 self.modified = False
+                
+                # CRITICAL FIX: Refresh table to display updated header timestamp
+                # The header's "Last Modified" timestamp was updated during save_rules_to_file,
+                # but the UI needs to be refreshed to show the new value
+                self.refresh_table(preserve_selection=True)
+                
                 self.update_status_bar()
                 messagebox.showinfo("Success", f"Rules saved to {filename}")
                 return True
@@ -2720,14 +2803,14 @@ class SuricataRuleGenerator:
         )
         
         if filename:
-            # STEP 3: Generate content with test_mode parameter
+            # STEP 3: Generate content with test_mode parameter and tags
             if export_format == "terraform":
                 content = self.file_manager.generate_terraform_template(
-                    self.rules, self.variables, test_mode=test_mode
+                    self.rules, self.variables, self.tags, test_mode=test_mode
                 )
             else:  # cloudformation
                 content = self.file_manager.generate_cloudformation_template(
-                    self.rules, self.variables, test_mode=test_mode
+                    self.rules, self.variables, self.tags, test_mode=test_mode
                 )
                 
                 # AWS CloudFormation Quota Validation (Priority 1 & 2)
@@ -3525,10 +3608,11 @@ class SuricataRuleGenerator:
             # Get selected region
             selected_region = selected_region_var.get()
             
-            # Proceed with deployment with selected region
+            # Proceed with deployment with selected region and tags
             self.file_manager.deploy_to_aws(
                 self.rules, 
                 self.variables, 
+                self.tags,
                 rule_group_name, 
                 test_mode,
                 self,

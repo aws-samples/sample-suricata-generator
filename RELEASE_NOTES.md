@@ -1,5 +1,89 @@
 # Release Notes
 
+## Version 1.28.1 - January 21, 2026
+
+### Bug Fix: Change Tracking Header Display
+- **Fixed Last Modified Timestamp Not Updating in UI**: Corrected issue where the "Last Modified" timestamp in the change tracking header was being updated in the file but not displayed in the rule window until the file was reopened
+  - **Root Cause**: The timestamp was being correctly updated during file save operations, but the rule table was not refreshing to display the new value
+  - **Impact**: Users couldn't see the updated "Last Modified" timestamp in the rule window after saving, making it appear as though the timestamp wasn't being updated (even though it was updated in the actual file)
+  - **Solution**: Added `refresh_table(preserve_selection=True)` call after successful file save to update the UI display
+  - **User Experience**: Last Modified timestamp now immediately visible in rule window after each save operation, providing instant feedback that the file was saved successfully
+
+### Technical Implementation
+- Modified `save_rules_to_file()` method in `suricata_generator.py` to refresh the table after successful save
+- Preserved user's rule selection during refresh for seamless workflow continuation
+- Table refresh updates all header comment lines including the Last Modified timestamp
+
+### User Impact
+- **Immediate Visual Feedback**: Users now see the updated timestamp in the rule window right after saving
+- **Better Awareness**: Clear indication that change tracking is working properly
+- **Eliminated Confusion**: No need to close and reopen files to see updated timestamps
+
+---
+
+## Version 1.28.0 - January 21, 2026
+
+### New Feature: AWS Tags Support
+- **Tag Management for Rule Groups**: New comprehensive tagging system for AWS Network Firewall rule groups enables better resource organization, cost allocation, and compliance tracking
+  - **AWS Tags Tab**: New dedicated tab in Editor section for managing tags with intuitive key-value interface
+    - Two-column table showing tag keys and values
+    - Add, edit, and delete tags through user-friendly UI
+    - Double-click to edit existing tags
+    - Real-time AWS validation with compliant requirements (1-128 char keys, 0-256 char values)
+  - **Export Integration**: Tags automatically applied during all export operations with zero additional steps
+    - **Terraform Export**: Tags added to resource tags block
+    - **CloudFormation Export**: Tags added to Tags array in template
+    - **AWS Direct Deploy**: Tags included in API call to Network Firewall
+  - **Import Integration**: Tags imported when loading rule groups from AWS
+    - AWS-managed tags (aws: prefix) automatically filtered
+    - User-defined tags loaded into AWS Tags tab for editing
+  - **Persistent Storage**: Tags saved in companion .var file format alongside variables
+    - Enhanced v2.0 .var format with separate "variables" and "tags" sections
+    - Backward compatible with legacy v1.0 format (auto-migration on first save)
+    - Tags persist across file open/save operations
+  - **Default Tag**: New files and v1.0 upgrades automatically include "ManagedBy: SuricataGenerator" tag
+    - Helps identify tool-managed resources in AWS console
+    - User can edit or delete this tag if desired
+  - **AWS Compliance**: Full validation against AWS tagging requirements
+    - Key: 1-128 characters with valid characters only
+    - Value: 0-256 characters (empty allowed)
+    - Reserved prefix detection (aws:)
+    - Duplicate key prevention
+  - **Change Tracking**: All tag operations logged when change tracking enabled
+    - Tag additions, modifications, and deletions tracked
+    - Complete audit trail in Change History tab
+
+### Business Value
+- **Cost Allocation**: Track rule group costs by team/project using CostCenter and Project tags
+- **Resource Organization**: Identify rule groups by environment using Environment tags
+- **Compliance Support**: Document ownership and compliance requirements with Owner and Compliance tags
+- **Automation Ready**: ManagedBy tag identifies tool-managed resources for automated policy enforcement
+
+### User Impact
+- **Better AWS Organization**: Tags enable filtering and searching in AWS Console
+- **Zero Learning Curve**: Familiar table-based UI matches Variables tab pattern
+- **Seamless Integration**: Tags automatically included in exports with no extra steps
+- **Professional Experience**: Full AWS validation prevents deployment errors
+
+---
+
+## Version 1.27.8 - January 20, 2026
+
+### Bug Fix: IP Set References Status Bar Tracking
+- **Fixed IP Set References Counter Not Updating**: Corrected bug where the status bar's "IP Set References: X/5" counter did not update when new @variables were added to the Rule Variables tab
+  - **Root Cause**: Counter was only counting @variables used in rules, not all @variables defined in the Variables tab
+  - **Impact**: Users could add IP Set Reference variables (@ALLOW_LIST, @VPC_CIDR, etc.) but the status bar counter remained at 0/5, making it impossible to track progress toward AWS's 5 reference limit
+  - **Solution**: Changed counter to count all @variables in `self.variables` dictionary (defined references) instead of only those in `used_vars` (references used in rules)
+  - **AWS Compliance**: AWS Network Firewall's 5 reference limit applies to defined references in the rule group, not just those currently used in rules
+  - **Technical Fix**: Modified `calculate_rule_statistics()` method in `suricata_generator.py` line 272-274
+
+### User Impact
+- **Accurate Tracking**: Status bar now correctly displays IP Set References count as variables are added/edited in the Variables tab
+- **Real-Time Updates**: Counter updates immediately when @variables are added, deleted, or modified
+- **AWS Quota Visibility**: Users can now properly monitor their progress toward the 5 reference limit
+
+---
+
 ## Version 1.27.7 - January 18, 2026
 
 ### New Feature: AWS Domain List Import

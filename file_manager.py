@@ -66,12 +66,14 @@ class FileManager:
                     if rule:
                         rules.append(rule)
             
-            # Load companion .var file if it exists
-            variables = self.load_variables_file(filename)
+            # Load companion .var file if it exists (returns both variables and tags)
+            variables, tags = self.load_variables_file(filename)
             
             # Check for existing header and extract timestamp
             has_header, created_timestamp = self.detect_header(rules)
             
+            # Note: load_rules_from_file returns only variables for backward compatibility
+            # Tags will be loaded separately by the main application via load_variables_file
             return rules, variables, has_header, created_timestamp
             
         except FileNotFoundError:
@@ -84,9 +86,19 @@ class FileManager:
             raise Exception(f"Failed to load file {filename}: {str(e)}")
     
     def save_rules_to_file(self, filename: str, rules: List[SuricataRule], variables: dict, 
-                          has_header: bool = False, tracking_enabled: bool = False, 
+                          tags: dict = None, has_header: bool = False, tracking_enabled: bool = False, 
                           pending_history: List = None) -> bool:
-        """Save rules to a .suricata file with validation"""
+        """Save rules to a .suricata file with validation
+        
+        Args:
+            filename: Path to .suricata file
+            rules: List of SuricataRule objects
+            variables: Variables dictionary
+            tags: Tags dictionary (optional, defaults to empty dict)
+            has_header: Whether file has header
+            tracking_enabled: Whether change tracking is enabled
+            pending_history: Pending history entries to write
+        """
         
         # Check for duplicate SIDs
         sids = [rule.sid for rule in rules if not getattr(rule, 'is_comment', False) and not getattr(rule, 'is_blank', False)]
@@ -147,9 +159,9 @@ class FileManager:
                     else:
                         f.write(rule.to_string() + '\n')
             
-            # Save companion .var file if variables are used
-            if used_vars:
-                self.save_variables_file(filename, variables)
+            # Save companion .var file if variables or tags are used
+            if used_vars or tags:
+                self.save_variables_file(filename, variables, tags)
             
             # Save companion .history file if tracking enabled
             if tracking_enabled and pending_history:
@@ -164,15 +176,35 @@ class FileManager:
         except Exception as e:
             raise Exception(f"Failed to save file {filename}: {str(e)}")
     
-    def load_variables_file(self, suricata_filename: str) -> dict:
+    def detect_var_format(self, var_data: dict) -> str:
+        """Detect .var file format version
+        
+        Args:
+            var_data: Parsed JSON from .var file
+            
+        Returns:
+            str: '1.0' (legacy) or '2.0' (new format with tags)
+        """
+        # Check for format_version key (explicit versioning)
+        if 'format_version' in var_data:
+            return var_data['format_version']
+        
+        # Check for 'variables' or 'tags' keys (implicit v2.0)
+        if 'variables' in var_data or 'tags' in var_data:
+            return '2.0'
+        
+        # Legacy format - variables at root level
+        return '1.0'
+    
+    def load_variables_file(self, suricata_filename: str) -> tuple[dict, dict]:
         """Load companion .var file if it exists
         
-        Supports both legacy format (string values) and new format (dict with definition/description).
-        Legacy format: {"$VAR": "value"}
-        New format: {"$VAR": {"definition": "value", "description": "text"}}
+        Supports both v1.0 (legacy) and v2.0 (new with tags) formats.
+        Legacy format: {"$VAR": "value"} or {"$VAR": {"definition": "value", "description": "text"}}
+        New format v2.0: {"format_version": "2.0", "variables": {...}, "tags": {...}}
         
         Returns:
-            dict: Variables in new format with definition and description
+            tuple: (variables_dict, tags_dict)
         """
         var_filename = suricata_filename.replace('.suricata', '.var')
         if not var_filename.endswith('.var'):
@@ -183,17 +215,29 @@ class FileManager:
                 with open(var_filename, 'r', encoding='utf-8') as f:
                     raw_data = json.load(f)
                 
-                # Convert to new format if needed (backward compatibility)
+                # Detect format version
+                format_version = self.detect_var_format(raw_data)
+                
+                if format_version == '2.0':
+                    # New format (v2.0) - has format_version, variables, and tags keys
+                    variables_data = raw_data.get('variables', {})
+                    tags = raw_data.get('tags', {})
+                else:
+                    # Legacy format (v1.0) - variables at root level
+                    variables_data = raw_data
+                    tags = {}  # No tags in legacy format
+                
+                # Convert variables to new dict format if needed
                 variables = {}
-                for name, value in raw_data.items():
+                for name, value in variables_data.items():
                     if isinstance(value, str):
-                        # Legacy format: string value
+                        # Legacy string format
                         variables[name] = {
                             "definition": value,
                             "description": ""
                         }
                     elif isinstance(value, dict):
-                        # New format: dict with definition and optional description
+                        # New dict format
                         variables[name] = {
                             "definition": value.get("definition", ""),
                             "description": value.get("description", "")
@@ -205,7 +249,7 @@ class FileManager:
                             "description": ""
                         }
                 
-                return variables
+                return variables, tags
                 
             except FileNotFoundError:
                 pass  # Variable file doesn't exist
@@ -215,35 +259,93 @@ class FileManager:
                 pass  # Variable file is corrupted
             except (TypeError, ValueError):
                 pass  # Other errors
-        return {}
+        return {}, {}
     
-    def save_variables_file(self, suricata_filename: str, variables: dict):
-        """Save companion .var file with variable definitions
+    def save_variables_file(self, suricata_filename: str, variables: dict, tags: dict = None):
+        """Save companion .var file with variable definitions and tags
         
-        Always saves in new format with definition and description fields.
+        Always saves in v2.0 format with format_version, variables, and tags sections.
         Maintains backward compatibility by supporting reading of old format.
         
         Args:
+            suricata_filename: Path to .suricata file
             variables: Dict with structure {name: {"definition": str, "description": str}}
+            tags: Tags dict with key-value pairs (optional, defaults to empty dict)
         """
-        if not variables:
+        if not variables and not tags:
             return
+        
+        # Default to empty dict if tags not provided
+        if tags is None:
+            tags = {}
         
         var_filename = suricata_filename.replace('.suricata', '.var')
         if not var_filename.endswith('.var'):
             var_filename += '.var'
         
         try:
-            # Save in new format with definition and description
-            # Variables should already be in the new format from load_variables_file
+            # Always save in v2.0 format with format_version, variables, and tags
+            var_data = {
+                'format_version': '2.0',
+                'variables': variables,
+                'tags': tags
+            }
+            
             with open(var_filename, 'w', encoding='utf-8') as f:
-                json.dump(variables, f, indent=2)
+                json.dump(var_data, f, indent=2, ensure_ascii=False)
+                
         except PermissionError:
             pass  # Cannot write variable file
         except OSError:
             pass  # File system error
         except (TypeError, ValueError):
             pass  # Other errors
+    
+    def validate_tag_key(self, key: str) -> tuple[bool, str]:
+        """Validate AWS tag key
+        
+        Args:
+            key: Tag key to validate
+            
+        Returns:
+            tuple: (is_valid, error_message)
+        """
+        if not key:
+            return False, "Tag key is required"
+        
+        if len(key) > 128:
+            return False, "Tag key cannot exceed 128 characters"
+        
+        # AWS reserved prefix (case-insensitive)
+        if key.lower().startswith('aws:'):
+            return False, "Tag keys cannot start with 'aws:' (reserved prefix)"
+        
+        # Valid characters pattern
+        valid_pattern = r'^[a-zA-Z0-9 +\-=._:/@]+$'
+        if not re.match(valid_pattern, key):
+            return False, "Invalid characters. Only a-z, A-Z, 0-9, space, +-=._:/@  allowed"
+        
+        return True, ""
+    
+    def validate_tag_value(self, value: str) -> tuple[bool, str]:
+        """Validate AWS tag value
+        
+        Args:
+            value: Tag value to validate
+            
+        Returns:
+            tuple: (is_valid, error_message)
+        """
+        # Empty values are allowed
+        if len(value) > 256:
+            return False, "Tag value cannot exceed 256 characters"
+        
+        # Valid characters pattern (same as keys)
+        valid_pattern = r'^[a-zA-Z0-9 +\-=._:/@]*$'
+        if not re.match(valid_pattern, value):
+            return False, "Invalid characters. Only a-z, A-Z, 0-9, space, +-=._:/@  allowed"
+        
+        return True, ""
     
     def save_history_file(self, suricata_filename: str, pending_history: List):
         """Save companion .history file with change tracking data"""
@@ -370,8 +472,15 @@ class FileManager:
         return export_rules
     
     def generate_terraform_template(self, rules: List[SuricataRule], variables: dict,
-                                   test_mode: bool = False) -> str:
-        """Generate Terraform template for AWS Network Firewall rule group with optional test mode"""
+                                   tags: dict = None, test_mode: bool = False) -> str:
+        """Generate Terraform template for AWS Network Firewall rule group with optional test mode
+        
+        Args:
+            rules: List of SuricataRule objects
+            variables: Variable definitions dictionary
+            tags: Tags dictionary (optional, defaults to empty dict)
+            test_mode: If True, convert all actions to 'alert'
+        """
         
         # STEP 1: Prepare rules for export (convert to alert-only if test mode)
         export_rules = self._prepare_rules_for_export(rules, test_mode)
@@ -482,6 +591,22 @@ class FileManager:
             if has_rule_vars:
                 rule_variables += "    }\n"
         
+        # Default to empty dict if tags not provided
+        if tags is None:
+            tags = {}
+        
+        # Generate tags section (always include at minimum the Name tag)
+        tags_section = '  tags = {\n'
+        tags_section += '    Name = "suricata-generator-rg"\n'
+        
+        # Add user-defined tags automatically (no prompts)
+        for key, value in sorted(tags.items()):
+            # Escape quotes in values
+            escaped_value = value.replace('"', '\\"')
+            tags_section += f'    {key} = "{escaped_value}"\n'
+        
+        tags_section += '  }\n'
+        
         # Generate template
         template = f'''resource "aws_networkfirewall_rule_group" "suricata_rule_group" {{
   capacity    = {capacity}
@@ -500,16 +625,20 @@ EOF
     }}
   }}
 
-  tags = {{
-    Name = "suricata-generator-rg"
-  }}
-}}
+{tags_section}}}
 '''
         return template
     
     def generate_cloudformation_template(self, rules: List[SuricataRule], variables: dict,
-                                        test_mode: bool = False) -> str:
-        """Generate CloudFormation JSON template for AWS Network Firewall rule group with optional test mode"""
+                                        tags: dict = None, test_mode: bool = False) -> str:
+        """Generate CloudFormation JSON template for AWS Network Firewall rule group with optional test mode
+        
+        Args:
+            rules: List of SuricataRule objects
+            variables: Variable definitions dictionary
+            tags: Tags dictionary (optional, defaults to empty dict)
+            test_mode: If True, convert all actions to 'alert'
+        """
         
         # STEP 1: Prepare rules for export (convert to alert-only if test mode)
         export_rules = self._prepare_rules_for_export(rules, test_mode)
@@ -643,6 +772,27 @@ EOF
             
             if reference_sets:
                 template["Resources"]["SuricataRuleGroup"]["Properties"]["ReferenceSets"] = reference_sets
+        
+        # Default to empty dict if tags not provided
+        if tags is None:
+            tags = {}
+        
+        # Build tags array (always include Name tag at minimum)
+        tags_array = [
+            {
+                "Key": "Name",
+                "Value": "suricata-generator-rg"
+            }
+        ]
+        
+        # Add user-defined tags automatically (no prompts)
+        for key, value in sorted(tags.items()):
+            tags_array.append({
+                "Key": key,
+                "Value": value
+            })
+        
+        template["Resources"]["SuricataRuleGroup"]["Properties"]["Tags"] = tags_array
         
         return json.dumps(template, indent=2)
     
@@ -1046,13 +1196,15 @@ EOF
             # If post-processing fails, leave the original file unchanged
             pass
     
-    def deploy_to_aws(self, rules: List, variables: dict, rule_group_name: str, 
-                     test_mode: bool, parent_app, region: str = None) -> bool:
+    def deploy_to_aws(self, rules: List, variables: dict, tags: dict = None,
+                     rule_group_name: str = None, test_mode: bool = False, 
+                     parent_app = None, region: str = None) -> bool:
         """Deploy rules directly to AWS Network Firewall
         
         Args:
             rules: List of SuricataRule objects
             variables: Variable definitions dictionary
+            tags: Tags dictionary (optional, defaults to empty dict)
             rule_group_name: AWS-compliant rule group name
             test_mode: If True, convert all actions to 'alert'
             parent_app: Reference to parent application for progress updates
@@ -1173,7 +1325,19 @@ EOF
                 # Rule group doesn't exist - safe to create
                 rule_group_exists = False
             
-            # STEP 9: Create or update rule group based on existence
+            # STEP 9: Build tags for AWS API call
+            # Default to empty dict if tags not provided
+            if tags is None:
+                tags = {}
+            
+            # Build tags for AWS API (always include Name tag)
+            aws_tags = [{'Key': 'Name', 'Value': rule_group_name}]
+            
+            # Add user-defined tags automatically (no prompts)
+            for key, value in tags.items():
+                aws_tags.append({'Key': key, 'Value': value})
+            
+            # STEP 10: Create or update rule group based on existence
             # Get current date for description
             from datetime import datetime
             current_date = datetime.now().strftime('%Y-%m-%d')
@@ -1194,13 +1358,14 @@ EOF
                 
                 response = client.update_rule_group(**api_params)
             else:
-                # Create new rule group
+                # Create new rule group with tags
                 api_params = {
                     'RuleGroupName': rule_group_name,
                     'Type': 'STATEFUL',
                     'RuleGroup': rule_group,
                     'Capacity': capacity,
-                    'Description': f'Created by Suricata Generator v{self.version} on {current_date}'
+                    'Description': f'Created by Suricata Generator v{self.version} on {current_date}',
+                    'Tags': aws_tags
                 }
                 
                 # Only add ReferenceSets if there are actual references (AWS requirement)

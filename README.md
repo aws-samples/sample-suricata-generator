@@ -1,6 +1,6 @@
 # Suricata Rule Generator for AWS Network Firewall
 
-**Current Version: 1.27.7**
+**Current Version: 1.28.0**
 
 A GUI application for creating, editing, and managing Suricata rules - specifically designed for AWS Network Firewall deployments using strict rule ordering.
 
@@ -665,6 +665,142 @@ arn:aws:ec2:region:account:managed-prefix-list/pl-id
 - Automatically defined as negation of $HOME_NET
 - Managed by AWS Network Firewall
 - Shows as grey/read-only in Variables tab
+
+---
+
+## Managing AWS Tags ⭐ NEW in v1.28.0
+
+> 🏷️ **Tag your rule groups** for better AWS resource organization, cost allocation, and compliance tracking.
+
+The AWS Tags tab provides management of tags that will be applied to your rule group during export to AWS.
+
+### The AWS Tags Tab
+
+![Tags](images/tags.png)
+
+Located between Rule Variables and Change History tabs, the AWS Tags tab displays all tags as key-value pairs in a two-column table.
+
+### Adding Tags
+
+**Method 1: Add Individual Tag**
+1. Switch to AWS Tags tab
+2. Click "Add Tag"
+3. Enter tag key (1-128 characters)
+4. Enter tag value (0-256 characters, empty allowed)
+5. Click "Save"
+
+**Tag Requirements:**
+- **Key**: 1-128 characters
+- **Value**: 0-256 characters (empty allowed)
+- **Valid Characters**: a-z, A-Z, 0-9, space, + - = . _ : / @
+- **Reserved Prefix**: Cannot start with aws: (case-insensitive)
+- **Uniqueness**: Keys must be unique within a rule group
+
+### Tag Operations
+
+- ✏️ **Edit**: Double-click tag to modify value (keys are immutable)
+- 🗑️ **Delete**: Select tag and click "Delete Tag"
+- 📝 **Change Tracking**: All tag operations logged when tracking enabled
+
+### Default Tag
+
+**ManagedBy Tag:**
+- Automatically added when program starts or new files created
+- Value: "SuricataGenerator"
+- Identifies tool-managed resources in AWS
+- Can be edited or deleted if desired
+- Added to v1.0 format files when first opened
+
+### Common Tag Examples
+
+**Cost Allocation:**
+```
+Environment: Production
+CostCenter: IT-Security
+Project: NetworkFirewall
+```
+
+**Resource Organization:**
+```
+Owner: SecurityTeam
+Team: CloudOps
+Application: CoreNetworking
+```
+
+**Compliance:**
+```
+Compliance: PCI-DSS
+DataClassification: Internal
+CreatedBy: automation
+```
+
+### Export Integration
+
+Tags are **automatically applied** during all export operations:
+- **Terraform Export**: Tags added to resource tags block
+- **CloudFormation Export**: Tags added to Tags array in template
+- **AWS Direct Deploy**: Tags included in API call to Network Firewall
+
+**Example Terraform Output:**
+```hcl
+resource "aws_networkfirewall_rule_group" "suricata_rule_group" {
+  capacity = 150
+  name     = "suricata-generator-rg"
+  
+  tags = {
+    Name        = "suricata-generator-rg"
+    Environment = "Production"
+    ManagedBy   = "SuricataGenerator"
+    Owner       = "SecurityTeam"
+  }
+}
+```
+
+### Import Integration
+
+When importing rule groups from AWS:
+- User-defined tags automatically imported
+- AWS-managed tags (aws: prefix) filtered out
+- Tags loaded into AWS Tags tab for editing
+
+### Storage
+
+**Persistent in .var File:**
+- Tags saved in enhanced v2.0 .var file format
+- Stored alongside variables in same companion file
+- Format: `{"format_version": "2.0", "variables": {...}, "tags": {...}}`
+- Backward compatible with v1.0 format (auto-upgrades on save)
+
+### Benefits
+
+**AWS Console:**
+- 🔍 **Filtering**: Filter rule groups by tag in AWS Console
+- 🔎 **Search**: Search for resources using tags
+- 📊 **Organization**: Group related resources together
+
+**Cost Management:**
+- 💰 **Cost Explorer**: Track costs by CostCenter or Project tags
+- 📈 **Billing Reports**: Allocate rule group costs to teams
+- 💳 **Chargeback**: Enable showback/chargeback by tag
+
+**Compliance:**
+- 📋 **Ownership**: Document resource ownership
+- 🔒 **Security**: Tag-based IAM policies for access control
+- 📝 **Auditing**: Track compliance requirements
+
+**Automation:**
+- 🤖 **Policy Enforcement**: Identify tool-managed resources
+- 🔄 **Lifecycle Management**: Automate based on tags
+- 📦 **Inventory**: Track resource metadata programmatically
+
+### AWS Tag Limits
+
+- **Maximum tags per resource**: 200
+- **Tag key length**: 1-128 characters
+- **Tag value length**: 0-256 characters
+- **Reserved prefix**: aws: (case-insensitive)
+
+> 💡 **Zero Extra Steps**: Tags automatically included in exports - no additional configuration needed!
 
 ---
 

@@ -943,11 +943,30 @@ class StatefulRuleImporter:
                 messagebox.showwarning("No Rules Found", "No rules found in the rule group JSON.")
                 return None
             
+            # Import tags from rule group (filter out AWS-managed tags)
+            tags = {}
+            aws_tags = rule_group_response.get('Tags', [])
+            
+            for tag in aws_tags:
+                key = tag.get('Key', '')
+                value = tag.get('Value', '')
+                
+                # Skip AWS-managed tags (aws: prefix)
+                if key.lower().startswith('aws:'):
+                    continue
+                
+                # Skip empty keys
+                if not key:
+                    continue
+                
+                tags[key] = value
+            
             return {
                 'name': rule_group_name,
                 'description': description,
                 'rules': rules,
                 'variables': variables,
+                'tags': tags,
                 'original_json': json_data
             }
             
@@ -1494,9 +1513,10 @@ class StatefulRuleImporter:
         self.parent.tracking_enabled = False
         self.parent.tracking_menu_var.set(False)
         
-        # Clear current rules and variables
+        # Clear current rules, variables, and tags
         self.parent.rules.clear()
         self.parent.variables.clear()
+        self.parent.tags.clear()
         self.parent.has_header = False
         self.parent.created_timestamp = None
         self.parent.pending_history.clear()
@@ -1517,6 +1537,10 @@ class StatefulRuleImporter:
         # Set the variables in parent
         for var_name, var_value in imported_vars.items():
             self.parent.variables[var_name] = var_value
+        
+        # Import tags
+        imported_tags = parsed_data.get('tags', {})
+        self.parent.tags = imported_tags
         
         # Update UI - refresh table first
         self.parent.refresh_table(preserve_selection=False)
@@ -1546,10 +1570,11 @@ class StatefulRuleImporter:
                 else:
                     self.parent.variables[var] = ""
         
-        # Refresh variables table
+        # Refresh variables and tags tables
         # Note: Clicking on Variables tab will trigger auto_detect_variables, but it now
         # preserves variables with definitions even if not used in rules
         self.parent.refresh_variables_table()
+        self.parent.refresh_tags_table()
         
         # Force UI update
         self.parent.root.update_idletasks()

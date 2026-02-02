@@ -1,5 +1,103 @@
 # Release Notes
 
+## Version 1.29.0 - February 1, 2026
+
+### Major New Feature: Analyze Traffic Costs
+- **AWS Network Firewall Cost Analysis and VPC Endpoint Recommendations**: New comprehensive traffic analysis feature helps identify where firewall costs are coming from and provides intelligent VPC endpoint recommendations for cost savings
+  - **Three-Tab Cost Analysis Dashboard**: 
+    - **Internet Traffic**: Analyze non-AWS traffic patterns with hostname/SNI visibility, cost breakdowns, and source IP drill-down
+    - **AWS Service Traffic**: Smart VPC endpoint recommendations with break-even analysis, regional pricing, and monthly savings projections
+    - **Internal Traffic**: VPC-to-VPC communication costs with source IP breakdowns
+  - **Intelligent VPC Endpoint Recommendations**: Cost-benefit analysis determines when endpoints are worth deploying
+    - **Gateway Endpoints**: Always recommended for S3/DynamoDB (FREE, eliminates firewall costs)
+    - **Interface Endpoints**: Only recommended when traffic volume exceeds break-even threshold
+    - **Regional Pricing**: Accurate cost calculations using region-specific firewall data processing rates
+    - **Cross-Region Analysis**: Identifies cross-region traffic with alternative optimization suggestions
+  - **CloudWatch Logs Integration**: Correlates FLOW logs (traffic volumes) with ALERT logs (hostnames/SNI)
+    - Queries millions of log entries with efficient CloudWatch Logs Insights queries
+    - Handles large datasets with automatic pagination (>10K flows)
+    - Progress tracking with cancellation support
+  - **Data Caching**: Save analysis results to avoid CloudWatch charges on repeat views
+    - Results cached in .stats companion files
+    - Instant loading of cached data with age indicators
+    - Option to refresh for updated analysis
+  - **Custom Date Ranges**: Flexible time period selection (7, 15, 30, 60, 90 days or custom range)
+  - **Expandable Drill-Down**: Click any row to see source IP breakdown, expand to see individual flows with timestamps
+  - **CSV Export**: Export analysis results for offline review and reporting
+  - **Cost Transparency**: Shows estimated CloudWatch query costs before running analysis
+
+### Business Value
+- **Cost Optimization**: Identify opportunities to reduce AWS Network Firewall data processing costs through VPC endpoints
+- **Traffic Visibility**: See exactly where bandwidth is going with hostname/domain resolution
+- **Actionable Insights**: Smart recommendations only suggest endpoints when cost-effective
+- **ROI Clarity**: Break-even analysis shows exact traffic thresholds where endpoints make financial sense
+
+### User Impact
+- **Reduce AWS Bills**: Potential savings of $50-200/month through strategic VPC endpoint deployment
+- **Better Visibility**: Understand traffic patterns with HTTP/TLS hostname correlation
+- **Smart Decisions**: Data-driven recommendations prevent wasteful endpoint deployments
+- **Easy Setup**: Works with existing CloudWatch logs, no additional AWS configuration needed
+
+---
+
+## Version 1.28.3 - January 29, 2026
+
+### Enhancement: Analyze Rule Usage - Auto-Query Log Groups
+- **Automatic Log Group Discovery**: Enhanced "Analyze Rule Usage" feature with automatic CloudWatch log group discovery and selection
+  - **Auto-Populated Dropdown**: Changed from manual text entry to dropdown menu that automatically queries CloudWatch for available log groups
+    - Queries and displays up to 100 log groups in selected region
+    - Alphabetically sorted for easy navigation
+    - Real-time status indicators (✓ success, ⚠️ warnings/errors)
+  - **Region-Aware Querying**: Log groups automatically refresh when AWS region is changed
+    - Eliminates typos and incorrect log group names
+    - Shows only log groups that actually exist in the selected region
+  - **Enhanced Label**: Renamed "Log Group" to "Alert Log Group" for clarity
+    - Clarifies this field is specifically for Alert logs (not Flow logs)
+  - **Smart Error Handling**: Graceful handling of AWS credential issues, permission errors, and connection failures
+    - Clear color-coded status messages guide users to solutions
+    - Helps users quickly identify and resolve configuration issues
+  - **Improved Dialog Layout**: Increased dialog height from 550x600 to 550x700
+    - Ensures Analyze and Cancel buttons always visible
+    - Accommodates new region selector and log group status indicators
+
+### Technical Implementation
+- **CloudWatch Integration**: Uses boto3 `describe_log_groups` API with pagination support
+- **Session Preferences**: Selected log groups remembered during session for convenience
+- **Loading States**: Visual feedback during log group query with status messages
+- **Auto-Load on Open**: Log groups automatically load when dialog opens (200ms delay for smooth UX)
+
+### User Impact
+- **Easier Configuration**: No more manual typing of log group names
+- **Reduced Errors**: Dropdown prevents typos and shows only existing log groups
+- **Multi-Region Support**: Easy switching between regions with automatic log group refresh
+- **Consistent Experience**: Matches the polished UX of other AWS integration features
+- **Professional Quality**: Auto-discovery is expected in modern AWS tools
+
+---
+
+## Version 1.28.2 - January 27, 2026
+
+### Bug Fix: Flow Tester Variable Resolution
+- **Fixed AttributeError in Flow Tester**: Corrected critical bug causing AttributeError when testing flows with network variables
+  - **Root Cause**: The `_ip_matches_network()` method in flow_tester.py assumed `self.variables.get()` would always return a string, but it could sometimes return a dict object
+  - **Impact**: Users received "AttributeError: 'dict' object has no attribute 'strip'" when using the Test Flow feature with rules containing network variables
+  - **Solution**: Added type checking after variable resolution to detect dict objects and handle them gracefully
+    - If resolved value is a dict, the method returns True (conservative matching) to prevent crashes
+    - Explicitly converts resolved values to strings before recursive calls
+  - **Technical Fix**: Modified `_ip_matches_network()` method in flow_tester.py (line ~635)
+
+### Technical Implementation
+- Added `isinstance(resolved, dict)` check after variable resolution
+- Returns True (allows match) when dict detected to prevent AttributeError
+- Ensures all resolved values converted to string via `str(resolved)` before recursion
+
+### User Impact
+- **Working Test Flow Feature**: Flow testing now works correctly without crashes when rules contain network variables
+- **Graceful Error Handling**: Dict resolution handled smoothly without breaking the test
+- **Production Ready**: Flow tester behavior remains accurate while handling edge cases
+
+---
+
 ## Version 1.28.1 - January 21, 2026
 
 ### Bug Fix: Change Tracking Header Display

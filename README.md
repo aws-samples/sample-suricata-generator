@@ -1,6 +1,6 @@
 # Suricata Rule Generator for AWS Network Firewall
 
-**Current Version: 1.28.0**
+**Current Version: 1.29.0**
 
 A GUI application for creating, editing, and managing Suricata rules - specifically designed for AWS Network Firewall deployments using strict rule ordering.
 
@@ -41,7 +41,8 @@ A GUI application for creating, editing, and managing Suricata rules - specifica
 - [Bulk SID Management](#bulk-sid-management)
 - [Advanced Editor](#advanced-editor)
 - [Rule Conflict Analysis](#rule-conflict-analysis)
-- [CloudWatch Rule Usage Analysis](#cloudwatch-rule-usage-analysis) ⭐ NEW
+- [CloudWatch Rule Usage Analysis](#cloudwatch-rule-usage-analysis)
+- [Analyze Traffic Costs](#analyze-traffic-costs) ⭐ NEW
 - [Infrastructure Export](#infrastructure-export)
 - [Change Tracking](#change-tracking)
 - [SIG Type Classification](#sig-type-classification)
@@ -1797,6 +1798,206 @@ This feature builds upon AWS Network Firewall's robust monitoring foundation by 
 
 ---
 
+## Analyze Traffic Costs
+
+> 💰 **Identify where your firewall costs are coming from** and discover VPC endpoint opportunities for cost savings! ⭐ NEW in v1.29.0
+
+![Traffic Costs](images/traffic_costs.png)
+
+The Traffic Cost Analyzer provides comprehensive analysis of your AWS Network Firewall data processing costs by correlating CloudWatch Logs to show exactly where bandwidth is going and which AWS services could benefit from VPC endpoints.
+
+### What This Feature Does
+
+**Cost Visibility:**
+- Analyze traffic patterns to understand firewall data processing costs
+- See bandwidth breakdown by destination (internet vs AWS services vs internal)
+- Identify high-cost traffic destinations with HTTP/TLS hostname resolution
+- Calculate regional pricing for accurate cost estimates
+
+**VPC Endpoint Recommendations:**
+- Smart cost-benefit analysis determines when VPC endpoints are worth deploying
+- Break-even calculations show exact traffic thresholds
+- Gateway endpoints (FREE) always recommended for S3/DynamoDB
+- Interface endpoints only recommended when cost-effective
+
+### Three-Tab Dashboard
+
+**Tab 1: Internet Traffic**
+![Internet Traffic](images/internet_traffic.png)
+- Non-AWS traffic with hostnames/domains (HTTP, TLS SNI)
+- Cost breakdown per destination
+- Source IP drill-down to see which hosts generate traffic
+- Identifies optimization opportunities (Windows Update, CDNs, package registries)
+
+**Tab 2: AWS Service Traffic**
+![AWS Traffic](images/aws_service_traffic.png)
+- AWS services with traffic volumes and costs
+- VPC endpoint recommendations with monthly savings projections
+- Regional pricing accuracy
+- Cross-region traffic identification with alternative suggestions
+
+**Tab 3: Internal Traffic**
+![Internal Traffic](images/internal_traffic.png)
+- VPC-to-VPC communication patterns
+- Internal traffic costs
+- Source-to-destination flow analysis
+
+### Intelligent VPC Endpoint Recommendations
+
+**Gateway Endpoints (Always FREE):**
+- S3 and DynamoDB gateway endpoints cost $0
+- Always recommended when same-region traffic detected
+- Eliminate firewall data processing charges completely
+- Example: 245 GB/month to S3 → Save $15.93/month ($191/year)
+
+**Interface Endpoints (Cost-Benefit Analysis):**
+- Break-even threshold: 112 GB/month for same-region (us-east-1: $7.30/month endpoint cost ÷ $0.065/GB)
+- Only recommended when traffic exceeds break-even
+- Example: 85 GB/month to SSM → Skip (not cost-effective)
+- Example: 180 GB/month to Lambda → Deploy (saves $4.40/month)
+
+**Regional Pricing:**
+- Accurate cost calculations using regional firewall data processing rates
+- Interface endpoint costs vary by region
+- Break-even thresholds adjusted per region automatically
+
+**Cross-Region Guidance:**
+- Identifies cross-region AWS service traffic
+- Suggests alternatives (S3 CRR, DynamoDB Global Tables)
+- Interface endpoint support varies by service
+
+### CloudWatch Logs Integration
+
+**Correlation Engine:**
+- Combines FLOW logs (traffic volumes) with ALERT logs (hostnames/SNI)
+- Correlates via flow_id for complete traffic picture
+- Handles millions of log entries efficiently
+
+**Pagination Support:**
+- Automatic chunking for queries exceeding 10K flows
+- Progress tracking with cancellation support
+- Handles very large datasets gracefully
+
+**AWS Service Detection:**
+- Downloads AWS IP ranges for service identification
+- Interval tree for O(log n) lookups (100,000x faster than naive approach)
+- Identifies S3, DynamoDB, Lambda, EC2, and 20+ other services
+
+### Data Caching
+
+**Save Results:**
+- Save analysis results to .stats file (same format as Rule Usage stats)
+- Unified v2.0 format supports both Rule Usage and Traffic Analysis data
+- Avoid CloudWatch Logs query charges on repeat views
+
+**Auto-Load:**
+- Cached data detected when rule file is opened
+- Prompt to load cached (instant) or run fresh analysis
+- Shows data age for informed decision
+
+**Instant Drill-Down:**
+- Cached data supports all three main tabs
+- Individual flow data not cached (keeps file size reasonable)
+- Drill-down features work with fresh analysis only
+
+### Expandable Drill-Down
+![Drill Down](images/drilldown.png)
+
+**Double Click Any Row:**
+- See source IP breakdown showing which internal hosts generate traffic
+- Expand source IPs to see individual flows with timestamps
+- Sort by any column (traffic volume, cost, flow count)
+
+**Timestamp Sorting:**
+- Click "Source IP" column to sort flows by timestamp
+- See most recent activity first
+- Useful for identifying current vs historical patterns
+
+### Custom Date Ranges
+
+**Flexible Time Periods:**
+- Preset ranges: 7, 15, 30, 60, 90 days
+- Custom date range picker
+- Analysis metadata shows exact date range used
+
+### Requirements
+
+**One-Time Setup:**
+1. Install boto3 and dependencies: `pip install boto3 intervaltree requests`
+2. Configure AWS credentials (AWS CLI or environment variables)
+3. AWS Network Firewall must log to CloudWatch:
+   - FLOW logs (traffic volumes) - Required
+   - ALERT logs (hostnames/SNI) - Required for hostname visibility
+4. IAM permissions for CloudWatch Logs
+
+**CloudWatch Query Costs:**
+- CloudWatch Logs Insights charges $0.005 per GB scanned
+- Typical 30-day analysis: $0.50 - $2.00
+- Cost warning shown before running analysis
+- Cached results avoid repeated charges
+
+### Running Analysis
+
+1. **Tools > Analyze Traffic Costs**
+2. **Configure:**
+   - Flow log group (required)
+   - Alert log group (optional but recommended)
+   - AWS region
+   - Time range (7-90 days or custom)
+3. **Click Analyze**
+4. **Wait**: ~60-120 seconds for CloudWatch queries
+5. **Review**: Three-tab dashboard with comprehensive insights
+
+### Benefits
+
+**Cost Optimization:**
+- Potential VPC endpoint savings: $50-200/month
+- Gateway endpoints (FREE) eliminate costs for S3/DynamoDB traffic
+- Interface endpoints only recommended when ROI is positive
+- Regional pricing ensures accurate projections
+
+**Traffic Visibility:**
+- See exactly where bandwidth is going
+- HTTP/TLS hostname resolution shows application-level detail (when available)
+- Multiple destination IPs per hostname consolidated (CDN load balancing)
+- Source IP drill-down shows which hosts consume bandwidth
+
+**Smart Recommendations:**
+- Break-even analysis prevents wasteful endpoint deployments
+- Alternative suggestions for sub-threshold traffic
+- Regional considerations for cross-region traffic
+- Data-driven decisions backed by actual traffic analysis
+
+**Easy to Use:**
+- Works with existing CloudWatch logs
+- No additional AWS configuration needed
+- Caching reduces CloudWatch charges
+- CSV export for offline analysis and reporting
+
+### Use Cases
+
+**Monthly Cost Review:**
+- Identify new VPC endpoint opportunities
+- Track traffic pattern changes
+- Verify existing endpoints still cost-effective
+- Report savings to management
+
+**Architecture Optimization:**
+- Discover cross-region traffic patterns
+- Identify candidates for S3 Cross-Region Replication
+- Find opportunities for DynamoDB Global Tables
+- Optimize service placement decisions
+
+**Troubleshooting High Bills:**
+- See which destinations consume most bandwidth
+- Identify unexpected traffic patterns
+- Correlate costs with specific applications
+- Drill down to source IPs for accountability
+
+> 💰 **ROI**: Analysis costs $0.50-$2.00 but identifies $50-200/month in potential savings. The query cost is recovered quickly!
+
+---
+
 ## Rule Group Analysis
 
 ![Rule Analysis](images/analysis.png)
@@ -2430,6 +2631,9 @@ The application follows a modular architecture with specialized managers:
 - **stateful_rule_importer.py**: AWS rule group imports *(v1.18.7)*
 - **rule_analyzer.py**: Conflict detection and reporting
 - **rule_usage_analyzer.py**: CloudWatch usage analytics *(v1.27.0)*
+- **traffic_analyzer.py**: Traffic cost analysis backend *(v1.29.0)* ⭐ NEW
+- **traffic_analyzer_ui.py**: Traffic cost analysis UI *(v1.29.0)* ⭐ NEW
+- **aws_service_detector.py**: AWS service identification from IP addresses *(v1.29.0)* ⭐ NEW
 - **flow_tester.py**: Network traffic simulation
 - **advanced_editor.py**: IDE-style text editor *(v1.19.0)*
 - **revision_manager.py**: Per-rule revision history and rollback *(v1.25.0)*

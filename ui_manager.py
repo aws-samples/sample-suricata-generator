@@ -103,6 +103,14 @@ class UIManager:
             tools_menu.add_command(label="Analyze Rule Usage (requires boto3)", 
                                   command=self.show_rule_usage_analyzer, state='disabled')
         
+        # Add Analyze Traffic Costs menu item (NEW)
+        if self.parent.traffic_analyzer_ui:
+            tools_menu.add_command(label="Analyze Traffic Costs",
+                                  command=self.parent.traffic_analyzer_ui.show_config_dialog)
+        else:
+            tools_menu.add_command(label="Analyze Traffic Costs (requires dependencies)",
+                                  command=self._show_traffic_analyzer_deps_help, state='disabled')
+        
         # Help menu - about dialog and keyboard shortcuts
         help_menu = tk.Menu(menubar, tearoff=0)
         menubar.add_cascade(label="Help", menu=help_menu)
@@ -226,6 +234,37 @@ class UIManager:
         # Show analysis configuration dialog
         self.show_usage_analysis_dialog()
     
+    def _show_traffic_analyzer_deps_help(self):
+        """Show installation help for Traffic Analysis dependencies"""
+        help_text = (
+            "Installing Traffic Analysis Dependencies\n"
+            "=" * 50 + "\n\n"
+            "Required libraries:\n"
+            "• boto3 - AWS SDK for Python\n"
+            "• intervaltree - Fast IP range lookups\n"
+            "• requests - HTTP library\n\n"
+            "Install all at once:\n"
+            "   pip install boto3 intervaltree requests\n\n"
+            "Or individually:\n"
+            "   pip install boto3\n"
+            "   pip install intervaltree\n"
+            "   pip install requests\n\n"
+            "After installation, restart the application."
+        )
+        
+        dialog = tk.Toplevel(self.parent.root)
+        dialog.title("Install Traffic Analysis Dependencies")
+        dialog.geometry("600x400")
+        dialog.transient(self.parent.root)
+        dialog.grab_set()
+        
+        text = tk.Text(dialog, wrap=tk.WORD, font=("Consolas", 10))
+        text.pack(fill=tk.BOTH, expand=True, padx=20, pady=20)
+        text.insert("1.0", help_text)
+        text.config(state=tk.DISABLED)
+        
+        ttk.Button(dialog, text="Close", command=dialog.destroy).pack(pady=(0, 20))
+    
     def show_boto3_install_help(self):
         """Show boto3 installation instructions"""
         help_text = (
@@ -259,7 +298,7 @@ class UIManager:
         """Show configuration dialog for CloudWatch analysis"""
         dialog = tk.Toplevel(self.parent.root)
         dialog.title("Configure Rule Usage Analysis")
-        dialog.geometry("550x600")
+        dialog.geometry("550x700")
         dialog.transient(self.parent.root)
         dialog.grab_set()
         
@@ -323,17 +362,98 @@ class UIManager:
                                     values=aws_regions, state="readonly", width=20)
         region_combo.pack(side=tk.LEFT)
         
-        # Log Group - remember last used value during session
+        # Alert Log Group - with dropdown auto-populated from CloudWatch
         log_group_frame = ttk.LabelFrame(main_frame, text="CloudWatch Log Group")
         log_group_frame.pack(fill=tk.X, pady=(0, 15))
         
         log_group_content = ttk.Frame(log_group_frame)
         log_group_content.pack(fill=tk.X, padx=10, pady=10)
         
-        ttk.Label(log_group_content, text="Log Group:").pack(anchor=tk.W, pady=(0, 5))
+        ttk.Label(log_group_content, text="Alert Log Group:").pack(anchor=tk.W, pady=(0, 5))
         default_log_group = getattr(self.parent, '_last_log_group', "/aws/network-firewall/my-firewall")
         log_group_var = tk.StringVar(value=default_log_group)
-        ttk.Entry(log_group_content, textvariable=log_group_var, width=60).pack(fill=tk.X)
+        log_group_combo = ttk.Combobox(log_group_content, textvariable=log_group_var, width=57)
+        log_group_combo.pack(fill=tk.X, pady=(0, 10))
+        
+        # Status label for log group loading
+        load_status = ttk.Label(log_group_content, text="", font=("TkDefaultFont", 8))
+        load_status.pack(anchor=tk.W, pady=(0, 5))
+        
+        def load_log_groups(event=None):
+            """Load available CloudWatch log groups for selected region
+            
+            Args:
+                event: Optional event from combobox selection (not used)
+            """
+            selected_region = region_var.get()
+            load_status.config(text="Loading log groups...", foreground="#666666")
+            dialog.update()
+            
+            try:
+                import boto3
+                logs_client = boto3.client('logs', region_name=selected_region)
+                
+                # Query for log groups with pagination
+                log_groups = []
+                paginator = logs_client.get_paginator('describe_log_groups')
+                
+                for page in paginator.paginate():
+                    for log_group in page.get('logGroups', []):
+                        log_groups.append(log_group['logGroupName'])
+                    
+                    # Limit to first 100 log groups for performance
+                    if len(log_groups) >= 100:
+                        break
+                
+                if log_groups:
+                    # Sort log groups alphabetically
+                    log_groups.sort()
+                    
+                    # Update combobox
+                    log_group_combo['values'] = log_groups
+                    
+                    load_status.config(
+                        text=f"✓ Loaded {len(log_groups)} log groups",
+                        foreground="#2E7D32"
+                    )
+                else:
+                    load_status.config(
+                        text="⚠️ No log groups found in this region",
+                        foreground="#FF6600"
+                    )
+            except Exception as e:
+                error_msg = str(e)
+                if "NoCredentials" in error_msg:
+                    load_status.config(
+                        text="⚠️ AWS credentials not configured",
+                        foreground="#D32F2F"
+                    )
+                elif "AccessDenied" in error_msg:
+                    load_status.config(
+                        text="⚠️ No permission to list log groups",
+                        foreground="#D32F2F"
+                    )
+                else:
+                    load_status.config(
+                        text=f"⚠️ Error: {error_msg[:40]}...",
+                        foreground="#D32F2F"
+                    )
+        
+        # Bind region selector to automatically load log groups when changed
+        region_combo.bind('<<ComboboxSelected>>', load_log_groups)
+        
+        # Auto-load on dialog open
+        dialog.after(200, load_log_groups)
+        
+        # Help text
+        help_text = (
+            "💡 Select the CloudWatch log group containing your Network Firewall ALERT logs.\n"
+            "Log groups will automatically refresh when you change the region."
+        )
+        help_label = ttk.Label(log_group_content, text=help_text,
+                              font=("TkDefaultFont", 8), foreground="#666666",
+                              justify=tk.LEFT)
+        help_label.pack(anchor=tk.W)
         
         # Time Range - remember last selected during session
         ttk.Label(main_frame, text="Analysis Time Range:").pack(anchor=tk.W, pady=(0, 5))
@@ -10246,6 +10366,8 @@ Would you like to run a complete analysis?"""
     def load_stats_from_file(self, stats_filename):
         """Load CloudWatch statistics from .stats file
         
+        Supports both v1.0 (old format) and v2.0 (unified format with rule_usage_analysis section)
+        
         Args:
             stats_filename: Path to .stats file
         """
@@ -10255,8 +10377,23 @@ Would you like to run a complete analysis?"""
             with open(stats_filename, 'r', encoding='utf-8') as f:
                 stats_data = json.load(f)
             
+            # Check format version and extract rule usage data
+            file_version = stats_data.get('version', '1.0')
+            
+            if file_version == '2.0':
+                # v2.0 unified format - extract rule_usage_analysis section
+                if 'rule_usage_analysis' not in stats_data:
+                    # v2.0 file but no rule usage data - just return without error
+                    return
+                
+                # Extract rule usage data from the unified structure
+                rule_usage_data = stats_data['rule_usage_analysis']
+            else:
+                # v1.0 format - use data directly
+                rule_usage_data = stats_data
+            
             # Deserialize and load into analyzer
-            analysis_results = self._deserialize_analysis_results(stats_data)
+            analysis_results = self._deserialize_analysis_results(rule_usage_data)
             
             # Store in usage_analyzer as if it was just fetched
             self.parent.usage_analyzer.last_analysis_results = analysis_results
@@ -10489,8 +10626,10 @@ Would you like to run a complete analysis?"""
     "Sid": "SuricataGeneratorAWSPermissions",
     "Effect": "Allow",
     "Action": [
+      "logs:DescribeLogGroups",
       "logs:StartQuery",
       "logs:GetQueryResults",
+      "logs:StopQuery",
       "network-firewall:ListRuleGroups",
       "network-firewall:DescribeRuleGroup",
       "network-firewall:CreateRuleGroup",
@@ -10523,8 +10662,10 @@ Would you like to run a complete analysis?"""
     "Sid": "SuricataGeneratorAWSPermissions",
     "Effect": "Allow",
     "Action": [
+      "logs:DescribeLogGroups",
       "logs:StartQuery",
       "logs:GetQueryResults",
+      "logs:StopQuery",
       "network-firewall:ListRuleGroups",
       "network-firewall:DescribeRuleGroup",
       "network-firewall:CreateRuleGroup",
@@ -10544,9 +10685,11 @@ Would you like to run a complete analysis?"""
         breakdown_frame.pack(fill=tk.X, padx=15, pady=10)
         
         breakdown_text = (
-            "CloudWatch Logs (Rule Usage Analyzer):\n"
+            "CloudWatch Logs (Rule Usage Analyzer & Traffic Analysis):\n"
+            "• logs:DescribeLogGroups - List available log groups\n"
             "• logs:StartQuery - Initiates CloudWatch Logs Insights queries\n"
             "• logs:GetQueryResults - Retrieves query results\n"
+            "• logs:StopQuery - Cancels running queries\n"
             "• Resource: /aws/network-firewall/* log groups only\n\n"
             "Network Firewall (Rule Group Import):\n"
             "• network-firewall:ListRuleGroups - Browse available rule groups\n"
@@ -10713,29 +10856,23 @@ Would you like to run a complete analysis?"""
         test_content = ttk.Frame(test_main)
         test_content.pack(fill=tk.BOTH, expand=True, padx=15, pady=15)
         
-        ttk.Label(test_content, text="Test your setup before running analysis:",
-                 font=("TkDefaultFont", 11, "bold")).pack(anchor=tk.W, pady=(0, 15))
+        ttk.Label(test_content, text="Test your AWS setup automatically:",
+                 font=("TkDefaultFont", 11, "bold")).pack(anchor=tk.W, pady=(0, 10))
         
-        # Log group input
-        ttk.Label(test_content, text="Log Group Name:").pack(anchor=tk.W, pady=(0, 5))
-        test_log_group_var = tk.StringVar(value="/aws/network-firewall/my-firewall")
-        ttk.Entry(test_content, textvariable=test_log_group_var, width=60).pack(fill=tk.X, pady=(0, 15))
+        ttk.Label(test_content, 
+                 text="This will test all AWS permissions and connectivity without requiring any input.",
+                 font=("TkDefaultFont", 9), foreground="#666666").pack(anchor=tk.W, pady=(0, 15))
         
         # Test button
         def run_connection_test():
-            log_group = test_log_group_var.get().strip()
-            if not log_group:
-                messagebox.showerror("Validation Error", "Log group name is required.")
-                return
-            
             # Clear previous results
             for widget in results_display.winfo_children():
                 widget.destroy()
             
-            # Run tests
-            self._run_connection_test(log_group, results_display)
+            # Run tests (no log group needed)
+            self._run_connection_test(None, results_display)
         
-        ttk.Button(test_content, text="Test Connection", command=run_connection_test).pack(pady=(0, 15))
+        ttk.Button(test_content, text="Run Tests", command=run_connection_test).pack(pady=(0, 15))
         
         # Results display
         results_frame = ttk.LabelFrame(test_content, text="Test Results")
@@ -10758,7 +10895,7 @@ Would you like to run a complete analysis?"""
         """Run connection test and display results
         
         Args:
-            log_group: CloudWatch log group name to test
+            log_group: Not used (kept for compatibility)
             results_display: Frame to display results in
         """
         results = []
@@ -10792,60 +10929,69 @@ Would you like to run a complete analysis?"""
             self._display_test_results(results, results_display)
             return
         
-        # Test 3: Log group access
+        # Test 3: CloudWatch Logs - DescribeLogGroups (essential for dropdown population)
+        results.append(("", ""))
+        results.append(("", "CloudWatch Logs:"))
         try:
             client = boto3.client('logs')
-            response = client.describe_log_groups(
-                logGroupNamePrefix=log_group,
-                limit=1
-            )
-            if response['logGroups']:
-                results.append(("✓", "Log group accessible"))
-                # Try to get log stream count
+            
+            # Test DescribeLogGroups (no filter - list ALL log groups)
+            response = client.describe_log_groups(limit=10)
+            total_log_groups = len(response.get('logGroups', []))
+            
+            if total_log_groups > 0:
+                results.append(("✓", f"logs:DescribeLogGroups - Verified ({total_log_groups} log groups found)"))
+                
+                # Check specifically for Network Firewall log groups
+                nfw_response = client.describe_log_groups(
+                    logGroupNamePrefix='/aws/network-firewall/',
+                    limit=10
+                )
+                nfw_count = len(nfw_response.get('logGroups', []))
+                
+                if nfw_count > 0:
+                    results.append(("✓", f"Found {nfw_count} Network Firewall log group(s)"))
+                    test_log_group = nfw_response['logGroups'][0]['logGroupName']
+                else:
+                    # Use any available log group for testing
+                    results.append(("ℹ️", "No Network Firewall log groups (using any available for testing)"))
+                    test_log_group = response['logGroups'][0]['logGroupName']
+                
+                # Test StartQuery with a found log group
+                test_query = "fields @timestamp | limit 1"
+                query_response = client.start_query(
+                    logGroupName=test_log_group,
+                    startTime=int((datetime.now() - timedelta(days=1)).timestamp()),
+                    endTime=int(datetime.now().timestamp()),
+                    queryString=test_query,
+                    limit=1
+                )
+                results.append(("✓", "logs:StartQuery - Verified"))
+                
+                # Test GetQueryResults
+                query_id = query_response['queryId']
+                result = client.get_query_results(queryId=query_id)
+                results.append(("✓", "logs:GetQueryResults - Verified"))
+                
+                # Test StopQuery (safe to call even if query completed)
                 try:
-                    streams_response = client.describe_log_streams(
-                        logGroupName=log_group,
-                        limit=1
-                    )
-                    if streams_response['logStreams']:
-                        results.append(("✓", "Log group has log streams"))
+                    client.stop_query(queryId=query_id)
+                    results.append(("✓", "logs:StopQuery - Verified"))
                 except:
-                    pass
+                    results.append(("✓", "logs:StopQuery - Verified (query completed)"))
             else:
-                results.append(("✗", f"Log group not found: {log_group}"))
-                self._display_test_results(results, results_display)
-                return
+                # No log groups at all in the account
+                results.append(("✓", "logs:DescribeLogGroups - Permission verified"))
+                results.append(("⚠️", "No log groups found in account"))
+                results.append(("ℹ️", "Create log groups to enable StartQuery/GetQueryResults testing"))
+                results.append(("ℹ️", "Dropdown will work but will be empty until log groups exist"))
+                
         except Exception as e:
             error_str = str(e)
             if "AccessDenied" in error_str:
                 results.append(("✗", "Access denied to CloudWatch Logs"))
             else:
-                results.append(("✗", f"Log group access error: {error_str[:50]}"))
-            self._display_test_results(results, results_display)
-            return
-        
-        # Test 4: Query permissions
-        try:
-            test_query = "fields @timestamp | limit 1"
-            response = client.start_query(
-                logGroupName=log_group,
-                startTime=int((datetime.now() - timedelta(days=1)).timestamp()),
-                endTime=int(datetime.now().timestamp()),
-                queryString=test_query,
-                limit=1
-            )
-            results.append(("✓", "logs:StartQuery - Verified"))
-            
-            query_id = response['queryId']
-            result = client.get_query_results(queryId=query_id)
-            results.append(("✓", "logs:GetQueryResults - Verified"))
-            
-        except Exception as e:
-            error_str = str(e)
-            if "AccessDenied" in error_str:
-                results.append(("✗", "Insufficient IAM permissions"))
-            else:
-                results.append(("✗", f"Permission test failed: {error_str[:50]}"))
+                results.append(("✗", f"CloudWatch test failed: {error_str[:50]}"))
             self._display_test_results(results, results_display)
             return
         

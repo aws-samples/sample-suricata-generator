@@ -60,6 +60,13 @@ class SuricataRuleGenerator:
         self.template_manager = TemplateManager()  # Template management for rule generation
         self.usage_analyzer = RuleUsageAnalyzer(debug_force_pagination=False)  # Rule usage analyzer for CloudWatch integration
         
+        # Traffic Analysis & VPC Endpoints (optional - requires boto3, intervaltree, requests)
+        try:
+            from traffic_analyzer_ui import TrafficAnalyzerUI
+            self.traffic_analyzer_ui = TrafficAnalyzerUI(self)
+        except ImportError:
+            self.traffic_analyzer_ui = None  # Dependencies not installed
+        
         # Load user configuration
         self.load_config()
         

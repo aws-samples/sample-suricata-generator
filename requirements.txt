@@ -20,3 +20,23 @@ wxPython>=4.2.0
 #
 # Note: wxPython is only required if you want to use the Advanced Editor feature.
 # The main tkinter-based application works without it.
+
+# AWS Integration (optional)
+# Required for AWS features:
+# - Tools > Analyze Rule Usage (CloudWatch Logs analysis)
+# - File > Import Rule Group (from AWS Network Firewall)
+# - File > Export Rule Group (to AWS Network Firewall)
+# - Tools > Traffic Analysis & VPC Endpoints (NEW)
+boto3>=1.26.0
+
+# Traffic Analysis & VPC Endpoints (optional)
+# Required for Tools > Traffic Analysis & VPC Endpoints feature
+# Provides fast IP-to-service mapping and AWS IP range analysis
+intervaltree>=3.1.0
+requests>=2.28.0
+
+# Installation for AWS features:
+# pip install boto3 intervaltree requests
+#
+# Note: AWS features are optional. The core application works without them.
+# You'll be prompted to install these packages when accessing AWS features.

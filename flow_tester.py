@@ -639,8 +639,13 @@ class FlowTester:
                         return True
                 # For other undefined variables, be conservative and match all
                 return True
+            # Ensure resolved value is a string (not a dict or other type)
+            if isinstance(resolved, dict):
+                # Variable resolved to a dict - this shouldn't happen in normal flow
+                # Be conservative and match all
+                return True
             # Recursively resolve the variable value
-            return self._ip_matches_network(ip, resolved)
+            return self._ip_matches_network(ip, str(resolved))
         
         # Handle negation
         if network_spec.startswith('!'):

@@ -207,6 +207,7 @@ class AdvancedEditorWx(wx.Dialog):
         self.editor.AutoCompSetIgnoreCase(True)  # Case-insensitive matching
         self.editor.AutoCompSetMaxHeight(15)  # Show up to 15 items
         self.editor.AutoCompSetMaxWidth(0)  # Auto width
+        self.editor.AutoCompSetSeparator(ord('\n'))  # Use newline as separator to support spaces in suggestions
         
         # Configure bracket matching styles
         self.editor.StyleSetForeground(stc.STC_STYLE_BRACELIGHT, wx.Colour(0, 150, 0))
@@ -957,6 +958,32 @@ class AdvancedEditorWx(wx.Dialog):
                                                      f"Invalid value '{user_value}' for keyword '{keyword}'"))
                     
                     current_pos += len(statement) + 1
+            
+            # Check aws_url_category is used with http protocol only
+            if 'aws_url_category:' in content_section.lower():
+                if len(token_positions) > 1:
+                    _, _, protocol = token_positions[1]
+                    if protocol.lower() != 'http':
+                        start_pos = content_section.lower().find('aws_url_category:')
+                        end_pos = start_pos + len('aws_url_category')
+                        errors.append((
+                            paren_start + 1 + start_pos,
+                            paren_start + 1 + end_pos,
+                            "aws_url_category only supports HTTP protocol"
+                        ))
+            
+            # Check aws_domain_category is used with tls or http protocol
+            if 'aws_domain_category:' in content_section.lower():
+                if len(token_positions) > 1:
+                    _, _, protocol = token_positions[1]
+                    if protocol.lower() not in ['tls', 'http']:
+                        start_pos = content_section.lower().find('aws_domain_category:')
+                        end_pos = start_pos + len('aws_domain_category')
+                        errors.append((
+                            paren_start + 1 + start_pos,
+                            paren_start + 1 + end_pos,
+                            "aws_domain_category only supports TLS or HTTP protocols"
+                        ))
         
         # Check for undefined variables
         var_pattern = r'([\$@]\w+)'
@@ -1352,8 +1379,8 @@ class AdvancedEditorWx(wx.Dialog):
                 filtered = suggestions
             
             if filtered:
-                # Show autocomplete (separator is space)
-                self.editor.AutoCompShow(word_len, ' '.join(filtered))
+                # Show autocomplete (separator is newline to support spaces in category names)
+                self.editor.AutoCompShow(word_len, '\n'.join(filtered))
     
     def get_current_word(self):
         """Get the word currently being typed"""
@@ -1619,7 +1646,9 @@ class AdvancedEditorWx(wx.Dialog):
                     else:
                         suggestions.append(syntax if syntax else f"{name}:")
         
-        return suggestions[:20]  # Limit to 20 suggestions
+        # Return all keywords (no arbitrary limit)
+        # The autocomplete will filter based on what user is typing
+        return suggestions
     
     def on_update_ui(self, event):
         """UI update - update status bar and check bracket matching"""

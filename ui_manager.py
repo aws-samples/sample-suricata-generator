@@ -5615,8 +5615,9 @@ Would you like to run a complete analysis?"""
         self.message_entry.grid(row=3, column=1, columnspan=4, sticky=tk.W+tk.E, pady=(5, 0))
         self.message_entry.bind("<Button-3>", self.on_entry_right_click)
         
-        # Row 5: Content Keywords
+        # Row 5: Content Keywords (no button)
         ttk.Label(fields_frame, text="Content Keywords:").grid(row=4, column=0, sticky=tk.W, padx=(0, 5), pady=(5, 0))
+        
         self.content_var = tk.StringVar()
         self.content_entry = ttk.Entry(fields_frame, textvariable=self.content_var, width=50)
         self.content_entry.grid(row=4, column=1, columnspan=4, sticky=tk.W+tk.E, pady=(5, 0))
@@ -5665,6 +5666,15 @@ Would you like to run a complete analysis?"""
         ttk.Button(buttons_container, text="Insert Rule", command=self.parent.insert_rule).pack(side=tk.LEFT, padx=(0, 5))
         ttk.Button(buttons_container, text="Insert Comment", command=self.parent.insert_comment).pack(side=tk.LEFT, padx=(0, 5))
         ttk.Button(buttons_container, text="Insert Domain Allow Rule", command=self.parent.domain_importer.insert_domain_rule).pack(side=tk.LEFT, padx=(0, 5))
+        
+        # Insert Category button (enabled only for HTTP/TLS protocols)
+        self.insert_category_button = ttk.Button(buttons_container, text="Insert Category...", 
+                                                 command=self.show_category_picker_dialog,
+                                                 width=15)
+        self.insert_category_button.pack(side=tk.LEFT, padx=(0, 5))
+        
+        # Store button reference in parent for protocol validation
+        self.parent.insert_category_button = self.insert_category_button
         
         # Move buttons on the right side
         ttk.Button(buttons_container, text="Move Up", command=self.parent.move_rule_up).pack(side=tk.RIGHT, padx=(5, 0))
@@ -5940,6 +5950,10 @@ Would you like to run a complete analysis?"""
                     self.content_var.set(rule.content)
                     self.sid_var.set(str(rule.sid))
                     self.rev_var.set(str(rule.rev))
+                    
+                    # Update category button state based on the newly selected rule's protocol
+                    # This ensures button reflects current selection, not previous selection
+                    self.update_category_button_state()
                     
                     # Populate revision dropdown if tracking enabled
                     if self.parent.tracking_enabled:
@@ -7901,6 +7915,9 @@ Would you like to run a complete analysis?"""
     
     def on_protocol_changed(self, event):
         """Handle protocol dropdown change to update Content Keywords for new rules only"""
+        # Update Insert Category button state
+        self.update_category_button_state()
+        
         # Only update Content Keywords when creating a new rule (not editing existing)
         if (self.parent.selected_rule_index is not None and 
             self.parent.selected_rule_index >= len(self.parent.rules)):
@@ -7947,7 +7964,7 @@ Would you like to run a complete analysis?"""
         # Create dialog (increased height to show all elements)
         dialog = tk.Toplevel(self.parent.root)
         dialog.title("Test Flow Against Rules")
-        dialog.geometry("950x900")
+        dialog.geometry("950x920")
         dialog.transient(self.parent.root)
         dialog.grab_set()
         dialog.resizable(True, True)
@@ -7970,6 +7987,13 @@ Would you like to run a complete analysis?"""
                                     font=("TkDefaultFont", 8, "italic"),
                                     foreground="#666666")
         disclaimer_label.pack(pady=(0, 2))
+        
+        # Category rules note
+        category_note_label = ttk.Label(main_frame,
+                                       text="Rules with categories are excluded from the test and shown in Orange in the results.",
+                                       font=("TkDefaultFont", 8, "italic"),
+                                       foreground="#666666")
+        category_note_label.pack(pady=(0, 2))
         
         # Version
         from version import get_flow_tester_version
@@ -8132,6 +8156,7 @@ Would you like to run a complete analysis?"""
         results_tree.tag_configure("reject", foreground="#7B1FA2")
         results_tree.tag_configure("alert", foreground="#1976D2")
         results_tree.tag_configure("final", background="#FFFF99")
+        results_tree.tag_configure("unknown", foreground="#FF8800", background="#FFF8E1")  # Orange text on light yellow
         
         # Vertical scrollbar
         results_scrollbar = ttk.Scrollbar(results_container, orient=tk.VERTICAL, command=results_tree.yview)
@@ -8235,27 +8260,50 @@ Would you like to run a complete analysis?"""
             # Display flow diagram with results context (including matched rule info)
             self._draw_flow_diagram(flow_canvas, results['flow_steps'], results['final_action'], results.get('final_rule'))
             
-            # Display matched rules in evaluation order (combine action rules and alert rules)
+            # Display matched rules in evaluation order (combine action rules, alert rules, and unknown rules)
             all_matches = results['matched_rules'] + results['alert_rules']
+            unknown_rules = results.get('unknown_rules', [])
             
-            if all_matches:
-                # Sort by line number to show in evaluation order
-                all_matches.sort(key=lambda m: m['line'])
+            # Combine all matches with unknown rules for display
+            all_matches_with_unknown = all_matches + unknown_rules
+            
+            if all_matches_with_unknown:
+                # Deduplicate by line number (in case a rule was added multiple times)
+                seen_lines = set()
+                deduplicated_matches = []
+                for match in all_matches_with_unknown:
+                    line_num = match['line']
+                    if line_num not in seen_lines:
+                        seen_lines.add(line_num)
+                        deduplicated_matches.append(match)
                 
-                for match in all_matches:
+                # Sort by line number to show in evaluation order
+                deduplicated_matches.sort(key=lambda m: m['line'])
+                all_matches_with_unknown = deduplicated_matches
+                
+                for match in all_matches_with_unknown:
                     rule = match['rule']
                     
                     # Extract rule details (everything after protocol and direction)
                     # Format: src_net src_port direction dst_net dst_port (content)
                     rule_details = f"{rule.src_net} {rule.src_port} {rule.direction} {rule.dst_net} {rule.dst_port}"
                     if rule.content:
-                        rule_details += f" ({rule.content})"
+                        # Truncate long content for readability
+                        content_display = rule.content[:80] + "..." if len(rule.content) > 80 else rule.content
+                        rule_details += f" ({content_display})"
                     
-                    # Only use action color tag (no yellow highlight)
-                    tags = [match['action'].lower()]
+                    # Check if this is an unknown rule (couldn't be evaluated)
+                    if match.get('status') == 'unknown':
+                        # Unknown rule - show with special indicator
+                        tags = ['unknown']
+                        type_display = f"{match['type']} (UNKNOWN)"
+                    else:
+                        # Regular matched rule - use action color tag
+                        tags = [match['action'].lower()]
+                        type_display = match['type']
                     
                     results_tree.insert("", tk.END, 
-                                      values=(match['line'], match['type'], match['action'].upper(), 
+                                      values=(match['line'], type_display, match['action'].upper(), 
                                              rule.protocol.upper(), rule_details),
                                       tags=tuple(tags))
             else:
@@ -8355,12 +8403,13 @@ Would you like to run a complete analysis?"""
         # Build list of arrows to draw (TCP handshake steps + matched rules)
         arrows_to_draw = []
         
-        # Get all matched rules (action rules + alert rules)
+        # Get all matched rules (action rules + alert rules + unknown rules)
         all_matched = results.get('matched_rules', []) + results.get('alert_rules', [])
+        unknown_matched = results.get('unknown_rules', [])
         step_mapping = results.get('step_rule_mapping', {})
         
-        # If no rules matched, don't draw any arrows - just show source/destination boxes
-        if not all_matched:
+        # If no rules matched (including unknown), don't draw any arrows - just show source/destination boxes
+        if not all_matched and not unknown_matched:
             return
         
         # TCP and application layer protocols over TCP (HTTP, TLS) use handshake + established phases
@@ -8369,17 +8418,29 @@ Would you like to run a complete analysis?"""
             handshake_rules = [m for m in all_matched if m.get('phase') == 'handshake']
             established_rules = [m for m in all_matched if m.get('phase') == 'established']
             
-            # TCP handshake steps with their matching rules (use first handshake rule for all 3 steps)
-            handshake_match = handshake_rules[0] if handshake_rules else None
+            # TCP handshake steps with their matching rules
+            # Use granular step mapping to show correct rule for each direction
+            handshake_to_server_rules = step_mapping.get('handshake_to_server', [])
+            handshake_to_client_rules = step_mapping.get('handshake_to_client', [])
+            
+            # Get rules for each direction (use first match for each direction)
+            to_server_match = handshake_to_server_rules[0] if handshake_to_server_rules else None
+            to_client_match = handshake_to_client_rules[0] if handshake_to_client_rules else None
+            
+            # Fallback to generic handshake rules if direction-specific not found
+            if not to_server_match and not to_client_match:
+                handshake_match = handshake_rules[0] if handshake_rules else None
+                to_server_match = handshake_match
+                to_client_match = handshake_match
             
             # Check if handshake was blocked (DROP or REJECT)
-            handshake_blocked = (handshake_match and 
-                                handshake_match['action'].lower() in ['drop', 'reject'])
+            handshake_blocked = ((to_server_match and to_server_match['action'].lower() in ['drop', 'reject']) or
+                                (to_client_match and to_client_match['action'].lower() in ['drop', 'reject']))
             
-            # Step 1: SYN (->)
+            # Step 1: SYN (->) uses to_server rule
             arrows_to_draw.append({
                 'type': 'tcp_syn',
-                'match': handshake_match,
+                'match': to_server_match,
                 'description': 'SYN',
                 'direction': '->',
                 'step_name': 'TCP SYN'
@@ -8387,19 +8448,19 @@ Would you like to run a complete analysis?"""
             
             # Only show SYN-ACK and ACK if handshake was NOT blocked
             if not handshake_blocked:
-                # Step 2: SYN-ACK (<-)
+                # Step 2: SYN-ACK (<-) uses to_client rule
                 arrows_to_draw.append({
                     'type': 'tcp_synack',
-                    'match': handshake_match,  # Same rule (stateful)
+                    'match': to_client_match,
                     'description': 'SYN-ACK',
                     'direction': '<-',
                     'step_name': 'TCP SYN-ACK'
                 })
                 
-                # Step 3: ACK (->)
+                # Step 3: ACK (->) uses to_server rule
                 arrows_to_draw.append({
                     'type': 'tcp_ack',
-                    'match': handshake_match,  # Same rule (stateful)
+                    'match': to_server_match,
                     'description': 'ACK',
                     'direction': '->',
                     'step_name': 'TCP ACK'
@@ -12205,3 +12266,341 @@ Would you like to run a complete analysis?"""
         ttk.Label(example_content, text=example_text,
                  font=("TkDefaultFont", 8), justify=tk.LEFT,
                  foreground="#666666").pack(anchor=tk.W)
+    
+    def show_category_picker_dialog(self):
+        """Show category picker dialog for inserting AWS category keywords
+        
+        Auto-detects keyword type based on current protocol:
+        - HTTP protocol → User can choose aws_url_category OR aws_domain_category
+        - TLS protocol → aws_domain_category only
+        - Other protocols → Button should be disabled (handled by update_category_button_state)
+        """
+        import json
+        
+        # Get current protocol
+        protocol = self.protocol_var.get().lower()
+        
+        # Validate protocol (should only be HTTP or TLS)
+        if protocol not in ['http', 'tls']:
+            messagebox.showinfo("Protocol Required",
+                "The Insert Category feature only works with HTTP or TLS protocols.\n\n"
+                "Current protocol: " + protocol.upper() + "\n\n"
+                "Please select HTTP or TLS protocol first.")
+            return
+        
+        # For HTTP protocol, let user choose between URL and Domain categories
+        # For TLS protocol, only Domain category is available
+        keyword_type = None
+        keyword_name = None
+        protocol_note = None
+        
+        if protocol == 'http':
+            # HTTP supports both aws_url_category and aws_domain_category
+            # Show radio buttons to let user choose
+            keyword_type = 'aws_url_category'  # Default for HTTP
+            keyword_name = "URL Category"
+            protocol_note = "HTTP protocol - URL inspection"
+        else:  # tls
+            # TLS only supports aws_domain_category
+            keyword_type = 'aws_domain_category'
+            keyword_name = "Domain Category"
+            protocol_note = "TLS protocol - SNI inspection"
+        
+        # Load category list from content_keywords.json
+        try:
+            script_dir = os.path.dirname(os.path.abspath(__file__))
+            keywords_file = os.path.join(script_dir, 'content_keywords.json')
+            
+            with open(keywords_file, 'r', encoding='utf-8') as f:
+                keywords_data = json.load(f)
+            
+            # Find the keyword definition for the selected type
+            keyword_def = next((kw for kw in keywords_data.get('keywords', [])
+                               if kw.get('name') == keyword_type), None)
+            
+            if not keyword_def or not keyword_def.get('values'):
+                messagebox.showerror("Data Error",
+                    f"Category data not found in content_keywords.json for {keyword_type}")
+                return
+            
+            categories = keyword_def['values']
+            
+        except FileNotFoundError:
+            messagebox.showerror("File Not Found",
+                "content_keywords.json not found.\n\n"
+                "This file contains the category definitions.")
+            return
+        except json.JSONDecodeError as e:
+            messagebox.showerror("JSON Error",
+                f"Error parsing content_keywords.json:\n\n{str(e)}")
+            return
+        except Exception as e:
+            messagebox.showerror("Error",
+                f"Failed to load categories:\n\n{str(e)}")
+            return
+        
+        # Create dialog
+        dialog = tk.Toplevel(self.parent.root)
+        dialog.title("Insert Category")
+        dialog.geometry("600x750")
+        dialog.transient(self.parent.root)
+        dialog.grab_set()
+        dialog.resizable(True, True)
+        
+        # Center dialog
+        dialog.geometry("+%d+%d" % (
+            self.parent.root.winfo_rootx() + 150,
+            self.parent.root.winfo_rooty() + 100
+        ))
+        
+        main_frame = ttk.Frame(dialog)
+        main_frame.pack(fill=tk.BOTH, expand=True, padx=20, pady=20)
+        
+        # Title
+        ttk.Label(main_frame, text="Insert Category Keyword",
+                 font=("TkDefaultFont", 12, "bold")).pack(pady=(0, 10))
+        
+        # Keyword type section
+        if protocol == 'http':
+            # HTTP: Show radio buttons to choose between URL and Domain categories
+            type_frame = ttk.LabelFrame(main_frame, text="Keyword Type (select one)")
+            type_frame.pack(fill=tk.X, pady=(0, 15))
+            
+            type_content = ttk.Frame(type_frame)
+            type_content.pack(padx=10, pady=10)
+            
+            keyword_type_var = tk.StringVar(value='aws_url_category')
+            
+            # Radio button for URL Category
+            url_radio = ttk.Radiobutton(type_content, 
+                text="URL Category (aws_url_category)",
+                variable=keyword_type_var, 
+                value='aws_url_category')
+            url_radio.pack(anchor=tk.W, pady=2)
+            ttk.Label(type_content, 
+                text="Evaluates complete URLs and domains (requires TLS decryption for HTTPS)",
+                font=("TkDefaultFont", 8), foreground="#666666").pack(anchor=tk.W, padx=(25, 0), pady=(0, 5))
+            
+            # Radio button for Domain Category
+            domain_radio = ttk.Radiobutton(type_content, 
+                text="Domain Category (aws_domain_category)",
+                variable=keyword_type_var, 
+                value='aws_domain_category')
+            domain_radio.pack(anchor=tk.W, pady=2)
+            ttk.Label(type_content, 
+                text="Domain-level inspection only (works with HTTP host header)",
+                font=("TkDefaultFont", 8), foreground="#666666").pack(anchor=tk.W, padx=(25, 0))
+        else:
+            # TLS: Only aws_domain_category available (auto-detected)
+            type_frame = ttk.LabelFrame(main_frame, text="Keyword Type (auto-detected from protocol)")
+            type_frame.pack(fill=tk.X, pady=(0, 15))
+            
+            type_content = ttk.Frame(type_frame)
+            type_content.pack(padx=10, pady=10)
+            
+            ttk.Label(type_content, text=f"{keyword_name}",
+                     font=("TkDefaultFont", 10, "bold")).pack(anchor=tk.W)
+            ttk.Label(type_content, text=f"({protocol_note})",
+                     font=("TkDefaultFont", 9), foreground="#666666").pack(anchor=tk.W)
+            
+            keyword_type_var = None  # Not needed for TLS
+        
+        # Category selection section
+        select_frame = ttk.LabelFrame(main_frame, text="Select Category")
+        select_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 15))
+        
+        select_content = ttk.Frame(select_frame)
+        select_content.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+        
+        # Search box
+        ttk.Label(select_content, text="Search categories:").pack(anchor=tk.W, pady=(0, 5))
+        
+        search_var = tk.StringVar()
+        search_entry = ttk.Entry(select_content, textvariable=search_var, width=50)
+        search_entry.pack(fill=tk.X, pady=(0, 10))
+        
+        # Category listbox with scrollbar (multi-select enabled)
+        list_frame = ttk.Frame(select_content)
+        list_frame.pack(fill=tk.BOTH, expand=True)
+        
+        category_listbox = tk.Listbox(list_frame, height=12, font=("TkDefaultFont", 10),
+                                      selectmode=tk.EXTENDED)  # Enable multi-select
+        scrollbar = ttk.Scrollbar(list_frame, orient=tk.VERTICAL, command=category_listbox.yview)
+        category_listbox.configure(yscrollcommand=scrollbar.set)
+        
+        category_listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        
+        # Populate with all categories initially
+        all_categories = sorted(categories)
+        for category in all_categories:
+            category_listbox.insert(tk.END, category)
+        
+        # Search filter functionality
+        def filter_categories(*args):
+            search_term = search_var.get().lower()
+            category_listbox.delete(0, tk.END)
+            
+            for category in all_categories:
+                if search_term in category.lower():
+                    category_listbox.insert(tk.END, category)
+        
+        search_var.trace('w', filter_categories)
+        
+        # Preview section
+        preview_frame = ttk.LabelFrame(main_frame, text="Preview")
+        preview_frame.pack(fill=tk.X, pady=(0, 15))
+        
+        preview_text = tk.Text(preview_frame, height=3, wrap=tk.WORD,
+                              font=("Consolas", 9), bg="#F5F5F5", state=tk.DISABLED)
+        preview_text.pack(fill=tk.X, padx=10, pady=10)
+        
+        # Update preview when selection changes
+        def update_preview(event=None):
+            selection = category_listbox.curselection()
+            if not selection:
+                preview_text.config(state=tk.NORMAL)
+                preview_text.delete("1.0", tk.END)
+                preview_text.insert("1.0", "Select one or more categories to see preview...")
+                preview_text.config(state=tk.DISABLED)
+                return
+            
+            # Get all selected categories
+            selected_categories = [category_listbox.get(idx) for idx in selection]
+            
+            # Determine which keyword type to use in preview
+            if protocol == 'http' and keyword_type_var:
+                current_keyword_type = keyword_type_var.get()
+            else:
+                current_keyword_type = keyword_type
+            
+            # Generate preview: single keyword with comma-separated categories
+            categories_csv = ','.join(selected_categories)
+            preview_content = f"flow:to_server; {current_keyword_type}:{categories_csv}"
+            
+            preview_text.config(state=tk.NORMAL)
+            preview_text.delete("1.0", tk.END)
+            preview_text.insert("1.0", preview_content)
+            preview_text.config(state=tk.DISABLED)
+        
+        category_listbox.bind('<<ListboxSelect>>', update_preview)
+        
+        # If HTTP protocol, also bind radio button changes to update preview
+        if protocol == 'http' and keyword_type_var:
+            url_radio.configure(command=update_preview)
+            domain_radio.configure(command=update_preview)
+        
+        # Initial preview
+        if category_listbox.size() > 0:
+            category_listbox.selection_set(0)
+            update_preview()
+        
+        # Help text
+        help_text = "Tip: Hold Ctrl to select multiple categories | This will be inserted into the Content Keywords field"
+        ttk.Label(main_frame, text=help_text,
+                 font=("TkDefaultFont", 8, "italic"), foreground="#666666").pack(pady=(0, 10))
+        
+        # Buttons
+        button_frame = ttk.Frame(main_frame)
+        button_frame.pack()
+        
+        def on_insert():
+            selection = category_listbox.curselection()
+            if not selection:
+                messagebox.showwarning("No Selection",
+                    "Please select at least one category to insert.")
+                return
+            
+            # Get all selected categories
+            selected_categories = [category_listbox.get(idx) for idx in selection]
+            
+            # Determine which keyword type to use (HTTP allows choice, TLS is fixed)
+            if protocol == 'http' and keyword_type_var:
+                selected_keyword_type = keyword_type_var.get()
+                selected_keyword_name = "URL Category" if selected_keyword_type == 'aws_url_category' else "Domain Category"
+            else:
+                selected_keyword_type = keyword_type
+                selected_keyword_name = keyword_name
+            
+            # Build content string: single keyword with comma-separated categories
+            # Example: aws_domain_category:Child Abuse,Command and Control,Career and Job Search
+            categories_csv = ','.join(selected_categories)
+            content_to_insert = f"{selected_keyword_type}:{categories_csv}"
+            
+            # Get current content
+            current_content = self.content_var.get().strip()
+            
+            # Smart insertion logic for content
+            if not current_content:
+                # Content field is empty - add flow:to_server prefix
+                new_content = f"flow:to_server; {content_to_insert}"
+            else:
+                # Content field has existing content - append with proper formatting
+                # Ensure existing content ends with semicolon
+                if not current_content.endswith(';'):
+                    current_content += ';'
+                new_content = f"{current_content} {content_to_insert}"
+            
+            # Update content field
+            self.content_var.set(new_content)
+            
+            # Auto-populate message field if empty
+            current_message = self.message_var.get().strip()
+            if not current_message:
+                # Get current action and map to appropriate verb
+                action = self.action_var.get().lower()
+                action_verb_map = {
+                    'pass': 'Allow',
+                    'alert': 'Alert on',
+                    'drop': 'Block',
+                    'reject': 'Reject'
+                }
+                action_verb = action_verb_map.get(action, 'Block')
+                
+                # Format message based on number of categories
+                if len(selected_categories) == 1:
+                    message = f"{action_verb} {selected_categories[0]}"
+                elif len(selected_categories) == 2:
+                    message = f"{action_verb} {selected_categories[0]} and {selected_categories[1]}"
+                else:
+                    # Multiple categories - list first two and add count
+                    message = f"{action_verb} {selected_categories[0]}, {selected_categories[1]}, and {len(selected_categories) - 2} more"
+                
+                self.message_var.set(message)
+            
+            dialog.destroy()
+            
+            # Show success message
+            category_count = len(selected_categories)
+            if category_count == 1:
+                messagebox.showinfo("Category Inserted",
+                    f"Inserted {selected_keyword_name}: {selected_categories[0]}\n\n"
+                    "Category keyword has been added to Content Keywords field.\n"
+                    "Message field has been auto-populated (you can edit it).\n"
+                    "Click 'Save Changes' to save the rule.")
+            else:
+                messagebox.showinfo("Categories Inserted",
+                    f"Inserted {category_count} {selected_keyword_name}s\n\n"
+                    "Category keywords have been added to Content Keywords field.\n"
+                    "Message field has been auto-populated (you can edit it).\n"
+                    "Click 'Save Changes' to save the rule.")
+        
+        ttk.Button(button_frame, text="Insert", command=on_insert, width=10).pack(side=tk.LEFT, padx=5)
+        ttk.Button(button_frame, text="Cancel", command=dialog.destroy, width=10).pack(side=tk.LEFT, padx=5)
+        
+        # Focus on search box
+        search_entry.focus()
+    
+    def update_category_button_state(self):
+        """Update Insert Category button state based on protocol selection
+        
+        Should be called whenever protocol changes to enable/disable the button.
+        Button is only enabled for HTTP and TLS protocols.
+        """
+        if hasattr(self, 'insert_category_button'):
+            protocol = self.protocol_var.get().lower()
+            
+            if protocol in ['http', 'tls']:
+                self.insert_category_button.config(state='normal')
+            else:
+                self.insert_category_button.config(state='disabled')

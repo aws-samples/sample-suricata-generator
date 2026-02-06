@@ -49,6 +49,7 @@ class FlowTester:
         results = {
             'matched_rules': [],
             'alert_rules': [],
+            'unknown_rules': [],  # Rules that couldn't be evaluated (category-based, geoip, etc.)
             'final_action': None,
             'final_rule': None,
             'flow_steps': [],
@@ -331,7 +332,7 @@ class FlowTester:
     
     def _rule_matches_flow(self, rule: SuricataRule, src_ip: str, src_port: str,
                           dst_ip: str, dst_port: str, protocol: str, direction: str,
-                          flow_state: str = 'all', url: str = None) -> bool:
+                          flow_state: str = 'all', url: str = None) -> Tuple[bool, str]:
         """Check if a rule matches the given flow
         
         Args:
@@ -345,61 +346,71 @@ class FlowTester:
             flow_state: Which flow state to test ('handshake', 'established', or 'all')
             
         Returns:
-            True if rule matches the flow
+            Tuple of (matches: bool, status: str) where status is 'match', 'no_match', or 'unknown'
         """
         content = (rule.content or '').lower()
         
-        # Skip rules with geoip keywords (Phase 1 doesn't support geolocation)
+        # Check protocol compatibility FIRST
+        # This ensures TLS rules don't match TCP traffic, even if they have aws_domain_category
+        if not self._protocol_matches(rule.protocol, protocol):
+            return (False, 'no_match')
+        
+        # Check flow state compatibility
+        if not self._flow_state_matches(rule, flow_state):
+            return (False, 'no_match')
+        
+        # Skip rules with geoip keywords (doesn't support geolocation)
         if 'geoip:' in content:
-            return False
+            return (False, 'no_match')
         
         # Skip rules with flowbits:isnotset dependencies (cannot simulate flowbits state)
         # This is consistent with rule analyzer behavior which skips flowbits-dependent rules
         if 'flowbits:isnotset' in content:
-            return False
+            return (False, 'no_match')
         
-        # Check flow state compatibility
-        if not self._flow_state_matches(rule, flow_state):
-            return False
-        
-        # Check protocol compatibility
-        if not self._protocol_matches(rule.protocol, protocol):
-            return False
+        # Check for AWS category keywords - these require external database lookup
+        # We cannot determine if the URL/domain matches the category without AWS API access
+        # IMPORTANT: This check comes AFTER protocol matching, so TLS rules won't be marked
+        # as 'unknown' when testing against plain TCP traffic (they'll be 'no_match' instead)
+        if 'aws_url_category:' in content or 'aws_domain_category:' in content:
+            # Rule uses category filtering - we cannot evaluate this
+            # Mark as 'unknown' so it can be displayed in the flow diagram
+            return (False, 'unknown')
         
         # Check ip_proto keyword constraints (e.g., ip_proto:!TCP)
         if not self._check_ip_proto_keyword(rule, protocol):
-            return False
+            return (False, 'no_match')
         
         # Check direction compatibility
         if not self._direction_matches(rule.direction, direction):
-            return False
+            return (False, 'no_match')
         
         # Check source network
         if not self._ip_matches_network(src_ip, rule.src_net):
-            return False
+            return (False, 'no_match')
         
         # Check destination network
         if not self._ip_matches_network(dst_ip, rule.dst_net):
-            return False
+            return (False, 'no_match')
         
         # Check source port
         if not self._port_matches(src_port, rule.src_port):
-            return False
+            return (False, 'no_match')
         
         # Check destination port
         if not self._port_matches(dst_port, rule.dst_port):
-            return False
+            return (False, 'no_match')
         
         # Check app-layer-protocol enforcement (must be done before URL matching)
         if not self._check_app_layer_protocol(rule, protocol):
-            return False
+            return (False, 'no_match')
         
         # For application layer protocols, check application layer keywords
         if protocol.lower() in ['http', 'tls', 'https'] and url:
             if not self._check_application_layer_match(rule, protocol, url):
-                return False
+                return (False, 'no_match')
         
-        return True
+        return (True, 'match')
     
     def _test_flow_phase(self, classified_rules: Dict, src_ip: str, src_port: str,
                         dst_ip: str, dst_port: str, protocol: str, direction: str,
@@ -441,64 +452,194 @@ class FlowTester:
         flow_scope_rule = None
         flow_scope_line = None
         
-        # Collect all rules in LINE ORDER (not type order)
-        all_rules = []
+        # AWS Network Firewall / Suricata processes rules by TYPE first, then LINE ORDER within each type
+        # Processing order:
+        # 1. SIG_TYPE_IPONLY rules (in line order)
+        # 2. SIG_TYPE_PKT rules (in line order) 
+        # 3. SIG_TYPE_APPLAYER rules (in line order)
+        # 
+        # IMPORTANT: When a flow-scope action (IPONLY or APPLAYER) is taken, processing stops entirely.
+        # Only packet-scope actions (PKT) allow continuation to subsequent tiers.
+        # This is because flow-scope actions apply to the entire flow and supersede packet-level processing.
+        
+        # Track if a flow-scope action has been taken (stops all further processing)
+        flow_scope_action_taken = False
+        
+        # Process each type tier in order
         for rule_type in ['SIG_TYPE_IPONLY', 'SIG_TYPE_PKT', 'SIG_TYPE_APPLAYER']:
-            for rule_info in classified_rules.get(rule_type, []):
-                all_rules.append({
+            # If a flow-scope action was already taken in a previous tier, stop all processing
+            if flow_scope_action_taken:
+                break
+            
+            # Track if action was taken in THIS tier (and the direction of that action)
+            tier_action_taken = False
+            tier_action_direction = None  # Track direction for handshake bidirectional handling
+            
+            # Get rules of this type and sort by line number
+            type_rules = classified_rules.get(rule_type, [])
+            type_rules_sorted = sorted(type_rules, key=lambda x: x['line'])
+            
+            # Process rules of this type in line order
+            for rule_info in type_rules_sorted:
+                # If action was taken in THIS tier, check if we should stop
+                if tier_action_taken:
+                    # During handshake phase, allow rules in OPPOSITE direction to still match
+                    # This handles bidirectional TCP handshake (client->server SYN, server->client SYN-ACK)
+                    if flow_state == 'handshake' and tier_action_direction:
+                        # Check if this rule is for the opposite direction
+                        rule_content = (rule_info['rule'].content or '').lower()
+                        rule_direction_kw = None
+                        if 'to_server' in rule_content:
+                            rule_direction_kw = 'to_server'
+                        elif 'to_client' in rule_content:
+                            rule_direction_kw = 'to_client'
+                        
+                        # If rule has opposite direction keyword, allow it to be evaluated
+                        if rule_direction_kw and rule_direction_kw != tier_action_direction:
+                            pass  # Continue processing this rule
+                        else:
+                            break  # Same direction or no direction keyword, stop
+                    else:
+                        break  # Not handshake phase, stop processing tier
+                
+                # Build rule_info dict with scope
+                rule_info_dict = {
                     'rule': rule_info['rule'],
                     'line': rule_info['line'],
                     'type': rule_type,
                     'scope': action_scopes[rule_type]
-                })
-        
-        # Sort by line number to process in file order
-        all_rules.sort(key=lambda x: x['line'])
-        
-        # Process rules in line order, tracking actions at each scope
-        for rule_info in all_rules:
-            rule = rule_info['rule']
-            rule_type = rule_info['type']
-            scope = rule_info['scope']
-            
-            # Test if this rule matches the flow in this state
-            if self._rule_matches_flow(rule, src_ip, src_port, dst_ip, dst_port,
-                                      protocol, direction, flow_state, url):
-                match_info = {
-                    'rule': rule,
-                    'line': rule_info['line'],
-                    'type': rule_type,
-                    'action': rule.action,
-                    'phase': flow_state,
-                    'scope': scope  # Track action scope
                 }
                 
-                # Separate alert rules from action rules
-                if rule.action.lower() == 'alert':
-                    # Always include alert rules
-                    results['alert_rules'].append(match_info)
+                rule = rule_info_dict['rule']
+                scope = rule_info_dict['scope']
+                
+                # Test if this rule matches the flow in this state
+                # For rules with to_client keyword, we need to test with reversed src/dst
+                # since to_client means return traffic (server->client)
+                rule_content_lower = (rule.content or '').lower()
+                if 'to_client' in rule_content_lower and 'to_server' not in rule_content_lower:
+                    # This is a to_client rule - test with reversed src/dst for return traffic
+                    matches, status = self._rule_matches_flow(rule, dst_ip, dst_port, src_ip, src_port,
+                                                             protocol, direction, flow_state, url)
+                else:
+                    # Normal rule or to_server rule - test with original src/dst
+                    matches, status = self._rule_matches_flow(rule, src_ip, src_port, dst_ip, dst_port,
+                                                             protocol, direction, flow_state, url)
+                
+                # Handle rules that couldn't be evaluated (category-based, etc.)
+                if status == 'unknown':
+                    # Collect unknown rules for display in flow diagram
+                    unknown_info = {
+                        'rule': rule,
+                        'line': rule_info_dict['line'],
+                        'type': rule_type,
+                        'action': rule.action,
+                        'phase': flow_state,
+                        'scope': scope,
+                        'status': 'unknown'
+                    }
+                    results['unknown_rules'].append(unknown_info)
                     
                     # Track for step mapping
                     if flow_state not in results['step_rule_mapping']:
                         results['step_rule_mapping'][flow_state] = []
-                    results['step_rule_mapping'][flow_state].append(match_info)
-                else:
-                    # Action rules (pass/drop/reject)
-                    if rule.action.lower() in ['pass', 'drop', 'reject']:
-                        if scope == 'PACKET':
-                            # Packet-scope action: only set if not already set
-                            # (first match wins within packet scope)
-                            if packet_scope_action is None:
-                                packet_scope_action = rule.action.lower()
-                                packet_scope_rule = match_info
-                                packet_scope_line = rule_info['line']
-                        else:  # scope == 'FLOW'
-                            # Flow-scope action: only set if not already set
-                            # (first match wins within flow scope)
-                            if flow_scope_action is None:
-                                flow_scope_action = rule.action.lower()
-                                flow_scope_rule = match_info
-                                flow_scope_line = rule_info['line']
+                    results['step_rule_mapping'][flow_state].append(unknown_info)
+                    continue  # Don't process as matched rule
+                
+                if matches:
+                    match_info = {
+                        'rule': rule,
+                        'line': rule_info_dict['line'],
+                        'type': rule_type,
+                        'action': rule.action,
+                        'phase': flow_state,
+                        'scope': scope  # Track action scope
+                    }
+                    
+                    # Separate alert rules from action rules
+                    if rule.action.lower() == 'alert':
+                        # Include alert rules (only if no action has been taken yet)
+                        results['alert_rules'].append(match_info)
+                        
+                        # Track for step mapping
+                        if flow_state not in results['step_rule_mapping']:
+                            results['step_rule_mapping'][flow_state] = []
+                        results['step_rule_mapping'][flow_state].append(match_info)
+                    else:
+                        # Action rules (pass/drop/reject)
+                        if rule.action.lower() in ['pass', 'drop', 'reject']:
+                            if scope == 'PACKET':
+                                # Packet-scope action: only set if not already set for this direction
+                                # During handshake, we track both to_server and to_client separately
+                                if packet_scope_action is None:
+                                    packet_scope_action = rule.action.lower()
+                                    packet_scope_rule = match_info
+                                    packet_scope_line = rule_info_dict['line']
+                                    tier_action_taken = True  # Mark that an action has been taken in this tier
+                                    
+                                    # Track direction for handshake bidirectional handling
+                                    if flow_state == 'handshake':
+                                        rule_content = (rule.content or '').lower()
+                                        if 'to_server' in rule_content:
+                                            tier_action_direction = 'to_server'
+                                        elif 'to_client' in rule_content:
+                                            tier_action_direction = 'to_client'
+                                    
+                                    # Add to matched_rules immediately for handshake rules
+                                    # (so both to_server and to_client rules are captured)
+                                    if flow_state == 'handshake':
+                                        results['matched_rules'].append(match_info)
+                                        
+                                        # Store with direction-specific key for flow diagram granularity
+                                        rule_content = (rule.content or '').lower()
+                                        if 'to_server' in rule_content:
+                                            step_key = 'handshake_to_server'
+                                        elif 'to_client' in rule_content:
+                                            step_key = 'handshake_to_client'
+                                        else:
+                                            step_key = 'handshake'
+                                        
+                                        if step_key not in results['step_rule_mapping']:
+                                            results['step_rule_mapping'][step_key] = []
+                                        results['step_rule_mapping'][step_key].append(match_info)
+                                        
+                                        # Also store under generic 'handshake' key for compatibility
+                                        if 'handshake' not in results['step_rule_mapping']:
+                                            results['step_rule_mapping']['handshake'] = []
+                                        if match_info not in results['step_rule_mapping']['handshake']:
+                                            results['step_rule_mapping']['handshake'].append(match_info)
+                                elif packet_scope_action is not None and flow_state == 'handshake':
+                                    # Second matching rule in handshake phase (opposite direction)
+                                    # Add to matched_rules but don't change the action
+                                    results['matched_rules'].append(match_info)
+                                    
+                                    # Store with direction-specific key for flow diagram granularity
+                                    rule_content = (rule.content or '').lower()
+                                    if 'to_server' in rule_content:
+                                        step_key = 'handshake_to_server'
+                                    elif 'to_client' in rule_content:
+                                        step_key = 'handshake_to_client'
+                                    else:
+                                        step_key = 'handshake'
+                                    
+                                    if step_key not in results['step_rule_mapping']:
+                                        results['step_rule_mapping'][step_key] = []
+                                    results['step_rule_mapping'][step_key].append(match_info)
+                                    
+                                    # Also store under generic 'handshake' key for compatibility
+                                    if 'handshake' not in results['step_rule_mapping']:
+                                        results['step_rule_mapping']['handshake'] = []
+                                    if match_info not in results['step_rule_mapping']['handshake']:
+                                        results['step_rule_mapping']['handshake'].append(match_info)
+                            else:  # scope == 'FLOW'
+                                # Flow-scope action: only set if not already set
+                                # (first match wins within flow scope)
+                                if flow_scope_action is None:
+                                    flow_scope_action = rule.action.lower()
+                                    flow_scope_rule = match_info
+                                    flow_scope_line = rule_info_dict['line']
+                                    tier_action_taken = True  # Mark that an action has been taken in this tier
+                                    flow_scope_action_taken = True  # Flow-scope action stops ALL tier processing
         
         # Determine final action using Suricata 8.0+ deconfliction logic with line order
         # Per bug fix: https://redmine.openinfosecfoundation.org/issues/7653
@@ -527,13 +668,15 @@ class FlowTester:
             # No action rules matched this phase, continue to next phase
             return True
         
-        # Store the final matching rule
-        results['matched_rules'].append(final_rule)
-        
-        # Track step-to-rule mapping
-        if flow_state not in results['step_rule_mapping']:
-            results['step_rule_mapping'][flow_state] = []
-        results['step_rule_mapping'][flow_state].append(final_rule)
+        # Store the final matching rule (if not already stored during handshake)
+        # Handshake rules are stored immediately to capture both directions
+        if flow_state != 'handshake':
+            results['matched_rules'].append(final_rule)
+            
+            # Track step-to-rule mapping
+            if flow_state not in results['step_rule_mapping']:
+                results['step_rule_mapping'][flow_state] = []
+            results['step_rule_mapping'][flow_state].append(final_rule)
         
         # Update final action
         results['final_action'] = final_action.upper()
@@ -554,8 +697,16 @@ class FlowTester:
         """
         content = (rule.content or '').lower()
         
-        # If no flow keywords, rule matches established connections only (not handshake)
-        # In real Suricata, rules without flow keywords match regular packets (established connections)
+        # Determine rule type to understand flow state matching
+        rule_type = self.rule_analyzer.get_suricata_rule_type(rule)
+        
+        # IPONLY rules (no keywords) match at IP packet level regardless of flow state
+        # They process before flow state is even established
+        if rule_type == 'SIG_TYPE_IPONLY' and 'flow:' not in content:
+            return True  # IPONLY rules without flow keywords match ALL flow states
+        
+        # If no flow keywords (but not IPONLY), rule matches established connections only (not handshake)
+        # In real Suricata, PKT/APPLAYER rules without flow keywords match regular packets (established connections)
         if 'flow:' not in content:
             return flow_state == 'established' or flow_state == 'all'
         
@@ -578,20 +729,30 @@ class FlowTester:
         return True
     
     def _protocol_matches(self, rule_protocol: str, flow_protocol: str) -> bool:
-        """Check if rule protocol matches flow protocol"""
+        """Check if rule protocol matches flow protocol
+        
+        Important: Application layer rules (TLS, HTTP, etc.) only match when the 
+        flow protocol is EXPLICITLY that application layer protocol, not just the
+        underlying transport (TCP). A TLS rule does NOT match plain TCP traffic.
+        """
         rule_proto = rule_protocol.lower()
         flow_proto = flow_protocol.lower()
         
         if rule_proto == flow_proto:
             return True
         
-        # 'ip' matches all protocols
+        # 'ip' matches all protocols (IP is the base layer for everything)
         if rule_proto == 'ip':
             return True
         
-        # TCP matches application protocols over TCP
+        # TCP rule matches application protocols over TCP
+        # (TCP rule is less specific, so it matches more specific TLS/HTTP traffic)
         if rule_proto == 'tcp' and flow_proto in ['http', 'tls', 'https', 'smtp', 'ftp', 'ssh']:
             return True
+        
+        # Application layer rules (TLS, HTTP, etc.) do NOT match plain TCP
+        # They require explicit application layer protocol detection
+        # A TLS rule will not match "tcp" traffic - it requires "tls" to be specified
         
         return False
     
@@ -637,13 +798,14 @@ class FlowTester:
                     else:
                         # No HOME_NET defined, EXTERNAL_NET matches all
                         return True
-                # For other undefined variables, be conservative and match all
-                return True
-            # Ensure resolved value is a string (not a dict or other type)
+                # For other undefined variables, return False (no match)
+                return False
+            # Handle dictionary format from .var files (with "definition" and "description" keys)
             if isinstance(resolved, dict):
-                # Variable resolved to a dict - this shouldn't happen in normal flow
-                # Be conservative and match all
-                return True
+                resolved = resolved.get('definition', '')
+                if not resolved or not isinstance(resolved, str):
+                    # If definition is missing or not a string, variable is invalid
+                    return False
             # Recursively resolve the variable value
             return self._ip_matches_network(ip, str(resolved))
         
@@ -733,9 +895,15 @@ class FlowTester:
         if rule_port.startswith(('$', '@')):
             resolved = self.variables.get(rule_port, '')
             if not resolved:
-                # Variable not defined, be conservative and match
-                return True
-            rule_port = resolved
+                # Variable not defined, return False (no match)
+                return False
+            # Handle dictionary format from .var files (with "definition" and "description" keys)
+            if isinstance(resolved, dict):
+                resolved = resolved.get('definition', '')
+                if not resolved or not isinstance(resolved, str):
+                    # If definition is missing or not a string, variable is invalid
+                    return False
+            rule_port = str(resolved)
         
         # Remove brackets if present
         if rule_port.startswith('[') and rule_port.endswith(']'):

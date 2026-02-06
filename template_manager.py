@@ -358,6 +358,39 @@ class TemplateManager:
                         rules.append(rule)
                         current_sid += 1
                 
+                # CATEGORY MULTI-SELECT: generates ONE rule with comma-separated categories
+                # Example: user selects Malware, Phishing → generates "aws_domain_category:Malware,Phishing"
+                # This is more efficient than separate rules per category
+                elif multi_select_param['type'] == 'multi_select_category':
+                    if selections:
+                        # Combine all selected categories into comma-separated string
+                        category_list = ','.join(selections)
+                        
+                        # Create modified param_values with combined categories
+                        category_param_values = param_values.copy()
+                        category_param_values['CATEGORY'] = category_list
+                        
+                        # Generate CATEGORY_DISPLAY for message (match ui_manager.py format)
+                        if len(selections) == 1:
+                            # Single category: "Malware"
+                            category_param_values['CATEGORY_DISPLAY'] = selections[0]
+                        elif len(selections) == 2:
+                            # Two categories: "Malware and Phishing"
+                            category_param_values['CATEGORY_DISPLAY'] = f"{selections[0]} and {selections[1]}"
+                        else:
+                            # Three or more: "Malware, Phishing, and 1 more"
+                            category_param_values['CATEGORY_DISPLAY'] = f"{selections[0]}, {selections[1]}, and {len(selections) - 2} more"
+                        
+                        rule_template = template['rules'][0]
+                        rule = self.create_rule_from_template(
+                            rule_template,
+                            category_param_values,
+                            None,
+                            current_sid
+                        )
+                        rules.append(rule)
+                        current_sid += 1
+                
                 # MULTI-RULE TEMPLATES: Generate multiple rule variants per selection
                 # Example: Protocol enforcement template has 2 rules (one for port check, one for protocol check)
                 # If user selects 3 protocols, we generate 6 rules total (2 per protocol)
@@ -605,9 +638,9 @@ class TemplateManager:
         """
         for param in template.get('parameters', []):
             param_type = param.get('type', '')
-            # Check for multi-select types (including new HTTP Security types)
+            # Check for multi-select types (including new category type)
             if param_type in ['multi_select_port', 'multi_select_protocol', 'multi_select_country', 
-                             'multi_select_extension', 'multi_select_method']:
+                             'multi_select_extension', 'multi_select_method', 'multi_select_category']:
                 return param
             # Legacy support for multi_select flag
             if param.get('multi_select', False):

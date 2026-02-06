@@ -3945,6 +3945,10 @@ class SuricataRuleGenerator:
         self.sid_var.set("100")
         if hasattr(self, 'rev_var'):
             self.rev_var.set("1")
+        
+        # Update Insert Category button state after setting protocol to tcp
+        if hasattr(self, 'ui_manager'):
+            self.ui_manager.update_category_button_state()
     
     def save_rule_changes(self):
         """Save changes from editor fields to the selected rule or insert new rule
@@ -4005,6 +4009,36 @@ class SuricataRuleGenerator:
                     return
                 if not self.validate_port_field(self.dst_port_var.get(), "Dest Port"):
                     return
+                
+                # Validate category keywords match protocol
+                content = self.content_var.get().lower()
+                protocol = self.protocol_var.get().lower()
+                
+                if 'aws_url_category:' in content:
+                    if protocol != 'http':
+                        messagebox.showerror(
+                            "Protocol/Category Mismatch",
+                            f"The Content Keywords field contains aws_url_category which only supports HTTP protocol.\n\n"
+                            f"Current protocol: {protocol.upper()}\n"
+                            f"Required protocol: HTTP\n\n"
+                            f"Please either:\n"
+                            f"1. Change protocol to HTTP\n"
+                            f"2. Remove aws_url_category from Content Keywords"
+                        )
+                        return
+                
+                if 'aws_domain_category:' in content:
+                    if protocol not in ['tls', 'http']:
+                        messagebox.showerror(
+                            "Protocol/Category Mismatch",
+                            f"The Content Keywords field contains aws_domain_category which only supports TLS or HTTP protocols.\n\n"
+                            f"Current protocol: {protocol.upper()}\n"
+                            f"Required protocols: TLS or HTTP\n\n"
+                            f"Please either:\n"
+                            f"1. Change protocol to TLS or HTTP\n"
+                            f"2. Remove aws_domain_category from Content Keywords"
+                        )
+                        return
                 
                 # Create new rule from editor fields
                 options_parts = []
@@ -4269,6 +4303,36 @@ class SuricataRuleGenerator:
                     return
                 if not self.validate_port_field(self.dst_port_var.get(), "Dest Port"):
                     return
+                
+                # Validate category keywords match protocol
+                content = self.content_var.get().lower()
+                protocol = self.protocol_var.get().lower()
+                
+                if 'aws_url_category:' in content:
+                    if protocol != 'http':
+                        messagebox.showerror(
+                            "Protocol/Category Mismatch",
+                            f"The Content Keywords field contains aws_url_category which only supports HTTP protocol.\n\n"
+                            f"Current protocol: {protocol.upper()}\n"
+                            f"Required protocol: HTTP\n\n"
+                            f"Please either:\n"
+                            f"1. Change protocol to HTTP\n"
+                            f"2. Remove aws_url_category from Content Keywords"
+                        )
+                        return
+                
+                if 'aws_domain_category:' in content:
+                    if protocol not in ['tls', 'http']:
+                        messagebox.showerror(
+                            "Protocol/Category Mismatch",
+                            f"The Content Keywords field contains aws_domain_category which only supports TLS or HTTP protocols.\n\n"
+                            f"Current protocol: {protocol.upper()}\n"
+                            f"Required protocols: TLS or HTTP\n\n"
+                            f"Please either:\n"
+                            f"1. Change protocol to TLS or HTTP\n"
+                            f"2. Remove aws_domain_category from Content Keywords"
+                        )
+                        return
                 
                 # Check if any non-message fields changed to determine if rev should increment
                 original_rule = self.rules[self.selected_rule_index]
@@ -4670,6 +4734,8 @@ class SuricataRuleGenerator:
             self.selected_rule_index = len(self.rules)  # Set insertion point
             self.ui_manager.show_rule_editor()  # Show editor fields
             self.set_default_editor_values()  # Populate with defaults
+            # Update category button state after setting default protocol to tcp
+            self.ui_manager.update_category_button_state()
             # Auto-generate next available SID for convenience
             max_sid = max([rule.sid for rule in self.rules if not getattr(rule, 'is_comment', False) and not getattr(rule, 'is_blank', False)], default=99)
             self.sid_var.set(str(max_sid + 1))
@@ -7271,6 +7337,246 @@ class SuricataRuleGenerator:
                 
                 # Store the selected_countries dict in param_widgets for collection
                 param_widgets[param_name] = selected_countries
+            
+            elif param_type == 'multi_select_category':
+                # Multi-select category parameter with group dropdown and two-panel layout
+                # Category selector frame
+                selector_frame = ttk.Frame(param_container)
+                selector_frame.pack(fill=tk.X, padx=10, pady=5)
+                
+                ttk.Label(selector_frame, text="Category Group:", font=("TkDefaultFont", 9, "bold")).pack(side=tk.LEFT, padx=(0, 10))
+                
+                # Group dropdown
+                group_var = tk.StringVar()
+                
+                # Group categories by category_group metadata
+                groups = {}
+                for option in param['options']:
+                    group = option.get('category_group', 'Other')
+                    if group not in groups:
+                        groups[group] = []
+                    groups[group].append(option)
+                
+                # Define group order
+                group_list = ['Security Threats', 'Restricted Content', 'Productivity', 'Financial', 
+                             'Business/Professional', 'Lifestyle']
+                # Only include groups that have categories
+                group_list = [g for g in group_list if g in groups]
+                group_var.set(group_list[0] if group_list else "")
+                
+                group_combo = ttk.Combobox(selector_frame, textvariable=group_var,
+                                          values=group_list, state="readonly", width=25)
+                group_combo.pack(side=tk.LEFT)
+                
+                # Category count label
+                count_label = ttk.Label(selector_frame, text="", font=("TkDefaultFont", 8), foreground="#666666")
+                count_label.pack(side=tk.LEFT, padx=(10, 0))
+                
+                # Two-panel layout
+                panels_frame = ttk.Frame(param_container)
+                panels_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
+                
+                # LEFT PANEL: Categories in selected group
+                left_panel = ttk.LabelFrame(panels_frame, text="Categories in Selected Group")
+                left_panel.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 5))
+                
+                # Scrollable canvas for left panel
+                left_canvas = tk.Canvas(left_panel)
+                left_scrollbar = ttk.Scrollbar(left_panel, orient=tk.VERTICAL, command=left_canvas.yview)
+                left_content = ttk.Frame(left_canvas)
+                
+                left_content.bind(
+                    "<Configure>",
+                    lambda e: left_canvas.configure(scrollregion=left_canvas.bbox("all"))
+                )
+                
+                left_canvas.create_window((0, 0), window=left_content, anchor="nw")
+                left_canvas.configure(yscrollcommand=left_scrollbar.set)
+                
+                left_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=5, pady=5)
+                left_scrollbar.pack(side=tk.RIGHT, fill=tk.Y, pady=5)
+                
+                # Enable mousewheel scrolling for left panel
+                def on_left_mousewheel(event):
+                    left_canvas.yview_scroll(int(-1*(event.delta/120)), "units")
+                
+                left_canvas.bind("<Enter>", lambda e: left_canvas.bind("<MouseWheel>", on_left_mousewheel))
+                left_canvas.bind("<Leave>", lambda e: left_canvas.unbind("<MouseWheel>"))
+                
+                # RIGHT PANEL: Selected categories summary
+                right_panel = ttk.LabelFrame(panels_frame, text="Selected Categories")
+                right_panel.pack(side=tk.RIGHT, fill=tk.BOTH, expand=False, padx=(5, 0))
+                right_panel.config(width=250)
+                
+                # Selected count label
+                selected_count_label = ttk.Label(right_panel, text="0 selected", 
+                                                font=("TkDefaultFont", 9, "bold"), foreground="#1976D2")
+                selected_count_label.pack(pady=(5, 5))
+                
+                # Scrollable canvas for right panel
+                right_canvas = tk.Canvas(right_panel, width=230)
+                right_scrollbar = ttk.Scrollbar(right_panel, orient=tk.VERTICAL, command=right_canvas.yview)
+                right_content = ttk.Frame(right_canvas)
+                
+                right_content.bind(
+                    "<Configure>",
+                    lambda e: right_canvas.configure(scrollregion=right_canvas.bbox("all"))
+                )
+                
+                right_canvas.create_window((0, 0), window=right_content, anchor="nw")
+                right_canvas.configure(yscrollcommand=right_scrollbar.set)
+                
+                right_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=5, pady=5)
+                right_scrollbar.pack(side=tk.RIGHT, fill=tk.Y, pady=5)
+                
+                # Enable mousewheel scrolling for right panel
+                def on_right_mousewheel(event):
+                    right_canvas.yview_scroll(int(-1*(event.delta/120)), "units")
+                
+                right_canvas.bind("<Enter>", lambda e: right_canvas.bind("<MouseWheel>", on_right_mousewheel))
+                right_canvas.bind("<Leave>", lambda e: right_canvas.unbind("<MouseWheel>"))
+                
+                # Global storage for selections across ALL groups
+                selected_categories = {}  # {category_value: {'label': ..., 'group': ...}}
+                
+                # Store current group checkboxes
+                current_checkboxes = {}
+                
+                def update_selected_panel():
+                    """Update right panel showing all selected categories"""
+                    # Clear existing items
+                    for widget in right_content.winfo_children():
+                        widget.destroy()
+                    
+                    # Update count
+                    count = len(selected_categories)
+                    selected_count_label.config(text=f"{count} selected")
+                    
+                    if not selected_categories:
+                        ttk.Label(right_content, text="No categories selected",
+                                 font=("TkDefaultFont", 8, "italic"), foreground="#666666").pack(padx=5, pady=20)
+                        return
+                    
+                    # Show each selected category with remove button
+                    for cat_value in sorted(selected_categories.keys()):
+                        cat_info = selected_categories[cat_value]
+                        
+                        # Create frame for this category
+                        cat_frame = ttk.Frame(right_content)
+                        cat_frame.pack(fill=tk.X, padx=5, pady=2)
+                        
+                        # Category label (just the name)
+                        label_text = cat_info['label']
+                        cat_label = ttk.Label(cat_frame, text=label_text, 
+                                             font=("TkDefaultFont", 8))
+                        cat_label.pack(side=tk.LEFT, fill=tk.X, expand=True)
+                        
+                        # Remove button
+                        def make_remove_command(c):
+                            def remove():
+                                del selected_categories[c]
+                                # Update checkbox if in current group
+                                if c in current_checkboxes:
+                                    current_checkboxes[c].set(False)
+                                # Refresh right panel
+                                update_selected_panel()
+                            return remove
+                        
+                        remove_btn = ttk.Button(cat_frame, text="✕", width=2,
+                                               command=make_remove_command(cat_value))
+                        remove_btn.pack(side=tk.RIGHT)
+                
+                def populate_group(group_name):
+                    """Populate left panel with categories in selected group"""
+                    # Clear existing checkboxes
+                    for widget in left_content.winfo_children():
+                        widget.destroy()
+                    current_checkboxes.clear()
+                    
+                    # Get categories for this group
+                    group_categories = groups.get(group_name, [])
+                    
+                    # Update count label
+                    count_label.config(text=f"({len(group_categories)} categories)")
+                    
+                    if not group_categories:
+                        ttk.Label(left_content, text="No categories in this group",
+                                 font=("TkDefaultFont", 8, "italic")).pack(padx=10, pady=20)
+                        return
+                    
+                    # Add checkbox for each category
+                    for category in group_categories:
+                        cat_value = category['value']
+                        label = category['label']
+                        
+                        # Check if already selected
+                        is_selected = cat_value in selected_categories
+                        
+                        var = tk.BooleanVar(value=is_selected)
+                        current_checkboxes[cat_value] = var
+                        
+                        # Checkbox with change handler
+                        def make_checkbox_handler(cv, lbl, grp):
+                            def on_change():
+                                if current_checkboxes[cv].get():
+                                    # Add to selected
+                                    selected_categories[cv] = {
+                                        'label': lbl,
+                                        'group': grp
+                                    }
+                                else:
+                                    # Remove from selected
+                                    if cv in selected_categories:
+                                        del selected_categories[cv]
+                                # Update right panel
+                                update_selected_panel()
+                            return on_change
+                        
+                        cb = ttk.Checkbutton(left_content, text=label, variable=var,
+                                            command=make_checkbox_handler(cat_value, label, group_name))
+                        cb.pack(anchor=tk.W, padx=10, pady=1)
+                    
+                    # Add Select All / None buttons for the current group
+                    button_frame = ttk.Frame(left_content)
+                    button_frame.pack(fill=tk.X, padx=10, pady=5)
+                    
+                    def select_all_in_group():
+                        for cat in group_categories:
+                            cat_value = cat['value']
+                            if cat_value in current_checkboxes:
+                                current_checkboxes[cat_value].set(True)
+                                selected_categories[cat_value] = {
+                                    'label': cat['label'],
+                                    'group': group_name
+                                }
+                        update_selected_panel()
+                    
+                    def select_none_in_group():
+                        for cat in group_categories:
+                            cat_value = cat['value']
+                            if cat_value in current_checkboxes:
+                                current_checkboxes[cat_value].set(False)
+                                if cat_value in selected_categories:
+                                    del selected_categories[cat_value]
+                        update_selected_panel()
+                    
+                    ttk.Button(button_frame, text="Select All in Group", 
+                              command=select_all_in_group, width=18).pack(side=tk.LEFT, padx=(0, 5))
+                    ttk.Button(button_frame, text="None", 
+                              command=select_none_in_group, width=10).pack(side=tk.LEFT)
+                
+                # Populate initial group
+                if group_list:
+                    populate_group(group_list[0])
+                
+                # Bind group change event
+                group_combo.bind('<<ComboboxSelected>>', lambda e: populate_group(group_var.get()))
+                
+                # Initial update of selected panel (no pre-selections)
+                update_selected_panel()
+                
+                # Store the selected_categories dict in param_widgets for collection
+                param_widgets[param_name] = selected_categories
         
         # Buttons
         button_frame = ttk.Frame(main_frame)
@@ -7395,6 +7701,20 @@ class SuricataRuleGenerator:
                     if len(selected) < min_selections:
                         messagebox.showerror("Validation Error",
                             f"Please select at least {min_selections} country/countries.")
+                        return
+                    
+                    params[param_name] = selected
+                
+                elif param_type == 'multi_select_category':
+                    # Collect selected categories from the global selected_categories dict
+                    # (not from current_checkboxes which are just the current group checkboxes)
+                    selected = list(param_widgets[param_name].keys())
+                    
+                    # Validate minimum selections
+                    min_selections = param.get('min_selections', 1)
+                    if len(selected) < min_selections:
+                        messagebox.showerror("Validation Error",
+                            f"Please select at least {min_selections} category/categories.")
                         return
                     
                     params[param_name] = selected

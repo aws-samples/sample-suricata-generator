@@ -326,6 +326,12 @@ class RuleAnalyzer:
             if resolved == net_spec:
                 # Variable not found, be conservative
                 return None
+            # Handle dictionary format from .var files (with "definition" and "description" keys)
+            if isinstance(resolved, dict):
+                resolved = resolved.get('definition', resolved)
+                if not isinstance(resolved, str):
+                    # If definition is not a string, be conservative
+                    return None
             # Recursively parse the resolved value
             return self._parse_network_specification(resolved, variables)
         
@@ -381,6 +387,11 @@ class RuleAnalyzer:
                     if resolved == excluded_item:
                         # Variable not found, be conservative
                         return None
+                    # Handle dictionary format from .var files
+                    if isinstance(resolved, dict):
+                        resolved = resolved.get('definition', resolved)
+                        if not isinstance(resolved, str):
+                            return None
                     excluded_item = resolved
                 
                 # Parse as network
@@ -399,6 +410,11 @@ class RuleAnalyzer:
                     if resolved == item:
                         # Variable not found, be conservative
                         return None
+                    # Handle dictionary format from .var files
+                    if isinstance(resolved, dict):
+                        resolved = resolved.get('definition', resolved)
+                        if not isinstance(resolved, str):
+                            return None
                     item = resolved
                 
                 # Parse as network
@@ -540,6 +556,11 @@ class RuleAnalyzer:
             if port_spec.startswith(('$', '@')) and variables:
                 resolved_port = variables.get(port_spec, port_spec)
                 if resolved_port != port_spec:
+                    # Handle dictionary format from .var files
+                    if isinstance(resolved_port, dict):
+                        resolved_port = resolved_port.get('definition', resolved_port)
+                        if not isinstance(resolved_port, str):
+                            return None
                     port_spec = resolved_port
                 elif port_spec.startswith(('$', '@')):
                     # Variable not found, be conservative
@@ -2595,6 +2616,12 @@ class RuleAnalyzer:
             'krb5': ['krb5.cname', 'krb5.sname']
         }
         
+        # AWS Category keywords with their protocol requirements
+        aws_category_keywords = {
+            'aws_url_category': 'http',      # HTTP only
+            'aws_domain_category': ['tls', 'http']  # TLS or HTTP
+        }
+        
         # Map each app protocol to its required transport layer
         keyword_transport_requirements = {
             'tls': 'tcp',
@@ -2625,6 +2652,35 @@ class RuleAnalyzer:
             # Get rule content
             full_content = (rule.content or '') + ' ' + (rule.original_options or '')
             full_content_lower = full_content.lower()
+            
+            # Check for AWS category keywords first (special validation rules)
+            for aws_keyword, required_protocols in aws_category_keywords.items():
+                if aws_keyword in full_content_lower:
+                    # Normalize required_protocols to list for consistent handling
+                    if isinstance(required_protocols, str):
+                        required_protocols = [required_protocols]
+                    
+                    # Check if current protocol is in the allowed list
+                    if protocol not in required_protocols:
+                        # Format the allowed protocols nicely
+                        if len(required_protocols) == 1:
+                            protocol_list = required_protocols[0].upper()
+                        else:
+                            protocol_list = ' or '.join(p.upper() for p in required_protocols)
+                        
+                        issue = {
+                            'line': line_num,
+                            'rule': rule,
+                            'current_protocol': protocol.upper(),
+                            'suggested_protocol': protocol_list,
+                            'keywords': [aws_keyword],
+                            'issue': (f"Rule uses {protocol.upper()} protocol with AWS category keyword '{aws_keyword}'. "
+                                     f"This keyword only supports {protocol_list} protocol(s) - this rule will never match"),
+                            'suggestion': f"Change protocol from '{protocol}' to {protocol_list} (or remove '{aws_keyword}' keyword)",
+                            'severity': 'warning'
+                        }
+                        issues.append(issue)
+                        break  # Only report once per rule
             
             # Check if rule uses any application-layer keywords
             for app_protocol, keywords in protocol_keyword_map.items():

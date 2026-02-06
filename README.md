@@ -1,6 +1,6 @@
 # Suricata Rule Generator for AWS Network Firewall
 
-**Current Version: 1.29.0**
+**Current Version: 1.30.0**
 
 A GUI application for creating, editing, and managing Suricata rules - specifically designed for AWS Network Firewall deployments using strict rule ordering.
 
@@ -35,6 +35,7 @@ A GUI application for creating, editing, and managing Suricata rules - specifica
 
 ### 🎯 Advanced Features
 - [Rule Templates](#rule-templates)
+- [URL and Domain Category Filtering](#url-and-domain-category-filtering) ⭐ NEW
 - [Bulk Domain Import](#bulk-domain-import)
 - [AWS Rule Group Import](#aws-rule-group-import)
 - [Rule Filtering](#rule-filtering)
@@ -42,7 +43,7 @@ A GUI application for creating, editing, and managing Suricata rules - specifica
 - [Advanced Editor](#advanced-editor)
 - [Rule Conflict Analysis](#rule-conflict-analysis)
 - [CloudWatch Rule Usage Analysis](#cloudwatch-rule-usage-analysis)
-- [Analyze Traffic Costs](#analyze-traffic-costs) ⭐ NEW
+- [Analyze Traffic Costs](#analyze-traffic-costs)
 - [Infrastructure Export](#infrastructure-export)
 - [Change Tracking](#change-tracking)
 - [SIG Type Classification](#sig-type-classification)
@@ -998,6 +999,188 @@ Rule Templates provide pre-configured security patterns that generate complete S
 - 🎯 **Consistency**: Standardized patterns across teams
 - 🔧 **Customizable**: Parameters adapt to specific needs
 - 📖 **Educational**: Learn from working examples
+
+---
+
+## URL and Domain Category Filtering
+
+> 🔗 **Block traffic by AWS-maintained content categories** - No manual domain lists needed! ⭐ NEW in v1.30.0
+
+AWS Network Firewall now supports category-based filtering using AWS's automatically-updated category database. Block entire threat categories (malware, phishing, C2) or productivity categories (social media, shopping, entertainment) without maintaining domain lists manually.
+
+### Two AWS Keywords
+
+**aws_url_category** (HTTP only)
+- Evaluates complete URLs and domains in HTTP/HTTPS traffic
+- Requires TLS inspection for HTTPS effectiveness
+- Best for: Content filtering, security policies requiring URL path inspection
+
+**aws_domain_category** (TLS and HTTP)
+- Evaluates domain-level information from TLS SNI or HTTP host headers
+- Works without TLS inspection (inspects SNI field)
+- Best for: Threat protection, works in all TLS configurations
+
+### 51 Categories Across 6 Groups
+
+**Security Threats (10):** Malware, Phishing, Command and Control, Hacking, Malicious, Spam, Parked Domains, Private IP Address, Proxy Avoidance, Criminal and Illegal Activities
+
+**Restricted Content (8):** Child Abuse, Adult and Mature Content, Violence and Hate Speech, Abortion, Dating, Gambling, Marijuana, Redirect
+
+**Productivity (9):** Social Networking, Entertainment, Shopping, Email, News, Online Ads, Search Engines and Portals, Sports and Recreation, Translation
+
+**Lifestyle (14):** Health, Travel, Pets, Food and Dining, Fashion, Religion, Arts and Culture, Family and Parenting, Hobbies and Interest, Home and Garden, Real Estate, For Kids, Science, Vehicles
+
+**Business/Professional (8):** AI and Machine Learning, Education, Government and Legal, Military, Technology and Internet, Business and Economy, Career and Job Search, Science
+
+**Financial (2):** Cryptocurrency, Financial Services
+
+### Three Access Methods
+
+#### Method 1: Rule Templates (Primary - Bulk Operations)
+![Category Templates](images/category_templates.png)
+
+**File > Insert Rules From Template:**
+1. Select template:
+   - **Block URL Categories** (HTTP Security category) - Requires TLS inspection for HTTPS
+   - **Block Domain Categories** (Threat Protection category) - Works without TLS inspection
+2. **Two-Panel Selection UI:**
+   - Left: Categories organized by group with search
+   - Right: Selected categories summary
+3. **Configure Options:**
+   - Protocol selection (TLS or HTTP for domain categories)
+   - Test mode available
+4. **Apply**: Generates 1 rule with comma-separated categories
+
+**Example Generated Rule:**
+```
+drop tls $HOME_NET any -> any any (msg:"Block Malware, Phishing, and 1 more"; flow:to_server; aws_domain_category:Malware,Phishing,Command and Control; sid:100; rev:1;)
+```
+
+#### Method 2: Insert Category Button (Secondary - Quick Additions)
+![Category Button](images/category_button.png)
+
+**In Main Program Editor:**
+1. Set protocol to HTTP or TLS (button auto-enables)
+2. Click "Insert Category..." button (next to 'Insert Domain Allow Rule' button)
+3. **Category Picker Dialog:**
+   - **HTTP protocol:** Choose between URL or Domain category via radio buttons
+   - **TLS protocol:** Automatically uses Domain category
+   - Multi-select support (Ctrl+click for multiple)
+   - Real-time preview showing generated syntax
+4. Click "Insert" - content and message fields auto-populate
+
+**Features:**
+- **Smart Content Insertion:** Auto-adds `flow:to_server` if Content field empty
+- **Message Auto-Population:** Generates descriptive messages automatically
+- **Multi-Select:** Select multiple categories with comma-separated syntax
+
+#### Method 3: Advanced Editor (Tertiary - Power Users)
+![Category Advanced](images/category_advanced.png)
+
+**Tools > Advanced Editor (Ctrl+E):**
+1. Type `aws_url_category:` or `aws_domain_category:`
+2. Auto-complete shows all 51 categories
+3. Type to filter categories
+4. Select and insert
+
+**Validation:**
+- Real-time red squiggles for protocol mismatches
+- Hover tooltips explain errors
+- `aws_url_category` requires HTTP protocol
+- `aws_domain_category` requires TLS or HTTP
+
+### Protocol Requirements
+
+**aws_url_category:**
+- ✅ HTTP protocol only
+- ⚠️ Requires TLS decryption for HTTPS traffic effectiveness
+- Without TLS decryption: Only inspects ~5% of web traffic (unencrypted HTTP)
+
+**aws_domain_category:**
+- ✅ TLS protocol (inspects SNI field - works without TLS decryption)
+- ✅ HTTP protocol (inspects host header)
+- More versatile for threat protection
+
+### Multi-Category Support
+
+**Efficient Syntax:**
+```
+# Multiple categories in one rule (comma-separated)
+aws_domain_category:Malware,Phishing,Command and Control
+
+# More efficient than separate rules:
+aws_domain_category:Malware
+aws_domain_category:Phishing
+aws_domain_category:Command and Control
+```
+
+### Validation and Error Prevention
+
+**Save Validation:**
+- Prevents saving rules with invalid protocol/category combinations
+- Clear error messages with remediation steps
+- Example: "aws_url_category only supports HTTP protocol"
+
+**Advanced Editor Validation:**
+- Real-time red squiggles under invalid combinations
+- Protocol mismatch detection as you type
+- Hover tooltips explain requirements
+
+### Benefits
+
+**Simplified Security Management:**
+- 📦 **No Manual Lists**: AWS maintains and updates category database automatically
+- 🎯 **Threat Protection**: Block entire threat categories (malware, phishing, C2)
+- 📊 **Productivity Control**: Block time-wasting categories (social media, entertainment)
+- 🔒 **Compliance**: Block restricted content for legal/HR requirements
+- ⚡ **Fast Deployment**: Generate category rules in seconds
+- 🔄 **Automatic Updates**: Categories evolve with threat landscape
+
+**Business Value:**
+- **Better Coverage:** AWS's database provides broader protection than manual lists
+- **Reduced Maintenance:** No more researching and entering domains manually
+- **Multiple Workflows:** Choose template, editor button, or advanced editor
+- **Clear Organization:** 6 category groups make selection intuitive
+
+### Use Cases
+
+**Threat Protection:**
+```
+# Block security threat categories
+drop tls $HOME_NET any -> any any (msg:"Block Malware and Phishing"; flow:to_server; aws_domain_category:Malware,Phishing; sid:100; rev:1;)
+```
+
+**Productivity Policy:**
+```
+# Block social media and entertainment
+drop http $HOME_NET any -> any any (msg:"Block Social Networking and Entertainment"; flow:to_server; aws_url_category:Social Networking,Entertainment; sid:101; rev:1;)
+```
+
+**Compliance:**
+```
+# Block restricted content
+drop tls $HOME_NET any -> any any (msg:"Block Child Abuse, Adult and Mature Content, and 1 more"; flow:to_server; aws_domain_category:Child Abuse,Adult and Mature Content,Violence and Hate Speech; sid:102; rev:1;)
+```
+
+### TLS Decryption Considerations
+
+**For Maximum Effectiveness:**
+- Configure AWS Network Firewall TLS decryption for HTTPS traffic
+- Without TLS decryption: `aws_url_category` only inspects unencrypted HTTP (~5% of Internet traffic)
+- With TLS decryption: Both keywords inspect HTTPS traffic effectively
+- `aws_domain_category` works without TLS decryption (SNI field inspection)
+
+**Documentation:**
+- [AWS Network Firewall TLS Inspection](https://docs.aws.amazon.com/network-firewall/latest/developerguide/tls-inspection-configurations.html)
+
+### Important Constraints
+
+- ❌ **Cannot combine with geoip:** Category keywords cannot be used with `geoip` keyword in same rule
+- ✅ **Test Mode Support:** Templates support test mode (converts to alert actions)
+- ✅ **Change Tracking:** All category rule operations tracked when enabled
+- ✅ **Export Support:** Category rules export correctly to Terraform, CloudFormation, and AWS
+
+> 💡 **Pro Tip**: Use templates for initial security baseline (select all security threats), then use Insert Category button for one-off additions.
 
 ---
 
@@ -2455,10 +2638,12 @@ Suricata internally classifies rules by their keywords and protocol:
 - ✅ Toggle selection for workflow flexibility
 
 ### Advanced Features
-- ✅ **CloudWatch Rule Usage Analysis** *(v1.27.0)*: Production rule effectiveness analytics ⭐ NEW
-- ✅ **AWS Direct Import** *(v1.27.3)*: Browse and import rule groups directly from AWS ⭐ NEW
-- ✅ **AWS Direct Deploy** *(v1.27.2)*: Deploy rule groups directly to AWS Network Firewall ⭐ NEW
-- ✅ **Rule Templates** *(v1.24.0)*: 14 pre-built security patterns
+- ✅ **URL and Domain Category Filtering** *(v1.30.0)*: AWS-maintained category blocking (51 categories) ⭐ NEW
+- ✅ **CloudWatch Rule Usage Analysis** *(v1.27.0)*: Production rule effectiveness analytics
+- ✅ **Analyze Traffic Costs** *(v1.29.0)*: VPC endpoint recommendations and cost analysis
+- ✅ **AWS Direct Import** *(v1.27.3)*: Browse and import rule groups directly from AWS
+- ✅ **AWS Direct Deploy** *(v1.27.2)*: Deploy rule groups directly to AWS Network Firewall
+- ✅ **Rule Templates** *(v1.24.0)*: 16 pre-built security patterns (includes 2 category templates)
 - ✅ **Rule Filtering** *(v1.22.0)*: Non-destructive rule hiding
 - ✅ **Advanced Editor** *(v1.19.0, Scintilla v1.23.0)*: Code folding and IDE features
 - ✅ **SIG Type Classification** *(v1.20.0)*: Educational rule type display

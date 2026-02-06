@@ -1,5 +1,6 @@
 {
-  "version": "1.0",
+  "version": "1.1.0",
+  "last_updated": "2026-02-02",
   "description": "Rule Templates Library for Suricata Rule Generator",
   "templates": [
     {
@@ -7,7 +8,7 @@
       "name": "Force Route 53 Resolver (Block Direct DNS)",
       "category": "Protocol Enforcement",
       "description": "Block all direct DNS traffic to force VPC to use Route 53 resolver",
-      "icon": "🔍",
+      "icon": "\ud83d\udd0d",
       "complexity": "beginner",
       "template_type": "policy",
       "test_mode_supported": true,
@@ -36,7 +37,7 @@
       "name": "Enforce HTTPS for AWS Services",
       "category": "Cloud Security",
       "description": "Block unencrypted HTTP traffic to AWS service endpoints",
-      "icon": "☁",
+      "icon": "\u2601",
       "complexity": "beginner",
       "template_type": "policy",
       "test_mode_supported": true,
@@ -65,7 +66,7 @@
       "name": "Block Cryptocurrency Mining",
       "category": "Threat Protection",
       "description": "Block TCP ports used by cryptocurrency mining pools",
-      "icon": "⛏️",
+      "icon": "\u26cf\ufe0f",
       "complexity": "beginner",
       "template_type": "policy",
       "test_mode_supported": true,
@@ -94,7 +95,7 @@
       "name": "Block Malware C2 Ports",
       "category": "Threat Protection",
       "description": "Block TCP ports commonly used by malware command & control",
-      "icon": "🦠",
+      "icon": "\ud83e\udda0",
       "complexity": "beginner",
       "template_type": "policy",
       "test_mode_supported": true,
@@ -123,7 +124,7 @@
       "name": "Block Direct-to-IP Connections",
       "category": "Threat Protection",
       "description": "Block HTTP/HTTPS requests using IP address in SNI/Host header (malware indicator)",
-      "icon": "🚫",
+      "icon": "\ud83d\udeab",
       "complexity": "intermediate",
       "template_type": "policy",
       "test_mode_supported": true,
@@ -163,7 +164,7 @@
       "name": "Enforce TLS Version",
       "category": "Protocol Enforcement",
       "description": "Block old TLS versions to enforce minimum TLS version",
-      "icon": "🔒",
+      "icon": "\ud83d\udd12",
       "complexity": "beginner",
       "template_type": "parameterized",
       "test_mode_supported": true,
@@ -213,7 +214,7 @@
       "name": "Enforce Protocol Port Usage",
       "category": "Protocol Enforcement",
       "description": "Prevent protocol tunneling by ensuring protocols use only designated ports",
-      "icon": "🔧",
+      "icon": "\ud83d\udd27",
       "complexity": "intermediate",
       "template_type": "parameterized",
       "test_mode_supported": true,
@@ -343,7 +344,7 @@
       "name": "Block File Sharing Protocols",
       "category": "Protocol Enforcement",
       "description": "Block file sharing protocols commonly used for data exfiltration",
-      "icon": "📁",
+      "icon": "\ud83d\udcc1",
       "complexity": "beginner",
       "template_type": "parameterized",
       "test_mode_supported": true,
@@ -406,7 +407,7 @@
       "name": "Block High-Risk Destination Ports",
       "category": "Threat Protection",
       "description": "Block selected high-risk outbound ports commonly used by ransomware and malware",
-      "icon": "⚠️",
+      "icon": "\u26a0\ufe0f",
       "complexity": "beginner",
       "template_type": "parameterized",
       "test_mode_supported": true,
@@ -493,7 +494,7 @@
       "name": "Geographic Country Control",
       "category": "Geographic Control",
       "description": "Block or allow traffic based on destination country (GeoIP filtering)",
-      "icon": "🌍",
+      "icon": "\ud83c\udf0d",
       "complexity": "intermediate",
       "template_type": "parameterized",
       "test_mode_supported": true,
@@ -1781,7 +1782,7 @@
       "name": "JA3 Fingerprint Control",
       "category": "Application Control",
       "description": "Allow, alert, block, or reject traffic based on JA3 TLS fingerprint",
-      "icon": "🔐",
+      "icon": "\ud83d\udd10",
       "complexity": "intermediate",
       "template_type": "parameterized",
       "test_mode_supported": true,
@@ -1854,8 +1855,8 @@
       "id": "block_file_extensions",
       "name": "Block File Extensions",
       "category": "HTTP Security",
-      "description": "⚠️ WORKS BEST WITH TLS DECRYPTION: Block file transfers by extension (both downloads and uploads). Without TLS decryption configured, this template will only inspect unencrypted HTTP traffic (~5% of modern web traffic) and will be largely ineffective.",
-      "icon": "📎",
+      "description": "\u26a0\ufe0f WORKS BEST WITH TLS DECRYPTION: Block file transfers by extension (both downloads and uploads). Without TLS decryption configured, this template will only inspect unencrypted HTTP traffic (~5% of modern web traffic) and will be largely ineffective.",
+      "icon": "\ud83d\udcce",
       "complexity": "beginner",
       "template_type": "parameterized",
       "test_mode_supported": true,
@@ -1991,15 +1992,15 @@
       "variables": {
         "$HOME_NET": "[10.0.0.0/8,172.16.0.0/12,192.168.0.0/16]"
       },
-      "notes": "⚠️ WORKS BEST WITH TLS DECRYPTION: For maximum effectiveness, configure AWS Network Firewall TLS decryption. Without it, only unencrypted HTTP traffic will be inspected (~5% of modern web traffic). Configure TLS inspection: https://docs.aws.amazon.com/network-firewall/latest/developerguide/tls-inspection-configurations.html\n\nBlocks file transfers in both directions (downloads and uploads). Prevents malware downloads (executables, scripts) and data exfiltration (archives, documents). Generates 1 rule per selected extension. Attackers may attempt bypass by renaming extensions, but this catches most automated threats and opportunistic attacks. Consider using 'alert' mode initially to assess impact on legitimate traffic.",
+      "notes": "\u26a0\ufe0f WORKS BEST WITH TLS DECRYPTION: For maximum effectiveness, configure AWS Network Firewall TLS decryption. Without it, only unencrypted HTTP traffic will be inspected (~5% of modern web traffic). Configure TLS inspection: https://docs.aws.amazon.com/network-firewall/latest/developerguide/tls-inspection-configurations.html\n\nBlocks file transfers in both directions (downloads and uploads). Prevents malware downloads (executables, scripts) and data exfiltration (archives, documents). Generates 1 rule per selected extension. Attackers may attempt bypass by renaming extensions, but this catches most automated threats and opportunistic attacks. Consider using 'alert' mode initially to assess impact on legitimate traffic.",
       "rule_generation": "dynamic"
     },
     {
       "id": "http_method_control",
       "name": "HTTP Method Control",
       "category": "HTTP Security",
-      "description": "⚠️ WORKS BEST WITH TLS DECRYPTION: Block dangerous HTTP methods (PUT, DELETE, CONNECT, etc.). Without TLS decryption, this only inspects unencrypted HTTP traffic (~5% of modern APIs/web traffic) and will miss encrypted HTTPS requests.",
-      "icon": "🚦",
+      "description": "\u26a0\ufe0f WORKS BEST WITH TLS DECRYPTION: Block dangerous HTTP methods (PUT, DELETE, CONNECT, etc.). Without TLS decryption, this only inspects unencrypted HTTP traffic (~5% of modern APIs/web traffic) and will miss encrypted HTTPS requests.",
+      "icon": "\ud83d\udea6",
       "complexity": "beginner",
       "template_type": "parameterized",
       "test_mode_supported": true,
@@ -2072,7 +2073,919 @@
       "variables": {
         "$HOME_NET": "[10.0.0.0/8,172.16.0.0/12,192.168.0.0/16]"
       },
-      "notes": "⚠️ WORKS BEST WITH TLS DECRYPTION: For maximum effectiveness, configure AWS Network Firewall TLS decryption. Without it, only unencrypted HTTP APIs will be inspected. Configure TLS inspection: https://docs.aws.amazon.com/network-firewall/latest/developerguide/tls-inspection-configurations.html\n\nBlocks dangerous HTTP methods commonly used in web attacks and protocol abuse. PUT/DELETE enable WebDAV exploits and unauthorized API modifications. CONNECT enables HTTP tunneling for C2 communications. TRACE enables XST (Cross-Site Tracing) attacks. Generates 1 rule per selected method. Note: Blocking PUT/PATCH/DELETE may impact legitimate REST APIs - test thoroughly. OPTIONS is generally safe but may break CORS preflight requests.",
+      "notes": "\u26a0\ufe0f WORKS BEST WITH TLS DECRYPTION: For maximum effectiveness, configure AWS Network Firewall TLS decryption. Without it, only unencrypted HTTP APIs will be inspected. Configure TLS inspection: https://docs.aws.amazon.com/network-firewall/latest/developerguide/tls-inspection-configurations.html\n\nBlocks dangerous HTTP methods commonly used in web attacks and protocol abuse. PUT/DELETE enable WebDAV exploits and unauthorized API modifications. CONNECT enables HTTP tunneling for C2 communications. TRACE enables XST (Cross-Site Tracing) attacks. Generates 1 rule per selected method. Note: Blocking PUT/PATCH/DELETE may impact legitimate REST APIs - test thoroughly. OPTIONS is generally safe but may break CORS preflight requests.",
+      "rule_generation": "dynamic"
+    },
+    {
+      "id": "block_url_categories",
+      "name": "Block URL Categories",
+      "category": "HTTP Security",
+      "description": "\u26a0\ufe0f WORKS BEST WITH TLS DECRYPTION: Block traffic based on URL categories (malware, phishing, social media, etc.). Without TLS decryption, this only inspects unencrypted HTTP traffic (~5% of modern web traffic) and will miss encrypted HTTPS requests.",
+      "icon": "\ud83d\udd17",
+      "complexity": "beginner",
+      "template_type": "parameterized",
+      "test_mode_supported": true,
+      "rules": [
+        {
+          "action": "drop",
+          "protocol": "http",
+          "src_net": "$HOME_NET",
+          "src_port": "any",
+          "direction": "->",
+          "dst_net": "any",
+          "dst_port": "any",
+          "content": "flow:to_server; aws_url_category:{CATEGORY}",
+          "message": "Block {CATEGORY_DISPLAY}"
+        }
+      ],
+      "parameters": [
+        {
+          "name": "CATEGORIES",
+          "type": "multi_select_category",
+          "description": "Select URL categories to block",
+          "required": true,
+          "min_selections": 1,
+          "options": [
+            {
+              "value": "Abortion",
+              "label": "Abortion",
+              "category": "Abortion",
+              "category_display": "Abortion",
+              "category_metadata": "abortion",
+              "category_group": "Restricted Content"
+            },
+            {
+              "value": "Adult and Mature Content",
+              "label": "Adult and Mature Content",
+              "category": "Adult and Mature Content",
+              "category_display": "Adult and Mature Content",
+              "category_metadata": "adult_mature_content",
+              "category_group": "Restricted Content"
+            },
+            {
+              "value": "Artificial Intelligence and Machine Learning",
+              "label": "Artificial Intelligence and Machine Learning",
+              "category_display": "Artificial Intelligence and Machine Learning",
+              "category_metadata": "ai_ml",
+              "category_group": "Business/Professional",
+              "category": "Artificial Intelligence and Machine Learning"
+            },
+            {
+              "value": "Arts and Culture",
+              "label": "Arts and Culture",
+              "category_display": "Arts and Culture",
+              "category_metadata": "arts_culture",
+              "category_group": "Lifestyle",
+              "category": "Arts and Culture"
+            },
+            {
+              "value": "Business and Economy",
+              "label": "Business and Economy",
+              "category_display": "Business and Economy",
+              "category_metadata": "business_economy",
+              "category_group": "Business/Professional",
+              "category": "Business and Economy"
+            },
+            {
+              "value": "Career and Job Search",
+              "label": "Career and Job Search",
+              "category_display": "Career and Job Search",
+              "category_metadata": "career_jobs",
+              "category_group": "Business/Professional",
+              "category": "Career and Job Search"
+            },
+            {
+              "value": "Child Abuse",
+              "label": "Child Abuse",
+              "category_display": "Child Abuse",
+              "category_metadata": "child_abuse",
+              "category_group": "Restricted Content",
+              "category": "Child Abuse"
+            },
+            {
+              "value": "Command and Control",
+              "label": "Command and Control",
+              "category_display": "Command and Control",
+              "category_metadata": "c2",
+              "category_group": "Security Threats",
+              "category": "Command and Control"
+            },
+            {
+              "value": "Criminal and Illegal Activities",
+              "label": "Criminal and Illegal Activities",
+              "category_display": "Criminal and Illegal Activities",
+              "category_metadata": "criminal_illegal",
+              "category_group": "Security Threats",
+              "category": "Criminal and Illegal Activities"
+            },
+            {
+              "value": "Cryptocurrency",
+              "label": "Cryptocurrency",
+              "category_display": "Cryptocurrency",
+              "category_metadata": "cryptocurrency",
+              "category_group": "Financial",
+              "category": "Cryptocurrency"
+            },
+            {
+              "value": "Dating",
+              "label": "Dating",
+              "category_display": "Dating",
+              "category_metadata": "dating",
+              "category_group": "Restricted Content",
+              "category": "Dating"
+            },
+            {
+              "value": "Education",
+              "label": "Education",
+              "category_display": "Education",
+              "category_metadata": "education",
+              "category_group": "Business/Professional",
+              "category": "Education"
+            },
+            {
+              "value": "Email",
+              "label": "Email",
+              "category_display": "Email",
+              "category_metadata": "email",
+              "category_group": "Productivity",
+              "category": "Email"
+            },
+            {
+              "value": "Entertainment",
+              "label": "Entertainment",
+              "category_display": "Entertainment",
+              "category_metadata": "entertainment",
+              "category_group": "Productivity",
+              "category": "Entertainment"
+            },
+            {
+              "value": "Family and Parenting",
+              "label": "Family and Parenting",
+              "category_display": "Family and Parenting",
+              "category_metadata": "family_parenting",
+              "category_group": "Lifestyle",
+              "category": "Family and Parenting"
+            },
+            {
+              "value": "Fashion",
+              "label": "Fashion",
+              "category_display": "Fashion",
+              "category_metadata": "fashion",
+              "category_group": "Lifestyle",
+              "category": "Fashion"
+            },
+            {
+              "value": "Financial Services",
+              "label": "Financial Services",
+              "category_display": "Financial Services",
+              "category_metadata": "financial_services",
+              "category_group": "Financial",
+              "category": "Financial Services"
+            },
+            {
+              "value": "Food and Dining",
+              "label": "Food and Dining",
+              "category_display": "Food and Dining",
+              "category_metadata": "food_dining",
+              "category_group": "Lifestyle",
+              "category": "Food and Dining"
+            },
+            {
+              "value": "For Kids",
+              "label": "For Kids",
+              "category_display": "For Kids",
+              "category_metadata": "for_kids",
+              "category_group": "Lifestyle",
+              "category": "For Kids"
+            },
+            {
+              "value": "Gambling",
+              "label": "Gambling",
+              "category_display": "Gambling",
+              "category_metadata": "gambling",
+              "category_group": "Restricted Content",
+              "category": "Gambling"
+            },
+            {
+              "value": "Government and Legal",
+              "label": "Government and Legal",
+              "category_display": "Government and Legal",
+              "category_metadata": "government_legal",
+              "category_group": "Business/Professional",
+              "category": "Government and Legal"
+            },
+            {
+              "value": "Hacking",
+              "label": "Hacking",
+              "category_display": "Hacking",
+              "category_metadata": "hacking",
+              "category_group": "Security Threats",
+              "category": "Hacking"
+            },
+            {
+              "value": "Health",
+              "label": "Health",
+              "category_display": "Health",
+              "category_metadata": "health",
+              "category_group": "Lifestyle",
+              "category": "Health"
+            },
+            {
+              "value": "Hobbies and Interest",
+              "label": "Hobbies and Interest",
+              "category_display": "Hobbies and Interest",
+              "category_metadata": "hobbies_interest",
+              "category_group": "Lifestyle",
+              "category": "Hobbies and Interest"
+            },
+            {
+              "value": "Home and Garden",
+              "label": "Home and Garden",
+              "category_display": "Home and Garden",
+              "category_metadata": "home_garden",
+              "category_group": "Lifestyle",
+              "category": "Home and Garden"
+            },
+            {
+              "value": "Lifestyle",
+              "label": "Lifestyle",
+              "category_display": "Lifestyle",
+              "category_metadata": "lifestyle",
+              "category_group": "Lifestyle",
+              "category": "Lifestyle"
+            },
+            {
+              "value": "Malicious",
+              "label": "Malicious",
+              "category_display": "Malicious",
+              "category_metadata": "malicious",
+              "category_group": "Security Threats",
+              "category": "Malicious"
+            },
+            {
+              "value": "Malware",
+              "label": "Malware",
+              "category_display": "Malware",
+              "category_metadata": "malware",
+              "category_group": "Security Threats",
+              "category": "Malware"
+            },
+            {
+              "value": "Marijuana",
+              "label": "Marijuana",
+              "category_display": "Marijuana",
+              "category_metadata": "marijuana",
+              "category_group": "Restricted Content",
+              "category": "Marijuana"
+            },
+            {
+              "value": "Military",
+              "label": "Military",
+              "category_display": "Military",
+              "category_metadata": "military",
+              "category_group": "Business/Professional",
+              "category": "Military"
+            },
+            {
+              "value": "News",
+              "label": "News",
+              "category_display": "News",
+              "category_metadata": "news",
+              "category_group": "Productivity",
+              "category": "News"
+            },
+            {
+              "value": "Online Ads",
+              "label": "Online Ads",
+              "category_display": "Online Ads",
+              "category_metadata": "online_ads",
+              "category_group": "Productivity",
+              "category": "Online Ads"
+            },
+            {
+              "value": "Parked Domains",
+              "label": "Parked Domains",
+              "category_display": "Parked Domains",
+              "category_metadata": "parked_domains",
+              "category_group": "Security Threats",
+              "category": "Parked Domains"
+            },
+            {
+              "value": "Pets",
+              "label": "Pets",
+              "category_display": "Pets",
+              "category_metadata": "pets",
+              "category_group": "Lifestyle",
+              "category": "Pets"
+            },
+            {
+              "value": "Phishing",
+              "label": "Phishing",
+              "category_display": "Phishing",
+              "category_metadata": "phishing",
+              "category_group": "Security Threats",
+              "category": "Phishing"
+            },
+            {
+              "value": "Private IP Address",
+              "label": "Private IP Address",
+              "category_display": "Private IP Address",
+              "category_metadata": "private_ip",
+              "category_group": "Security Threats",
+              "category": "Private IP Address"
+            },
+            {
+              "value": "Proxy Avoidance",
+              "label": "Proxy Avoidance",
+              "category_display": "Proxy Avoidance",
+              "category_metadata": "proxy_avoidance",
+              "category_group": "Security Threats",
+              "category": "Proxy Avoidance"
+            },
+            {
+              "value": "Real Estate",
+              "label": "Real Estate",
+              "category_display": "Real Estate",
+              "category_metadata": "real_estate",
+              "category_group": "Lifestyle",
+              "category": "Real Estate"
+            },
+            {
+              "value": "Redirect",
+              "label": "Redirect",
+              "category_display": "Redirect",
+              "category_metadata": "redirect",
+              "category_group": "Restricted Content",
+              "category": "Redirect"
+            },
+            {
+              "value": "Religion",
+              "label": "Religion",
+              "category_display": "Religion",
+              "category_metadata": "religion",
+              "category_group": "Lifestyle",
+              "category": "Religion"
+            },
+            {
+              "value": "Search Engines and Portals",
+              "label": "Search Engines and Portals",
+              "category_display": "Search Engines and Portals",
+              "category_metadata": "search_engines",
+              "category_group": "Productivity",
+              "category": "Search Engines and Portals"
+            },
+            {
+              "value": "Science",
+              "label": "Science",
+              "category_display": "Science",
+              "category_metadata": "science",
+              "category_group": "Business/Professional",
+              "category": "Science"
+            },
+            {
+              "value": "Shopping",
+              "label": "Shopping",
+              "category_display": "Shopping",
+              "category_metadata": "shopping",
+              "category_group": "Productivity",
+              "category": "Shopping"
+            },
+            {
+              "value": "Social Networking",
+              "label": "Social Networking",
+              "category_display": "Social Networking",
+              "category_metadata": "social",
+              "category_group": "Productivity",
+              "category": "Social Networking"
+            },
+            {
+              "value": "Spam",
+              "label": "Spam",
+              "category_display": "Spam",
+              "category_metadata": "spam",
+              "category_group": "Security Threats",
+              "category": "Spam"
+            },
+            {
+              "value": "Sports and Recreation",
+              "label": "Sports and Recreation",
+              "category_display": "Sports and Recreation",
+              "category_metadata": "sports_recreation",
+              "category_group": "Productivity",
+              "category": "Sports and Recreation"
+            },
+            {
+              "value": "Technology and Internet",
+              "label": "Technology and Internet",
+              "category_display": "Technology and Internet",
+              "category_metadata": "technology_internet",
+              "category_group": "Business/Professional",
+              "category": "Technology and Internet"
+            },
+            {
+              "value": "Translation",
+              "label": "Translation",
+              "category_display": "Translation",
+              "category_metadata": "translation",
+              "category_group": "Productivity",
+              "category": "Translation"
+            },
+            {
+              "value": "Travel",
+              "label": "Travel",
+              "category_display": "Travel",
+              "category_metadata": "travel",
+              "category_group": "Lifestyle",
+              "category": "Travel"
+            },
+            {
+              "value": "Vehicles",
+              "label": "Vehicles",
+              "category_display": "Vehicles",
+              "category_metadata": "vehicles",
+              "category_group": "Lifestyle",
+              "category": "Vehicles"
+            },
+            {
+              "value": "Violence and Hate Speech",
+              "label": "Violence and Hate Speech",
+              "category_display": "Violence and Hate Speech",
+              "category_metadata": "violence_hate",
+              "category_group": "Restricted Content",
+              "category": "Violence and Hate Speech"
+            }
+          ]
+        }
+      ],
+      "variables": {
+        "$HOME_NET": "[10.0.0.0/8,172.16.0.0/12,192.168.0.0/16]"
+      },
+      "notes": "\u26a0\ufe0f WORKS BEST WITH TLS DECRYPTION: For maximum effectiveness, configure AWS Network Firewall TLS decryption. Without it, only unencrypted HTTP traffic will be inspected (~5% of modern web traffic). Configure TLS inspection: https://docs.aws.amazon.com/network-firewall/latest/developerguide/tls-inspection-configurations.html\n\nBlocks HTTP/HTTPS traffic based on AWS-maintained URL categories. Categories are automatically updated by AWS. Generates 1 rule per selected category. Cannot be combined with geoip filtering in the same rule. URL category performs full URL path evaluation first, then falls back to domain-level evaluation.",
+      "rule_generation": "dynamic"
+    },
+    {
+      "id": "block_domain_categories",
+      "name": "Block Domain Categories",
+      "category": "Threat Protection",
+      "description": "Block traffic based on domain categories (malware, phishing, C2, etc.). Works with TLS SNI field and HTTP host headers. Functions without TLS decryption but more effective with it.",
+      "icon": "\ud83c\udf10",
+      "complexity": "beginner",
+      "template_type": "parameterized",
+      "test_mode_supported": true,
+      "rules": [
+        {
+          "action": "drop",
+          "protocol": "{PROTOCOL}",
+          "src_net": "$HOME_NET",
+          "src_port": "any",
+          "direction": "->",
+          "dst_net": "any",
+          "dst_port": "any",
+          "content": "flow:to_server; aws_domain_category:{CATEGORY}",
+          "message": "Block {CATEGORY_DISPLAY}"
+        }
+      ],
+      "parameters": [
+        {
+          "name": "PROTOCOL",
+          "type": "radio",
+          "description": "Select protocol to inspect",
+          "required": true,
+          "options": [
+            {
+              "value": "tls",
+              "label": "TLS (HTTPS traffic - inspects SNI field, works without TLS decryption)",
+              "protocol": "tls"
+            },
+            {
+              "value": "http",
+              "label": "HTTP (unencrypted traffic - inspects host header)",
+              "protocol": "http"
+            }
+          ]
+        },
+        {
+          "name": "CATEGORIES",
+          "type": "multi_select_category",
+          "description": "Select domain categories to block",
+          "required": true,
+          "min_selections": 1,
+          "options": [
+            {
+              "value": "Abortion",
+              "label": "Abortion",
+              "category_display": "Abortion",
+              "category_metadata": "abortion",
+              "category_group": "Restricted Content",
+              "category": "Abortion"
+            },
+            {
+              "value": "Adult and Mature Content",
+              "label": "Adult and Mature Content",
+              "category_display": "Adult and Mature Content",
+              "category_metadata": "adult_mature_content",
+              "category_group": "Restricted Content",
+              "category": "Adult and Mature Content"
+            },
+            {
+              "value": "Artificial Intelligence and Machine Learning",
+              "label": "Artificial Intelligence and Machine Learning",
+              "category_display": "Artificial Intelligence and Machine Learning",
+              "category_metadata": "ai_ml",
+              "category_group": "Business/Professional",
+              "category": "Artificial Intelligence and Machine Learning"
+            },
+            {
+              "value": "Arts and Culture",
+              "label": "Arts and Culture",
+              "category_display": "Arts and Culture",
+              "category_metadata": "arts_culture",
+              "category_group": "Lifestyle",
+              "category": "Arts and Culture"
+            },
+            {
+              "value": "Business and Economy",
+              "label": "Business and Economy",
+              "category_display": "Business and Economy",
+              "category_metadata": "business_economy",
+              "category_group": "Business/Professional",
+              "category": "Business and Economy"
+            },
+            {
+              "value": "Career and Job Search",
+              "label": "Career and Job Search",
+              "category_display": "Career and Job Search",
+              "category_metadata": "career_jobs",
+              "category_group": "Business/Professional",
+              "category": "Career and Job Search"
+            },
+            {
+              "value": "Child Abuse",
+              "label": "Child Abuse",
+              "category_display": "Child Abuse",
+              "category_metadata": "child_abuse",
+              "category_group": "Restricted Content",
+              "category": "Child Abuse"
+            },
+            {
+              "value": "Command and Control",
+              "label": "Command and Control",
+              "category_display": "Command and Control",
+              "category_metadata": "c2",
+              "category_group": "Security Threats",
+              "category": "Command and Control"
+            },
+            {
+              "value": "Criminal and Illegal Activities",
+              "label": "Criminal and Illegal Activities",
+              "category_display": "Criminal and Illegal Activities",
+              "category_metadata": "criminal_illegal",
+              "category_group": "Security Threats",
+              "category": "Criminal and Illegal Activities"
+            },
+            {
+              "value": "Cryptocurrency",
+              "label": "Cryptocurrency",
+              "category_display": "Cryptocurrency",
+              "category_metadata": "cryptocurrency",
+              "category_group": "Financial",
+              "category": "Cryptocurrency"
+            },
+            {
+              "value": "Dating",
+              "label": "Dating",
+              "category_display": "Dating",
+              "category_metadata": "dating",
+              "category_group": "Restricted Content",
+              "category": "Dating"
+            },
+            {
+              "value": "Education",
+              "label": "Education",
+              "category_display": "Education",
+              "category_metadata": "education",
+              "category_group": "Business/Professional",
+              "category": "Education"
+            },
+            {
+              "value": "Email",
+              "label": "Email",
+              "category_display": "Email",
+              "category_metadata": "email",
+              "category_group": "Productivity",
+              "category": "Email"
+            },
+            {
+              "value": "Entertainment",
+              "label": "Entertainment",
+              "category_display": "Entertainment",
+              "category_metadata": "entertainment",
+              "category_group": "Productivity",
+              "category": "Entertainment"
+            },
+            {
+              "value": "Family and Parenting",
+              "label": "Family and Parenting",
+              "category_display": "Family and Parenting",
+              "category_metadata": "family_parenting",
+              "category_group": "Lifestyle",
+              "category": "Family and Parenting"
+            },
+            {
+              "value": "Fashion",
+              "label": "Fashion",
+              "category_display": "Fashion",
+              "category_metadata": "fashion",
+              "category_group": "Lifestyle",
+              "category": "Fashion"
+            },
+            {
+              "value": "Financial Services",
+              "label": "Financial Services",
+              "category_display": "Financial Services",
+              "category_metadata": "financial_services",
+              "category_group": "Financial",
+              "category": "Financial Services"
+            },
+            {
+              "value": "Food and Dining",
+              "label": "Food and Dining",
+              "category_display": "Food and Dining",
+              "category_metadata": "food_dining",
+              "category_group": "Lifestyle",
+              "category": "Food and Dining"
+            },
+            {
+              "value": "For Kids",
+              "label": "For Kids",
+              "category_display": "For Kids",
+              "category_metadata": "for_kids",
+              "category_group": "Lifestyle",
+              "category": "For Kids"
+            },
+            {
+              "value": "Gambling",
+              "label": "Gambling",
+              "category_display": "Gambling",
+              "category_metadata": "gambling",
+              "category_group": "Restricted Content",
+              "category": "Gambling"
+            },
+            {
+              "value": "Government and Legal",
+              "label": "Government and Legal",
+              "category_display": "Government and Legal",
+              "category_metadata": "government_legal",
+              "category_group": "Business/Professional",
+              "category": "Government and Legal"
+            },
+            {
+              "value": "Hacking",
+              "label": "Hacking",
+              "category_display": "Hacking",
+              "category_metadata": "hacking",
+              "category_group": "Security Threats",
+              "category": "Hacking"
+            },
+            {
+              "value": "Health",
+              "label": "Health",
+              "category_display": "Health",
+              "category_metadata": "health",
+              "category_group": "Lifestyle",
+              "category": "Health"
+            },
+            {
+              "value": "Hobbies and Interest",
+              "label": "Hobbies and Interest",
+              "category_display": "Hobbies and Interest",
+              "category_metadata": "hobbies_interest",
+              "category_group": "Lifestyle",
+              "category": "Hobbies and Interest"
+            },
+            {
+              "value": "Home and Garden",
+              "label": "Home and Garden",
+              "category_display": "Home and Garden",
+              "category_metadata": "home_garden",
+              "category_group": "Lifestyle",
+              "category": "Home and Garden"
+            },
+            {
+              "value": "Lifestyle",
+              "label": "Lifestyle",
+              "category_display": "Lifestyle",
+              "category_metadata": "lifestyle",
+              "category_group": "Lifestyle",
+              "category": "Lifestyle"
+            },
+            {
+              "value": "Malicious",
+              "label": "Malicious",
+              "category_display": "Malicious",
+              "category_metadata": "malicious",
+              "category_group": "Security Threats",
+              "category": "Malicious"
+            },
+            {
+              "value": "Malware",
+              "label": "Malware",
+              "category_display": "Malware",
+              "category_metadata": "malware",
+              "category_group": "Security Threats",
+              "category": "Malware"
+            },
+            {
+              "value": "Marijuana",
+              "label": "Marijuana",
+              "category_display": "Marijuana",
+              "category_metadata": "marijuana",
+              "category_group": "Restricted Content",
+              "category": "Marijuana"
+            },
+            {
+              "value": "Military",
+              "label": "Military",
+              "category_display": "Military",
+              "category_metadata": "military",
+              "category_group": "Business/Professional",
+              "category": "Military"
+            },
+            {
+              "value": "News",
+              "label": "News",
+              "category_display": "News",
+              "category_metadata": "news",
+              "category_group": "Productivity",
+              "category": "News"
+            },
+            {
+              "value": "Online Ads",
+              "label": "Online Ads",
+              "category_display": "Online Ads",
+              "category_metadata": "online_ads",
+              "category_group": "Productivity",
+              "category": "Online Ads"
+            },
+            {
+              "value": "Parked Domains",
+              "label": "Parked Domains",
+              "category_display": "Parked Domains",
+              "category_metadata": "parked_domains",
+              "category_group": "Security Threats",
+              "category": "Parked Domains"
+            },
+            {
+              "value": "Pets",
+              "label": "Pets",
+              "category_display": "Pets",
+              "category_metadata": "pets",
+              "category_group": "Lifestyle",
+              "category": "Pets"
+            },
+            {
+              "value": "Phishing",
+              "label": "Phishing",
+              "category_display": "Phishing",
+              "category_metadata": "phishing",
+              "category_group": "Security Threats",
+              "category": "Phishing"
+            },
+            {
+              "value": "Private IP Address",
+              "label": "Private IP Address",
+              "category_display": "Private IP Address",
+              "category_metadata": "private_ip",
+              "category_group": "Security Threats",
+              "category": "Private IP Address"
+            },
+            {
+              "value": "Proxy Avoidance",
+              "label": "Proxy Avoidance",
+              "category_display": "Proxy Avoidance",
+              "category_metadata": "proxy_avoidance",
+              "category_group": "Security Threats",
+              "category": "Proxy Avoidance"
+            },
+            {
+              "value": "Real Estate",
+              "label": "Real Estate",
+              "category_display": "Real Estate",
+              "category_metadata": "real_estate",
+              "category_group": "Lifestyle",
+              "category": "Real Estate"
+            },
+            {
+              "value": "Redirect",
+              "label": "Redirect",
+              "category_display": "Redirect",
+              "category_metadata": "redirect",
+              "category_group": "Restricted Content",
+              "category": "Redirect"
+            },
+            {
+              "value": "Religion",
+              "label": "Religion",
+              "category_display": "Religion",
+              "category_metadata": "religion",
+              "category_group": "Lifestyle",
+              "category": "Religion"
+            },
+            {
+              "value": "Search Engines and Portals",
+              "label": "Search Engines and Portals",
+              "category_display": "Search Engines and Portals",
+              "category_metadata": "search_engines",
+              "category_group": "Productivity",
+              "category": "Search Engines and Portals"
+            },
+            {
+              "value": "Science",
+              "label": "Science",
+              "category_display": "Science",
+              "category_metadata": "science",
+              "category_group": "Business/Professional",
+              "category": "Science"
+            },
+            {
+              "value": "Shopping",
+              "label": "Shopping",
+              "category_display": "Shopping",
+              "category_metadata": "shopping",
+              "category_group": "Productivity",
+              "category": "Shopping"
+            },
+            {
+              "value": "Social Networking",
+              "label": "Social Networking",
+              "category_display": "Social Networking",
+              "category_metadata": "social",
+              "category_group": "Productivity",
+              "category": "Social Networking"
+            },
+            {
+              "value": "Spam",
+              "label": "Spam",
+              "category_display": "Spam",
+              "category_metadata": "spam",
+              "category_group": "Security Threats",
+              "category": "Spam"
+            },
+            {
+              "value": "Sports and Recreation",
+              "label": "Sports and Recreation",
+              "category_display": "Sports and Recreation",
+              "category_metadata": "sports_recreation",
+              "category_group": "Productivity",
+              "category": "Sports and Recreation"
+            },
+            {
+              "value": "Technology and Internet",
+              "label": "Technology and Internet",
+              "category_display": "Technology and Internet",
+              "category_metadata": "technology_internet",
+              "category_group": "Business/Professional",
+              "category": "Technology and Internet"
+            },
+            {
+              "value": "Translation",
+              "label": "Translation",
+              "category_display": "Translation",
+              "category_metadata": "translation",
+              "category_group": "Productivity",
+              "category": "Translation"
+            },
+            {
+              "value": "Travel",
+              "label": "Travel",
+              "category_display": "Travel",
+              "category_metadata": "travel",
+              "category_group": "Lifestyle",
+              "category": "Travel"
+            },
+            {
+              "value": "Vehicles",
+              "label": "Vehicles",
+              "category_display": "Vehicles",
+              "category_metadata": "vehicles",
+              "category_group": "Lifestyle",
+              "category": "Vehicles"
+            },
+            {
+              "value": "Violence and Hate Speech",
+              "label": "Violence and Hate Speech",
+              "category_display": "Violence and Hate Speech",
+              "category_metadata": "violence_hate",
+              "category_group": "Restricted Content",
+              "category": "Violence and Hate Speech"
+            }
+          ]
+        }
+      ],
+      "variables": {
+        "$HOME_NET": "[10.0.0.0/8,172.16.0.0/12,192.168.0.0/16]"
+      },
+      "notes": "Blocks TLS/HTTP traffic based on AWS-maintained domain categories. Categories are automatically updated by AWS. For TLS protocol, inspects SNI field (works without TLS decryption). For HTTP protocol, inspects host header. Generates 1 rule per selected category. Cannot be combined with geoip filtering in the same rule. Domain category performs domain-level evaluation only (no URL path inspection).",
       "rule_generation": "dynamic"
     },
     {
@@ -2080,7 +2993,7 @@
       "name": "Default Block Rules",
       "category": "Default Deny",
       "description": "Comprehensive default deny ruleset for both egress and ingress traffic. These rules replace the \"Drop All\" or \"Drop Established\" default actions on the firewall policy.",
-      "icon": "🚪",
+      "icon": "\ud83d\udeaa",
       "complexity": "advanced",
       "template_type": "policy",
       "test_mode_supported": true,

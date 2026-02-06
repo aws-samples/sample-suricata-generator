@@ -1,5 +1,152 @@
 # Release Notes
 
+## Version 1.30.0 - February 5, 2026
+
+### Flow Tester Major Enhancement (v1.1.0) - Strict Order Mode with SIG Type Precedence
+- **Accurate AWS Network Firewall Flow Simulation**: Complete rewrite of flow testing engine to properly simulate AWS Network Firewall strict order mode processing with SIG type precedence
+  - **SIG Type Precedence Implementation**: Flow tester now processes rules by Suricata SIG type tier, then by line order within each tier
+    - **Tier 1**: SIG_TYPE_IPONLY rules (in line order) - Basic IP/protocol rules without keywords
+    - **Tier 2**: SIG_TYPE_PKT rules (in line order) - Rules with flow keywords
+    - **Tier 3**: SIG_TYPE_APPLAYER rules (in line order) - Rules with application-layer keywords
+    - **Processing Logic**: Each tier evaluated independently, all tiers contribute to final action determination
+  - **Strict Order Mode Compliance**: Once an action rule (PASS/DROP/REJECT) matches in any tier, no further rules are evaluated in that tier
+    - **Critical Change**: Alert rules after action rules are NOT evaluated (matches AWS NFW behavior)
+    - **Before Fix**: Alert rules continued processing after PASS rules (incorrect)
+    - **After Fix**: Processing stops at first action rule match per tier (correct)
+  - **Duplicate Rule Prevention**: Enhanced deduplication logic prevents same rule from appearing multiple times in matched rules list
+    - Fixes edge case where category-based rules could be listed twice
+    - Ensures clean, accurate results display
+  - **Enhanced User Guidance**: Added explanatory text to dialog: "Rules with categories are excluded from the test and shown in Orange in the results"
+  - **Increased Window Height**: Dialog increased from 900px to 920px to accommodate additional explanatory text
+  - **Category Rule Display**: Rules with aws_domain_category/aws_url_category properly shown in orange with "UNKNOWN" status indicator
+
+### Technical Implementation
+- **Major Refactoring**: Complete rewrite of `_test_flow_phase()` method in flow_tester.py
+  - Changed from flat line-order processing to hierarchical tier-based processing
+  - Implemented per-tier action tracking with `tier_action_taken` flag
+  - Each tier stops independently but all tiers are evaluated
+- **Deduplication Logic**: Added line number tracking and duplicate prevention in ui_manager.py
+- **Dialog Enhancement**: Added category rules explanatory label and increased window height
+
+### User Impact
+- **Accurate Flow Predictions**: Flow tester now correctly simulates how AWS Network Firewall will actually process your rules
+- **Proper Rule Ordering**: Respects both SIG type precedence and strict order mode for accurate results
+- **Eliminates False Results**: No more incorrect matches where alert rules appear after action rules should have stopped processing
+- **Category Rule Visibility**: Category-based rules clearly indicated as requiring AWS database lookup
+- **Professional Quality**: Flow tester behavior now matches actual AWS Network Firewall processing precisely
+
+### Breaking Change Note
+- **Alert Rule Behavior Change**: Alert rules appearing after action rules in the same tier will NO LONGER appear in results
+  - This is the CORRECT behavior for AWS Network Firewall strict order mode
+  - Previous versions incorrectly continued processing alert rules after action rules
+  - Update your test expectations accordingly
+
+## Version 1.30.0 - February 5, 2026
+
+### Flow Tester Enhancement (v1.0.5) - AWS Category Keyword Support
+- **Enhanced Flow Testing for Category-Based Rules**: Updated flow tester to properly handle rules with AWS category keywords without falsely blocking all traffic
+  - **Category Keyword Detection**: Flow tester now detects `aws_url_category` and `aws_domain_category` keywords and marks these rules as "unknown" rather than attempting to evaluate them
+  - **Problem Solved**: Previously, category rules would match all traffic of the protocol type, incorrectly showing flows as BLOCKED when they should depend on AWS category database lookup
+  - **Real-World Example**: 
+    - Rule: `drop tls $HOME_NET any -> any any (msg:"Block Education"; aws_domain_category:Education; sid:100;)`
+    - URL tested: "www.google.com"
+    - **Before Fix**: Flow tester showed traffic as BLOCKED (false positive - google.com is not in Education category)
+    - **After Fix**: Flow tester marks rule as UNKNOWN and shows in flow diagram with special indicator
+  - **Unknown Rule Tracking**: New `unknown_rules` array in test results tracks rules that require external database lookups
+    - Category-based rules (aws_url_category, aws_domain_category)
+    - Geolocation rules (geoip - already skipped, now consistent handling)
+    - Rules with flowbits:isnotset (stateful dependencies)
+  - **Flow Diagram Display**: Unknown rules will be displayed in the flow diagram with:
+    - Special color indicator (different from matched/alert rules)
+    - "UNKNOWN" status label indicating evaluation requires external data
+    - Line number and rule details for reference
+  - **Conservative Evaluation**: Flow tester skips category rules when determining final action, allowing subsequent rules to be evaluated
+  - **No False Blocks**: Category rules no longer incorrectly block all traffic - they're acknowledged as "cannot evaluate" instead
+- **Technical Implementation**: Modified `_rule_matches_flow()` to return tuple `(matches, status)` where status is 'match', 'no_match', or 'unknown'
+- **User Impact**: Flow tester now provides accurate results for rulesets with category keywords, eliminating false positives where all traffic appeared blocked by broad category rules
+
+### Rules Analysis Engine Enhancement (v1.10.3) - AWS Category Keyword Validation
+- **Added Protocol Validation for AWS Category Keywords**: Enhanced rule analyzer to validate protocol compatibility with new AWS category filtering keywords
+  - **New Keywords Supported**: `aws_url_category` and `aws_domain_category` (introduced in main program v1.30.0)
+  - **Protocol Requirements Enforced**:
+    - `aws_url_category`: Only supports HTTP protocol
+    - `aws_domain_category`: Supports TLS or HTTP protocols
+  - **Automatic Detection**: Analyzer now scans rules for category keywords and validates protocol compatibility
+  - **Warning Severity**: Protocol mismatches flagged as WARNING in protocol/keyword mismatch section
+  - **Real-World Examples**:
+    - `drop tcp ... (aws_url_category:Malware)` → WARNING: aws_url_category only supports HTTP protocol
+    - `drop udp ... (aws_domain_category:Phishing)` → WARNING: aws_domain_category only supports TLS or HTTP protocols
+  - **Clear Guidance**: Error messages specify current protocol, required protocol(s), and remediation steps
+  - **Integrated Reporting**: Category keyword violations appear in existing "⚠️ PROTOCOL/KEYWORD MISMATCH" section alongside other protocol validation issues
+- **Consistent with Save Validation**: Analyzer checks match the save-time validation already implemented in main program (ensures users can't save invalid category/protocol combinations)
+- **User Impact**: Proactive detection of category keyword misuse during rule analysis, preventing deployment failures and improving rule quality
+
+### Rules Analysis Engine Bug Fix (v1.10.2) - Variable Resolution
+- **Fixed AttributeError in Variable Resolution**: Corrected critical bug causing rule analyzer to crash when analyzing rules with network variables
+  - **Root Cause**: The `_parse_network_specification()` method attempted to call `.strip()` on a dictionary object when resolving variables from .var files
+  - **Impact**: Rule analyzer would crash with `AttributeError: 'dict' object has no attribute 'strip'` when analyzing files using variables stored in .var file format
+  - **Solution**: Enhanced variable resolution to detect dictionary format and extract the 'definition' key containing the actual network specification
+  - **Technical Fix**: Added type checking in `_parse_network_specification()` method (lines 327-333) to handle both string and dictionary variable formats
+  - **Backward Compatible**: Works with both legacy string format and enhanced dictionary format (.var files with descriptions)
+- **User Impact**: Rule analyzer now successfully completes analysis without crashes when processing rules with network variables and descriptions
+
+---
+
+## Version 1.30.0 - February 4, 2026
+
+### Major New Feature: AWS Network Firewall URL and Domain Category Filtering
+- **AWS Category-Based Traffic Filtering**: New comprehensive category filtering feature enables blocking or allowing traffic based on AWS-maintained content categories without manual domain list maintenance
+  - **51 Predefined Categories**: Leverage AWS's automatically-updated category database spanning security threats, productivity, lifestyle, business, financial, and restricted content
+    - **Security Threats** (10 categories): Malware, Phishing, Command and Control, Hacking, Malicious, Spam, and more
+    - **Restricted Content** (8 categories): Adult and Mature Content, Child Abuse, Gambling, Violence and Hate Speech, and more
+    - **Productivity** (9 categories): Social Networking, Entertainment, Online Ads, Shopping, Email, and more
+    - **Lifestyle** (14 categories): Health, Travel, Pets, Food and Dining, Fashion, Sports and Recreation, and more
+    - **Business/Professional** (8 categories): AI and Machine Learning, Education, Government and Legal, Military, and more
+    - **Financial** (2 categories): Cryptocurrency, Financial Services
+  - **Two AWS Keywords**: Support for both URL-level and domain-level category filtering
+    - **aws_url_category**: Evaluates complete URLs and domains (HTTP protocol only, requires TLS inspection for HTTPS effectiveness)
+    - **aws_domain_category**: Evaluates domain-level information from TLS SNI or HTTP host headers (works without TLS inspection)
+  - **Three Access Methods**: Multiple ways to work with categories for different skill levels and use cases
+    - **1. Rule Templates** (Primary): File → Insert Rules From Template → Block URL Categories or Block Domain Categories
+      - Two-panel selection UI with category grouping
+      - Select multiple categories at once from organized groups
+      - Generates 1 rule with comma-separated categories
+      - Includes test mode support
+    - **2. Insert Category Button** (Secondary): Quick insertion from main program editor
+      - Available when protocol is HTTP or TLS
+      - HTTP protocol: Choose between URL or Domain category via radio buttons
+      - TLS protocol: Automatically uses Domain category
+      - Multi-select support (Ctrl+click for multiple categories)
+      - Auto-populates message field with descriptive text
+    - **3. Advanced Editor** (Tertiary): Autocomplete support for power users
+      - Type-to-search through all 51 categories
+      - Real-time syntax validation
+      - Protocol mismatch detection with red squiggles
+  - **Multi-Select Support**: Select multiple categories to generate efficient comma-separated syntax
+    - Single rule handles multiple categories: `aws_domain_category:Malware,Phishing,Command and Control`
+    - Smart message generation: "Block Malware" or "Block Malware, Phishing, and 1 more"
+  - **Protocol Validation**: Comprehensive validation prevents invalid category/protocol combinations
+    - Save validation in main editor prevents accidentally saving invalid rules
+    - Advanced editor shows real-time red squiggles for protocol mismatches
+    - Clear error messages with remediation steps
+  - **Automatic Updates**: Categories maintained by AWS - no manual updates needed as threat landscape evolves
+
+### Business Value
+- **Simplified Security Management**: Block entire threat categories without maintaining domain lists manually
+- **Automatic Updates**: AWS updates category database automatically as new threats emerge
+- **Flexible Control**: Choose between URL-level (path inspection) or domain-level (SNI inspection) filtering
+- **Productivity Controls**: Block time-wasting categories (social media, entertainment, shopping) to improve focus
+- **Compliance Support**: Block restricted content categories for legal and HR compliance
+
+### User Impact
+- **Faster Rule Creation**: Generate category-based rules in seconds instead of manually researching and entering domains
+- **Better Coverage**: AWS's constantly-updated database provides broader threat protection than manual lists
+- **Multiple Workflows**: Choose template for bulk operations, editor button for quick additions, or advanced editor for power users
+- **Clear Organization**: 6 category groups make finding the right categories intuitive
+- **Smart Defaults**: Message auto-population and protocol detection reduce manual typing
+
+---
+
 ## Version 1.29.0 - February 1, 2026
 
 ### Major New Feature: Analyze Traffic Costs

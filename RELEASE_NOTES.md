@@ -1,5 +1,30 @@
 # Release Notes
 
+## Version 1.30.1 - February 10, 2026
+
+### Bug Fix: Python 3.7-3.11 Compatibility
+- **Fixed f-string Backslash Syntax Error**: Corrected Python version compatibility issue causing SyntaxError on Python versions earlier than 3.12
+  - **Root Cause**: Line 120 in `domain_importer.py` used backslash inside f-string expression (`filename.split('/')[-1].split('\\')[-1]`), which is only supported in Python 3.12+
+  - **Impact**: Users running Python 3.7-3.11 encountered `SyntaxError: f-string expression part cannot include a backslash` when importing the domain_importer module
+  - **Solution**: Replaced inline backslash operation with `os.path.basename(filename)` call outside the f-string
+  - **Before Fix**: `source_description = f"Text File ({filename.split('/')[-1].split('\\')[-1]})"`
+  - **After Fix**: `basename = os.path.basename(filename)` followed by `source_description = f"Text File ({basename})"`
+  - **Benefits**: More readable, cross-platform compatible (handles both `/` and `\` automatically), uses standard library function
+- **Confirmed Compatibility**: Program now runs successfully on Python 3.7 through 3.12+
+- **No Feature Changes**: This is a pure compatibility fix with no changes to functionality
+
+### Technical Implementation
+- Modified `domain_importer.py` line 120 to extract basename outside f-string expression
+- Leverages existing `os` module import (no new dependencies)
+- Cross-platform solution handles Windows and Unix path separators automatically
+
+### User Impact
+- **Broader Python Support**: Users running Python 3.7-3.11 can now use the program without syntax errors
+- **MacOS Compatibility**: Resolves reported issues from MacOS users running Python versions earlier than 3.12
+- **No Breaking Changes**: Users on Python 3.12+ experience no changes in functionality
+
+---
+
 ## Version 1.30.0 - February 5, 2026
 
 ### Flow Tester Major Enhancement (v1.1.0) - Strict Order Mode with SIG Type Precedence

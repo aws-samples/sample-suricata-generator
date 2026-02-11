@@ -3,6 +3,7 @@ from tkinter import ttk, filedialog, messagebox
 import urllib.request
 import urllib.error
 import re
+import os
 from typing import List, Optional, Dict
 
 from suricata_rule import SuricataRule
@@ -117,7 +118,9 @@ class DomainImporter:
                     messagebox.showwarning("Warning", "No domains found in the file.")
                     return
                 
-                source_description = f"Text File ({filename.split('/')[-1].split('\\')[-1]})"
+                # Extract basename outside f-string for Python <3.12 compatibility
+                basename = os.path.basename(filename)
+                source_description = f"Text File ({basename})"
                 protocols = ['http', 'tls']  # Default to both
                 
             except FileNotFoundError:

@@ -6,7 +6,7 @@ The rule analyzer and flow tester have their own separate version numbers.
 """
 
 # Main program version - update this single location for version changes
-MAIN_VERSION = "1.30.0"
+MAIN_VERSION = "1.30.1"
 
 # Rule analyzer version (managed separately)
 ANALYZER_VERSION = "1.10.3"

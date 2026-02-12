@@ -12407,7 +12407,7 @@ Would you like to run a complete analysis?"""
         
         # Category selection section
         select_frame = ttk.LabelFrame(main_frame, text="Select Category")
-        select_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 15))
+        select_frame.pack(fill=tk.X, expand=False, pady=(0, 15))
         
         select_content = ttk.Frame(select_frame)
         select_content.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
@@ -12421,7 +12421,7 @@ Would you like to run a complete analysis?"""
         
         # Category listbox with scrollbar (multi-select enabled)
         list_frame = ttk.Frame(select_content)
-        list_frame.pack(fill=tk.BOTH, expand=True)
+        list_frame.pack(fill=tk.BOTH, expand=False)
         
         category_listbox = tk.Listbox(list_frame, height=12, font=("TkDefaultFont", 10),
                                       selectmode=tk.EXTENDED)  # Enable multi-select
@@ -12445,7 +12445,7 @@ Would you like to run a complete analysis?"""
                 if search_term in category.lower():
                     category_listbox.insert(tk.END, category)
         
-        search_var.trace('w', filter_categories)
+        search_var.trace_add('write', filter_categories)
         
         # Preview section
         preview_frame = ttk.LabelFrame(main_frame, text="Preview")

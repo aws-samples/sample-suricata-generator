@@ -1,5 +1,43 @@
 # Release Notes
 
+## Version 1.30.3 - February 11, 2026
+
+### Bug Fix: MacOS Insert Category Dialog - Python 3.13 Compatibility and Layout
+- **Fixed Two MacOS-Specific Issues**: Resolved tkinter compatibility error and persistent button visibility problem in Insert Category dialog
+  - **Issue 1 - Python 3.13 trace() Syntax Error**: 
+    - **Root Cause**: Used deprecated `.trace('w', callback)` syntax causing `TclError: bad option "variable"` on Python 3.13
+    - **Impact**: MacOS users on Python 3.13 encountered immediate error when clicking "Insert Category" button
+    - **Solution**: Updated to modern `.trace_add('write', callback)` syntax in `show_category_picker_dialog()` method
+    - **Technical Fix**: Changed `search_var.trace('w', filter_categories)` to `search_var.trace_add('write', filter_categories)` (line 14448)
+  - **Issue 2 - Buttons Still Not Visible**:
+    - **Root Cause**: While v1.30.2 fixed the listbox container, the parent `select_frame` was still set to `expand=True`, causing it to consume all available space
+    - **Impact**: Even after v1.30.2 fix, MacOS users still couldn't see Preview section and Insert/Cancel buttons when resizing
+    - **Solution**: Changed `select_frame` from `fill=tk.BOTH, expand=True` to `fill=tk.X, expand=False`
+    - **Technical Fix**: Modified `select_frame.pack()` parameters in `show_category_picker_dialog()` method (line 14521)
+  - **Complete Fix**: Both `select_frame` and its child `list_frame` now use `expand=False` to maintain fixed sizes
+- **Same Pattern as Template Dialogs**: Follows the proven fix pattern from v1.24.5 and v1.24.6 (use `expand=False` to prevent widget expansion)
+- **Cross-Platform Compatibility**: Ensures consistent behavior across Python 3.7-3.13 on Windows, MacOS, and Linux
+
+### User Impact
+- **Python 3.13 Support**: MacOS users on latest Python can now use Insert Category feature without errors
+- **Full UI Visibility**: Preview section and buttons now properly visible on MacOS at all window sizes
+- **Professional Experience**: Insert Category dialog works reliably across all platforms and Python versions
+
+---
+
+## Version 1.30.2 - February 10, 2026
+
+### Bug Fix: MacOS Insert Category Dialog Display
+- **Fixed Missing Buttons on MacOS**: Resolved UI layout issue where Preview section and buttons were not visible in the Insert Category dialog on MacOS
+  - **Root Cause**: Category listbox container was set to `expand=True`, causing it to consume all available vertical space when the dialog was resized on MacOS, pushing the Preview section and Insert/Cancel buttons below the visible area
+  - **Impact**: Mac users could not see the Preview section or click Insert/Cancel buttons in the category picker dialog when using the "Insert Category" button in the main editor
+  - **Solution**: Changed listbox container from `expand=True` to `expand=False` to maintain fixed size
+  - **Technical Fix**: Modified `show_category_picker_dialog()` method in `ui_manager.py` line 14527
+  - **Consistency**: Same fix pattern as version 1.24.5 (MacOS template dialog) - using `expand=False` prevents widget expansion on window resize
+- **User Impact**: MacOS users can now fully use the Insert Category feature with all UI elements visible and accessible
+
+---
+
 ## Version 1.30.1 - February 10, 2026
 
 ### Bug Fix: Python 3.7-3.11 Compatibility

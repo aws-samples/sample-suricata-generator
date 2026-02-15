@@ -48,6 +48,16 @@ class RuleUsageAnalyzer:
 | sort hits desc
 | limit 10000"""
     
+    # Category analysis query - retrieves per-alert category and hostname data
+    # Only returns alerts that have aws_category data (from aws_domain_category/aws_url_category rules)
+    CATEGORY_QUERY = """fields event.alert.signature_id as sid,
+       event.aws_category as categories,
+       event.http.hostname as http_host,
+       event.tls.sni as tls_sni
+| filter event.event_type = "alert"
+| filter isPresent(event.aws_category)
+| limit 10000"""
+    
     def __init__(self, debug_force_pagination=False):
         """Initialize the Rule Usage Analyzer
         
@@ -120,7 +130,9 @@ class RuleUsageAnalyzer:
         progress_callback=None,
         cancel_flag=None,
         rules: Optional[List] = None,
-        region: Optional[str] = None
+        region: Optional[str] = None,
+        start_date=None,
+        end_date=None
     ) -> Optional[Dict]:
         """Analyze rule usage from CloudWatch Logs
         
@@ -134,6 +146,8 @@ class RuleUsageAnalyzer:
             cancel_flag: Optional list with single boolean element to check for cancellation
             rules: Optional list of SuricataRule objects (needed to detect unlogged rules)
             region: Optional AWS region to use (uses default credentials region if not specified)
+            start_date: Optional custom start date (datetime.date) for custom date range
+            end_date: Optional custom end date (datetime.date) for custom date range
             
         Returns:
             Dict with comprehensive analysis results, or None if cancelled/failed
@@ -142,9 +156,15 @@ class RuleUsageAnalyzer:
             raise ImportError("boto3 is required for CloudWatch analysis")
         
         try:
-            # Calculate time range
-            end_time = datetime.now()
-            start_time = end_time - timedelta(days=time_range_days)
+            # Calculate time range - use custom dates if provided, otherwise use days offset
+            if start_date and end_date:
+                # Custom date range: convert date objects to datetime at start/end of day
+                start_time = datetime.combine(start_date, datetime.min.time())
+                end_time = datetime.combine(end_date, datetime.max.time())
+            else:
+                # Preset range: calculate from current time
+                end_time = datetime.now()
+                start_time = end_time - timedelta(days=time_range_days)
             
             # Create CloudWatch Logs client with specified region
             client = boto3.client('logs', region_name=region) if region else boto3.client('logs')
@@ -328,6 +348,17 @@ class RuleUsageAnalyzer:
                 len(file_sids)  # Total including unlogged for percentage calculation
             )
             
+            # Run category analysis query (separate, non-blocking)
+            # This retrieves per-alert category/hostname data for rules using
+            # aws_domain_category or aws_url_category keywords
+            if progress_callback:
+                progress_callback(0, 100, "Querying category data...")
+            
+            category_data = self.query_category_data(
+                client, log_group_name, start_time, end_time,
+                progress_callback, cancel_flag, rules
+            )
+            
             # Store and return results in format expected by UI
             self.last_analysis_timestamp = datetime.now()
             self.last_analysis_results = {
@@ -346,7 +377,8 @@ class RuleUsageAnalyzer:
                 'health_score': health_score,
                 'low_freq_threshold': low_frequency_threshold,
                 'min_days_in_production': min_days_in_production,
-                'partial_results': partial_results  # CloudWatch pagination: track if results are partial
+                'partial_results': partial_results,  # CloudWatch pagination: track if results are partial
+                'category_analysis': category_data  # Category domain analysis data
             }
             
             return self.last_analysis_results
@@ -851,6 +883,369 @@ class RuleUsageAnalyzer:
         
         # Ensure bounds [0, 100]
         return int(max(0, min(100, score)))
+    
+    def query_category_data(self, client, log_group_name, start_time, end_time,
+                            progress_callback, cancel_flag, rules):
+        """Query CloudWatch for category and hostname data from alerts.
+        
+        This runs a separate query to retrieve per-alert category/hostname data
+        for rules using aws_domain_category or aws_url_category keywords.
+        
+        Args:
+            client: boto3 CloudWatch Logs client
+            log_group_name: CloudWatch log group name
+            start_time: Analysis start time
+            end_time: Analysis end time
+            progress_callback: Progress update callback
+            cancel_flag: Cancellation flag
+            rules: List of SuricataRule objects (for action lookup)
+        
+        Returns:
+            Dict mapping category → domain aggregation data,
+            or empty dict if no category data found or query fails.
+        """
+        try:
+            if progress_callback:
+                progress_callback(0, 100, "Querying category data from CloudWatch...")
+            
+            response = client.start_query(
+                logGroupName=log_group_name,
+                startTime=int(start_time.timestamp()),
+                endTime=int(end_time.timestamp()),
+                queryString=self.CATEGORY_QUERY,
+                limit=10000
+            )
+            
+            query_id = response['queryId']
+            
+            # Poll for results (same pattern as existing query)
+            timeout = 90
+            poll_start = datetime.now()
+            
+            while True:
+                elapsed = (datetime.now() - poll_start).total_seconds()
+                if elapsed > timeout:
+                    return {}  # Timeout — return empty, don't block main analysis
+                
+                if cancel_flag and cancel_flag[0]:
+                    return {}
+                
+                result = client.get_query_results(queryId=query_id)
+                status = result['status']
+                
+                if progress_callback:
+                    try:
+                        progress_callback(0, 100,
+                            f"Querying category data... ({int(elapsed)}s elapsed)")
+                    except:
+                        pass
+                
+                if status == 'Complete':
+                    break
+                elif status in ['Failed', 'Cancelled']:
+                    return {}
+                
+                time.sleep(1)
+            
+            # Parse results
+            alert_records = self._parse_category_results(result)
+            
+            if not alert_records:
+                return {}
+            
+            # Build SID → rule lookup
+            rules_by_sid = {}
+            if rules:
+                for rule in rules:
+                    if not getattr(rule, 'is_comment', False) and not getattr(rule, 'is_blank', False):
+                        rules_by_sid[rule.sid] = rule
+            
+            # Build set of SIDs that belong to category rules, and which
+            # specific categories each SID targets
+            # Only these SIDs should appear in the category analysis results
+            category_rule_sids, sid_to_categories = self._extract_category_rule_sids(rules)
+            
+            # Aggregate into category → domain structure
+            category_data = self._aggregate_category_data(
+                alert_records, rules_by_sid, category_rule_sids, sid_to_categories)
+            
+            # Track if results are potentially truncated
+            if len(result.get('results', [])) >= 10000:
+                category_data['_truncated'] = True
+            
+            return category_data
+        
+        except Exception as e:
+            # Category query failure should not block main analysis
+            print(f"Category query failed (non-fatal): {str(e)}")
+            return {}
+    
+    def _parse_category_results(self, result):
+        """Parse CloudWatch category query results into list of alert records.
+        
+        Args:
+            result: CloudWatch query result dictionary
+        
+        Returns:
+            List of dicts with keys: sid, categories, http_host, tls_sni
+        """
+        records = []
+        
+        for row in result.get('results', []):
+            record = {}
+            for field in row:
+                field_name = field.get('field', '')
+                field_value = field.get('value', '')
+                
+                if field_name == 'sid':
+                    record['sid'] = field_value
+                elif field_name == 'categories':
+                    record['categories'] = field_value
+                elif field_name == 'http_host':
+                    record['http_host'] = field_value
+                elif field_name == 'tls_sni':
+                    record['tls_sni'] = field_value
+            
+            if record.get('categories'):
+                records.append(record)
+        
+        return records
+    
+    def _extract_category_rule_sids(self, rules):
+        """Extract SIDs of rules that use aws_domain_category or aws_url_category keywords,
+        along with which specific categories each SID targets.
+        
+        This identifies which rules are "category rules" so that alerts from
+        non-category rules can be excluded from the category analysis. It also
+        maps each SID to the specific categories it targets, so that a SID is
+        only associated with the categories its rule actually matches against.
+        
+        Args:
+            rules: List of SuricataRule objects
+            
+        Returns:
+            Tuple of (category_rule_sids, sid_to_categories) where:
+              - category_rule_sids: Set of SIDs (int) for rules that use category keywords
+              - sid_to_categories: Dict mapping SID (int) → set of category name strings
+                that the rule targets
+        """
+        import re
+        category_sids = set()
+        sid_to_categories = {}
+        
+        if not rules:
+            return category_sids, sid_to_categories
+        
+        for rule in rules:
+            if getattr(rule, 'is_comment', False) or getattr(rule, 'is_blank', False):
+                continue
+            
+            # Check content and original_options for category keywords
+            options_text = f"{rule.content} {getattr(rule, 'original_options', '')}"
+            
+            # Match aws_domain_category:Value or aws_url_category:Value
+            # Categories can be comma-separated: aws_domain_category:Malware,Phishing
+            targeted_cats = set()
+            for match in re.finditer(r'aws_(?:domain|url)_category:([^;]+)', options_text):
+                cat_str = match.group(1).strip()
+                for cat in cat_str.split(','):
+                    cat = cat.strip()
+                    if cat:
+                        targeted_cats.add(cat)
+            
+            if targeted_cats:
+                category_sids.add(rule.sid)
+                sid_to_categories[rule.sid] = targeted_cats
+        
+        return category_sids, sid_to_categories
+    
+    def _aggregate_category_data(self, alert_records, rules_by_sid,
+                                 category_rule_sids=None, sid_to_categories=None):
+        """Aggregate alert records into category → domain structure.
+        
+        Only includes alerts from rules that use aws_domain_category or
+        aws_url_category keywords. Alerts from non-category rules are excluded
+        to prevent unrelated SIDs from appearing in the category analysis.
+        
+        Additionally, a SID is only associated with the specific categories
+        that its rule targets. For example, if SID 100 targets "Business and Economy"
+        and a domain belongs to both "Business and Economy" and "Technology and Internet",
+        SID 100 will only appear under "Business and Economy" — not under
+        "Technology and Internet" (unless another rule targeting that category also matched).
+        
+        The rule_count field reflects how many rules in the file TARGET each category,
+        not just how many rules fired in CloudWatch data. This ensures the dropdown
+        label accurately shows that the user has rules defined for a category even if
+        a different rule (earlier in strict rule ordering) fired first.
+        
+        Args:
+            alert_records: List of parsed alert record dicts
+            rules_by_sid: Dict mapping SID → SuricataRule
+            category_rule_sids: Set of SIDs that belong to category rules.
+                If provided, alerts from non-category rules are excluded.
+            sid_to_categories: Dict mapping SID (int) → set of category name strings
+                that the rule targets. If provided, a SID is only associated with
+                the categories its rule actually matches against.
+        
+        Returns:
+            Dict mapping category_name → {
+                'total_hits': int,
+                'rule_count': int,
+                'rule_sids': list,
+                'unique_domains': int,
+                'domains': {
+                    hostname: {
+                        'hits': int,
+                        'percent': float,
+                        'matched_sids': list,
+                        'actions': list
+                    }
+                }
+            }
+        """
+        import json
+        from collections import defaultdict
+        
+        # Build category → set of SIDs that target it (from rule file, not CloudWatch)
+        # This gives the "defined rule count" for each category regardless of what fired
+        category_to_defined_sids = defaultdict(set)
+        if sid_to_categories:
+            for sid, cats in sid_to_categories.items():
+                for cat in cats:
+                    category_to_defined_sids[cat].add(sid)
+        
+        # Temporary structure using sets for deduplication
+        cat_temp = defaultdict(lambda: {
+            'total_hits': 0,
+            'direct_hits': 0,
+            'rule_sids': set(),
+            'domains': defaultdict(lambda: {
+                'hits': 0,
+                'matched_sids': set(),
+                'actions': set()
+            })
+        })
+        
+        for alert in alert_records:
+            sid_str = alert.get('sid')
+            aws_category_str = alert.get('categories')
+            hostname = alert.get('http_host') or alert.get('tls_sni') or '(unknown)'
+            
+            if not aws_category_str:
+                continue
+            
+            sid = int(sid_str) if sid_str else None
+            
+            # Skip alerts from non-category rules
+            # The CloudWatch query returns all alerts with aws_category data present,
+            # but aws_category can be present on alerts from ANY rule that fires on a
+            # connection where category evaluation occurred. We only want alerts from
+            # rules that actually use aws_domain_category or aws_url_category keywords.
+            if category_rule_sids is not None and sid is not None:
+                if sid not in category_rule_sids:
+                    continue
+            
+            try:
+                categories = json.loads(aws_category_str)
+            except (json.JSONDecodeError, TypeError):
+                continue
+            
+            rule = rules_by_sid.get(sid) if sid else None
+            action = rule.action.upper() if rule else '(unknown)'
+            
+            # Determine which categories this SID actually targets
+            # If sid_to_categories is available, only associate the SID with
+            # categories the rule actually matches against
+            sid_targeted_cats = None
+            if sid_to_categories is not None and sid is not None:
+                sid_targeted_cats = sid_to_categories.get(sid)
+            
+            for category in categories:
+                # Determine if the SID should be associated with this category
+                # The alert record always lists ALL categories the domain belongs to,
+                # but the SID should only appear under categories it actually targets
+                sid_targets_this_cat = True
+                if sid_targeted_cats is not None:
+                    sid_targets_this_cat = category in sid_targeted_cats
+                
+                cat = cat_temp[category]
+                cat['total_hits'] += 1
+                if sid and sid_targets_this_cat:
+                    cat['direct_hits'] += 1
+                    cat['rule_sids'].add(sid)
+                
+                dom = cat['domains'][hostname]
+                dom['hits'] += 1
+                if sid and sid_targets_this_cat:
+                    dom['matched_sids'].add(sid)
+                dom['actions'].add(action)
+        
+        # Convert to serializable format with percentages
+        result = {}
+        for category, data in cat_temp.items():
+            total = data['total_hits']
+            domains = {}
+            for hostname, dom_data in data['domains'].items():
+                domains[hostname] = {
+                    'hits': dom_data['hits'],
+                    'percent': round((dom_data['hits'] / total * 100), 1) if total > 0 else 0,
+                    'matched_sids': sorted(list(dom_data['matched_sids'])),
+                    'actions': sorted(list(dom_data['actions']))
+                }
+            
+            # rule_count reflects how many rules in the file TARGET this category,
+            # not just how many fired. This is important when strict rule ordering
+            # causes an earlier rule to fire instead of the one targeting this category.
+            defined_sids = category_to_defined_sids.get(category, set())
+            
+            result[category] = {
+                'total_hits': total,
+                'direct_hits': data['direct_hits'],
+                'rule_count': len(defined_sids),
+                'rule_sids': sorted(list(data['rule_sids'])),
+                'unique_domains': len(domains),
+                'domains': domains
+            }
+        
+        return result
+    
+    @staticmethod
+    def extract_rule_categories(rules):
+        """Extract aws_domain_category and aws_url_category values from rules.
+        
+        Scans all rules for aws_domain_category and aws_url_category keywords
+        and returns the set of category names that have rules defined for them.
+        
+        Args:
+            rules: List of SuricataRule objects
+            
+        Returns:
+            Set of category name strings found in rules
+        """
+        import re
+        categories = set()
+        
+        if not rules:
+            return categories
+        
+        for rule in rules:
+            if getattr(rule, 'is_comment', False) or getattr(rule, 'is_blank', False):
+                continue
+            
+            # Check content and original_options for category keywords
+            options_text = f"{rule.content} {getattr(rule, 'original_options', '')}"
+            
+            # Match aws_domain_category:Value or aws_url_category:Value
+            # Categories can be comma-separated: aws_domain_category:Malware,Phishing
+            for match in re.finditer(r'aws_(?:domain|url)_category:([^;]+)', options_text):
+                cat_str = match.group(1).strip()
+                # Split comma-separated categories
+                for cat in cat_str.split(','):
+                    cat = cat.strip()
+                    if cat:
+                        categories.add(cat)
+        
+        return categories
     
     def get_health_status(self, score: int) -> str:
         """Get health status label from score

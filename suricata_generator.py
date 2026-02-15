@@ -2372,18 +2372,29 @@ class SuricataRuleGenerator:
         Only reassigns SIDs when there's an actual conflict. Preserves original
         SIDs when they don't conflict with existing rules.
         """
+        # Build set of SIDs from existing rules in the program
         existing_sids = {rule.sid for rule in self.rules 
                          if not getattr(rule, 'is_comment', False) 
                          and not getattr(rule, 'is_blank', False)}
         
-        next_sid = max(existing_sids, default=99) + 1
+        # CRITICAL FIX: Also include ALL SIDs from the new rules being pasted
+        # This prevents assigning a renumbered SID that conflicts with a later rule in the paste batch
+        all_new_sids = {rule.sid for rule in new_rules 
+                        if not getattr(rule, 'is_comment', False) 
+                        and not getattr(rule, 'is_blank', False)}
+        
+        # Combine both sets to get the complete picture of all SIDs in use
+        all_sids_in_use = existing_sids | all_new_sids
+        
+        # Find a safe starting point for renumbering (beyond all SIDs in use)
+        next_sid = max(all_sids_in_use, default=99) + 1
         
         for rule in new_rules:
             if not getattr(rule, 'is_comment', False) and not getattr(rule, 'is_blank', False):
-                # Check if rule's current SID conflicts with existing rules
+                # Check if rule's current SID conflicts with existing rules in the program
                 if rule.sid in existing_sids:
-                    # Conflict detected - find next available SID
-                    while next_sid in existing_sids:
+                    # Conflict detected - find next available SID that doesn't conflict with anything
+                    while next_sid in all_sids_in_use:
                         next_sid += 1
                     
                     # Reassign to avoid conflict
@@ -2392,10 +2403,14 @@ class SuricataRuleGenerator:
                     if rule.original_options:
                         import re
                         rule.original_options = re.sub(r'sid:\d+', f'sid:{next_sid}', rule.original_options)
-                    existing_sids.add(next_sid)
+                    
+                    # Update tracking: remove old SID from all_sids_in_use, add new one
+                    all_sids_in_use.discard(rule.sid)  # Remove original (now unused)
+                    all_sids_in_use.add(next_sid)  # Add new assigned SID
+                    existing_sids.add(next_sid)  # Also track in existing for future conflict checks
                     next_sid += 1
                 else:
-                    # No conflict - keep original SID and add to tracking set
+                    # No conflict - keep original SID and add to existing set
                     existing_sids.add(rule.sid)
 
     def paste_rules(self):

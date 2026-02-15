@@ -1,6 +1,6 @@
 # Suricata Rule Generator for AWS Network Firewall
 
-**Current Version: 1.30.0**
+**Current Version: 1.31.0**
 
 A GUI application for creating, editing, and managing Suricata rules - specifically designed for AWS Network Firewall deployments using strict rule ordering.
 
@@ -35,7 +35,8 @@ A GUI application for creating, editing, and managing Suricata rules - specifica
 
 ### 🎯 Advanced Features
 - [Rule Templates](#rule-templates)
-- [URL and Domain Category Filtering](#url-and-domain-category-filtering) ⭐ NEW
+- [URL and Domain Category Filtering](#url-and-domain-category-filtering)
+- [Category-Based Domain Analysis](#category-based-domain-analysis) ⭐ NEW
 - [Bulk Domain Import](#bulk-domain-import)
 - [AWS Rule Group Import](#aws-rule-group-import)
 - [Rule Filtering](#rule-filtering)
@@ -1181,6 +1182,63 @@ drop tls $HOME_NET any -> any any (msg:"Block Child Abuse, Adult and Mature Cont
 - ✅ **Export Support:** Category rules export correctly to Terraform, CloudFormation, and AWS
 
 > 💡 **Pro Tip**: Use templates for initial security baseline (select all security threats), then use Insert Category button for one-off additions.
+
+---
+
+## Category-Based Domain Analysis
+
+> 📊 **See which domains triggered each category rule** — compliance reporting, threat intelligence, and policy validation! ⭐ NEW in v1.31.0
+
+![Category Analysis](images/category_analysis.png)
+
+After deploying category rules and running **Tools > Analyze Rule Usage**, the new **Categories tab** (Tab 9) in the results window shows which specific domains were seen in CloudWatch alert logs for each URL/domain category.
+
+### What You Get
+
+**Category Dropdown:**
+- Browse all categories with rule counts and hit totals
+- Rule-defined categories always appear (even with 0 hits)
+- Discovered categories from CloudWatch added automatically
+- Format: `Category Name (N rules, M hits)`
+
+**Domain Table:**
+- Sortable columns: Domain/Hostname, Hits, % of Category, Rule SID, Action
+- **Direct domains** (normal text): A rule targeting this category matched the domain — real hits, SIDs, and actions displayed
+- **Indirect domains** (greyed out, n/a): Domain belongs to this category per AWS's database, but a different category's rule fired first due to strict rule ordering
+
+### Use Cases
+
+**Compliance Reporting:**
+- "Show me all Command & Control domains we detected this month"
+- "Which Malware domains did we block?"
+
+**Threat Intelligence:**
+- Understand attack patterns by category with per-domain hit counts
+- Identify frequently-seen threat domains
+
+**Policy Validation:**
+- Verify category-based rules catch expected traffic
+- Spot domains appearing in unexpected categories
+- Identify categories with 0 direct hits (rules may be shadowed by earlier rules)
+
+### Features
+
+- **Separate CloudWatch Query**: Independent query that doesn't affect other analysis tabs
+- **Truncation Warning**: Banner displayed if results hit the 10,000 record limit
+- **Export Category Report**: Export all categories with domain tables to a text report
+- **Help Button**: In-tab documentation explaining direct vs indirect domains, dropdown labels, and strict rule ordering effects
+- **Persistent Cache**: Category data saved in `.stats` files for instant access without re-querying CloudWatch
+- **Empty State Guidance**: Clear instructions when no category data exists
+
+### How It Works
+
+1. Create rules using `aws_domain_category` or `aws_url_category` keywords
+2. Deploy rules to AWS Network Firewall
+3. Run **Tools > Analyze Rule Usage** — the category query runs automatically
+4. Open the **Categories** tab in the results window
+5. Select a category from the dropdown to view its domains
+
+> 💡 **Direct vs Indirect**: With strict rule ordering, an earlier rule may fire before a rule targeting the selected category. Those domains appear greyed out with "n/a" values — they belong to the category per AWS's database, but no rule targeting that specific category matched them.
 
 ---
 
@@ -2638,7 +2696,8 @@ Suricata internally classifies rules by their keywords and protocol:
 - ✅ Toggle selection for workflow flexibility
 
 ### Advanced Features
-- ✅ **URL and Domain Category Filtering** *(v1.30.0)*: AWS-maintained category blocking (51 categories) ⭐ NEW
+- ✅ **URL and Domain Category Filtering** *(v1.30.0)*: AWS-maintained category blocking (51 categories)
+- ✅ **Category-Based Domain Analysis** *(v1.31.0)*: See which domains triggered each category rule ⭐ NEW
 - ✅ **CloudWatch Rule Usage Analysis** *(v1.27.0)*: Production rule effectiveness analytics
 - ✅ **Analyze Traffic Costs** *(v1.29.0)*: VPC endpoint recommendations and cost analysis
 - ✅ **AWS Direct Import** *(v1.27.3)*: Browse and import rule groups directly from AWS

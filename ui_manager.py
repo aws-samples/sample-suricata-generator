@@ -466,6 +466,69 @@ class UIManager:
         ttk.Radiobutton(time_frame, text="Last 30 days", variable=time_var, value=30).pack(anchor=tk.W)
         ttk.Radiobutton(time_frame, text="Last 60 days", variable=time_var, value=60).pack(anchor=tk.W)
         ttk.Radiobutton(time_frame, text="Last 90 days", variable=time_var, value=90).pack(anchor=tk.W)
+        ttk.Radiobutton(time_frame, text="Custom date range",
+                       variable=time_var, value=0).pack(anchor=tk.W, pady=(5, 0))
+        
+        # Custom date range fields (initially disabled)
+        custom_frame = ttk.Frame(time_frame)
+        custom_frame.pack(fill=tk.X, padx=(20, 0), pady=(5, 0))
+        
+        # Try to import tkcalendar for date picker, fall back to simple entry if not available
+        try:
+            from tkcalendar import DateEntry
+            HAS_TKCALENDAR = True
+        except ImportError:
+            HAS_TKCALENDAR = False
+        
+        # Use last custom dates if available, otherwise default to 30 days ago → today
+        if getattr(self.parent, '_last_usage_start_date', None) and getattr(self.parent, '_last_usage_end_date', None):
+            default_start = datetime.combine(self.parent._last_usage_start_date, datetime.min.time())
+            default_end = datetime.combine(self.parent._last_usage_end_date, datetime.min.time())
+        else:
+            default_end = datetime.now()
+            default_start = default_end - timedelta(days=30)
+        
+        # Start date
+        start_frame = ttk.Frame(custom_frame)
+        start_frame.pack(side=tk.LEFT, padx=(0, 10))
+        ttk.Label(start_frame, text="Start Date:").pack(side=tk.LEFT, padx=(0, 5))
+        
+        if HAS_TKCALENDAR:
+            start_date_entry = DateEntry(start_frame, width=12, background='darkblue',
+                                         foreground='white', borderwidth=2,
+                                         year=default_start.year, month=default_start.month, day=default_start.day)
+            start_date_entry.pack(side=tk.LEFT)
+        else:
+            start_date_var = tk.StringVar(value=default_start.strftime('%Y-%m-%d'))
+            start_date_entry = ttk.Entry(start_frame, textvariable=start_date_var, width=12)
+            start_date_entry.pack(side=tk.LEFT)
+        
+        # End date
+        end_frame = ttk.Frame(custom_frame)
+        end_frame.pack(side=tk.LEFT)
+        ttk.Label(end_frame, text="End Date:").pack(side=tk.LEFT, padx=(0, 5))
+        
+        if HAS_TKCALENDAR:
+            end_date_entry = DateEntry(end_frame, width=12, background='darkblue',
+                                       foreground='white', borderwidth=2,
+                                       year=default_end.year, month=default_end.month, day=default_end.day)
+            end_date_entry.pack(side=tk.LEFT)
+        else:
+            end_date_var = tk.StringVar(value=default_end.strftime('%Y-%m-%d'))
+            end_date_entry = ttk.Entry(end_frame, textvariable=end_date_var, width=12)
+            end_date_entry.pack(side=tk.LEFT)
+        
+        # Enable/disable custom date fields based on radio selection
+        def update_custom_date_state(*args):
+            if time_var.get() == 0:  # Custom range selected
+                start_date_entry.config(state='normal')
+                end_date_entry.config(state='normal')
+            else:
+                start_date_entry.config(state='disabled')
+                end_date_entry.config(state='disabled')
+        
+        time_var.trace_add('write', update_custom_date_state)
+        update_custom_date_state()  # Set initial state
         
         # Threshold Settings - remember last values during session
         ttk.Label(main_frame, text="Detection Thresholds:").pack(anchor=tk.W, pady=(10, 5))
@@ -509,17 +572,69 @@ class UIManager:
             # Get selected region
             selected_region = region_var.get()
             
-            # Save parameters for session memory (not persisted to disk)
-            self.parent._last_log_group = log_group
-            self.parent._last_time_range = time_var.get()
-            self.parent._last_low_freq_threshold = low_freq_threshold
-            self.parent._last_min_days_in_production = min_days
-            self.parent._last_region = selected_region
+            days_value = time_var.get()
             
-            dialog.destroy()
-            
-            # Run analysis with progress dialog (Phase 3) - pass region
-            self.run_usage_analysis(log_group, time_var.get(), low_freq_threshold, min_days, selected_region)
+            # Handle custom date range
+            if days_value == 0:  # Custom range selected
+                try:
+                    if HAS_TKCALENDAR:
+                        start_date = start_date_entry.get_date()  # Returns datetime.date
+                        end_date = end_date_entry.get_date()
+                    else:
+                        # Parse from string format YYYY-MM-DD
+                        start_str = start_date_var.get()
+                        end_str = end_date_var.get()
+                        start_date = datetime.strptime(start_str, '%Y-%m-%d').date()
+                        end_date = datetime.strptime(end_str, '%Y-%m-%d').date()
+                    
+                    # Validate: start must not be after end
+                    if start_date > end_date:
+                        messagebox.showerror("Invalid Date Range",
+                                           "Start date must be before or equal to end date.")
+                        return
+                    
+                    # Validate: end date can't be in future
+                    if end_date > datetime.now().date():
+                        messagebox.showwarning("Future Date",
+                                             "End date is in the future. Using today instead.")
+                        end_date = datetime.now().date()
+                    
+                    # Calculate time_range_days from custom dates for display purposes
+                    time_range_days = (end_date - start_date).days
+                    if time_range_days == 0:
+                        time_range_days = 1  # Single day analysis
+                    
+                except ValueError:
+                    messagebox.showerror("Invalid Date",
+                                       "Please enter valid dates in YYYY-MM-DD format.")
+                    return
+                
+                # Save parameters for session memory
+                self.parent._last_log_group = log_group
+                self.parent._last_time_range = 0  # Custom
+                self.parent._last_usage_start_date = start_date
+                self.parent._last_usage_end_date = end_date
+                self.parent._last_low_freq_threshold = low_freq_threshold
+                self.parent._last_min_days_in_production = min_days
+                self.parent._last_region = selected_region
+                
+                dialog.destroy()
+                
+                # Run with custom dates
+                self.run_usage_analysis(log_group, time_range_days, low_freq_threshold, min_days,
+                                       selected_region, start_date=start_date, end_date=end_date)
+            else:
+                # Save parameters for session memory (not persisted to disk)
+                self.parent._last_log_group = log_group
+                self.parent._last_time_range = days_value
+                self.parent._last_low_freq_threshold = low_freq_threshold
+                self.parent._last_min_days_in_production = min_days
+                self.parent._last_region = selected_region
+                
+                dialog.destroy()
+                
+                # Run analysis with progress dialog (Phase 3) - pass region
+                self.run_usage_analysis(log_group, days_value, low_freq_threshold, min_days, selected_region)
         
         ttk.Button(button_frame, text="Analyze", command=on_analyze).pack(side=tk.LEFT, padx=5)
         ttk.Button(button_frame, text="Cancel", command=dialog.destroy).pack(side=tk.LEFT, padx=5)
@@ -686,7 +801,7 @@ class UIManager:
             return None
     
     # Phase 3: Progress Dialog
-    def run_usage_analysis(self, log_group, time_range_days, low_freq_threshold, min_days_in_production, region=None):
+    def run_usage_analysis(self, log_group, time_range_days, low_freq_threshold, min_days_in_production, region=None, start_date=None, end_date=None):
         """Run CloudWatch analysis with progress dialog
         
         Args:
@@ -695,6 +810,8 @@ class UIManager:
             low_freq_threshold: Threshold for low-frequency classification
             min_days_in_production: Minimum days in production
             region: AWS region to use (optional, uses default if not specified)
+            start_date: Optional custom start date (datetime.date)
+            end_date: Optional custom end date (datetime.date)
         """
         # Create progress dialog
         progress_dialog = tk.Toplevel(self.parent.root)
@@ -826,7 +943,9 @@ class UIManager:
                     progress_callback=progress_callback,
                     cancel_flag=cancel_flag,
                     rules=self.parent.rules,  # Pass rules list to detect unlogged rules
-                    region=region  # Pass selected region to analyzer
+                    region=region,  # Pass selected region to analyzer
+                    start_date=start_date,  # Custom date range (None for preset ranges)
+                    end_date=end_date
                 )
                 
                 # Check if analysis was cancelled (returns None)
@@ -1027,7 +1146,7 @@ Would you like to run a complete analysis?"""
         # Create results window
         results_window = tk.Toplevel(self.parent.root)
         results_window.title("Rule Usage Analysis Results")
-        results_window.geometry("1000x900")  # Increased height to show Close button and all tab content
+        results_window.geometry("1150x900")  # Increased width for Categories tab visibility and height to show Close button and all tab content
         results_window.transient(self.parent.root)
         results_window.resizable(True, True)  # Allow user to resize window
         
@@ -3168,6 +3287,43 @@ Would you like to run a complete analysis?"""
                  text=f"Count: {count} untracked SIDs detected in CloudWatch logs",
                  font=("TkDefaultFont", 10)).pack(anchor=tk.W)
         
+        # Tab 9: Categories (Category-Based Domain Analysis)
+        category_data = dict(analysis_results.get('category_analysis', {}))
+        is_truncated = category_data.pop('_truncated', False)
+        
+        # Get rule-defined categories from the loaded rules
+        from rule_usage_analyzer import RuleUsageAnalyzer
+        rule_defined_categories = RuleUsageAnalyzer.extract_rule_categories(self.parent.rules)
+        
+        # Build per-category rule count from rules file for accurate counts
+        # This handles categories that have no CloudWatch data but DO have rules targeting them
+        from rule_usage_analyzer import RuleUsageAnalyzer
+        _, sid_to_cats = RuleUsageAnalyzer()._extract_category_rule_sids(self.parent.rules)
+        cat_to_rule_count = {}
+        for sid, cats in sid_to_cats.items():
+            for cat in cats:
+                cat_to_rule_count[cat] = cat_to_rule_count.get(cat, 0) + 1
+        
+        # Merge rule-defined categories (add entries with correct rule_count for categories not in CloudWatch data)
+        for rule_cat in rule_defined_categories:
+            if rule_cat not in category_data:
+                category_data[rule_cat] = {
+                    'total_hits': 0,
+                    'direct_hits': 0,
+                    'rule_count': cat_to_rule_count.get(rule_cat, 0),
+                    'rule_sids': [],
+                    'unique_domains': 0,
+                    'domains': {}
+                }
+        
+        category_count = len(category_data)
+        
+        categories_tab = ttk.Frame(notebook)
+        notebook.add(categories_tab, text=f"Categories ({category_count})")
+        
+        self._create_categories_tab(categories_tab, category_data, is_truncated,
+                                    analysis_results, rule_defined_categories)
+        
         # Save and Close buttons at bottom
         close_frame = ttk.Frame(main_frame)
         close_frame.pack(pady=(10, 0))
@@ -4903,9 +5059,11 @@ Would you like to run a complete analysis?"""
                 except (ValueError, TypeError):
                     return 999
             # For percentage columns (% Traffic, Cumulative %), strip % and convert to float
-            elif col in ["% Traffic", "Cumulative %"]:
+            elif col in ["% Traffic", "Cumulative %", "% of Cat"]:
                 try:
-                    # Format is "X.X%"
+                    # Format is "X.X%" or "n/a" for indirect domains
+                    if val == 'n/a':
+                        return -1.0  # Sort n/a to the end
                     return float(val.rstrip('%'))
                 except (ValueError, TypeError):
                     return 0.0
@@ -10421,7 +10579,10 @@ Would you like to run a complete analysis?"""
         serialized['unused_sids'] = list(results.get('unused_sids', []))
         serialized['unlogged_sids'] = list(results.get('unlogged_sids', set()))
         serialized['file_sids'] = list(results.get('file_sids', []))
-        
+
+        # Serialize category analysis data (already JSON-serializable)
+        serialized['category_analysis'] = results.get('category_analysis', {})
+
         return serialized
     
     def load_stats_from_file(self, stats_filename):
@@ -10525,6 +10686,9 @@ Would you like to run a complete analysis?"""
         results['unused_sids'] = set(stats_data.get('unused_sids', []))
         results['unlogged_sids'] = set(stats_data.get('unlogged_sids', []))
         results['file_sids'] = stats_data.get('file_sids', [])
+
+        # Deserialize category analysis data (already in correct format)
+        results['category_analysis'] = stats_data.get('category_analysis', {})
         
         return results
     
@@ -12590,6 +12754,368 @@ Would you like to run a complete analysis?"""
         
         # Focus on search box
         search_entry.focus()
+    
+    def _create_categories_tab(self, parent_tab, category_data, is_truncated,
+                               analysis_results, rule_defined_categories):
+        """Create the Categories tab content with dropdown, domain table, and export
+        
+        Args:
+            parent_tab: Parent frame for the tab
+            category_data: Dict mapping category → domain data
+            is_truncated: Whether CloudWatch results were truncated at 10K
+            analysis_results: Full analysis results dict
+            rule_defined_categories: Set of categories defined in rule file
+        """
+        content = ttk.Frame(parent_tab)
+        content.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+        
+        # Title
+        ttk.Label(content, text="🏷️  CATEGORY-BASED DOMAIN ANALYSIS",
+                 font=("TkDefaultFont", 11, "bold")).pack(anchor=tk.W, pady=(0, 10))
+        
+        # Truncation warning
+        if is_truncated:
+            warn_frame = ttk.Frame(content)
+            warn_frame.pack(fill=tk.X, pady=(0, 10))
+            ttk.Label(warn_frame,
+                     text="⚠️  Results may be incomplete. The CloudWatch query returned the maximum 10,000 records. "
+                          "Some domain/category data may be missing. Consider analyzing a shorter time range.",
+                     font=("TkDefaultFont", 9), foreground="#FF6600", wraplength=900,
+                     justify=tk.LEFT).pack(anchor=tk.W)
+        
+        # Empty state
+        if not category_data:
+            empty_frame = ttk.Frame(content)
+            empty_frame.pack(fill=tk.BOTH, expand=True, pady=20)
+            
+            empty_text = (
+                "No category data found in CloudWatch logs.\n\n"
+                "This feature requires rules using aws_domain_category or\n"
+                "aws_url_category keywords. When these rules trigger alerts,\n"
+                "CloudWatch logs which categories the domain belongs to.\n\n"
+                "To use this feature:\n"
+                "1. Create rules using the \"Block Domain Categories\" or\n"
+                "   \"Block URL Categories\" rule templates\n"
+                "2. Deploy rules to AWS Network Firewall\n"
+                "3. Wait for traffic to trigger the rules\n"
+                "4. Re-run the Rule Usage Analysis"
+            )
+            ttk.Label(empty_frame, text=empty_text, font=("TkDefaultFont", 10),
+                     justify=tk.LEFT).pack(padx=20)
+            return
+        
+        # Build dropdown values: "Category Name (N rules, M hits)" sorted alphabetically
+        # Use direct_hits (only hits from rules targeting this category) for accurate counts
+        dropdown_values = []
+        for cat_name in sorted(category_data.keys()):
+            cat_info = category_data[cat_name]
+            rule_count = cat_info.get('rule_count', 0)
+            direct_hits = cat_info.get('direct_hits', cat_info.get('total_hits', 0))
+            dropdown_values.append(f"{cat_name} ({rule_count} rules, {direct_hits:,} hits)")
+        
+        # Category dropdown
+        dropdown_frame = ttk.Frame(content)
+        dropdown_frame.pack(fill=tk.X, pady=(0, 10))
+        
+        ttk.Label(dropdown_frame, text="Select Category:", font=("TkDefaultFont", 10)).pack(side=tk.LEFT, padx=(0, 10))
+        
+        cat_var = tk.StringVar(value=dropdown_values[0] if dropdown_values else "")
+        cat_combo = ttk.Combobox(dropdown_frame, textvariable=cat_var,
+                                values=dropdown_values, state="readonly", width=55)
+        cat_combo.pack(side=tk.LEFT)
+        
+        # Summary line
+        summary_label = ttk.Label(content, text="", font=("TkDefaultFont", 10))
+        summary_label.pack(anchor=tk.W, pady=(0, 10))
+        
+        # Domain table
+        tree_container = ttk.Frame(content)
+        tree_container.pack(fill=tk.BOTH, expand=True, pady=(0, 10))
+        
+        columns = ("Domain/Hostname", "Hits", "% of Cat", "Rule SID", "Action")
+        domain_tree = ttk.Treeview(tree_container, columns=columns, show="headings", height=12)
+        
+        domain_tree.heading("Domain/Hostname", text="Domain/Hostname",
+                          command=lambda: self._sort_treeview(domain_tree, "Domain/Hostname", False))
+        domain_tree.heading("Hits", text="Hits",
+                          command=lambda: self._sort_treeview(domain_tree, "Hits", False))
+        domain_tree.heading("% of Cat", text="% of Cat",
+                          command=lambda: self._sort_treeview(domain_tree, "% of Cat", False))
+        domain_tree.heading("Rule SID", text="Rule SID",
+                          command=lambda: self._sort_treeview(domain_tree, "Rule SID", False))
+        domain_tree.heading("Action", text="Action")
+        
+        domain_tree.column("Domain/Hostname", width=350, stretch=False)
+        domain_tree.column("Hits", width=80, stretch=False)
+        domain_tree.column("% of Cat", width=100, stretch=False)
+        domain_tree.column("Rule SID", width=120, stretch=False)
+        domain_tree.column("Action", width=80, stretch=False)
+        
+        # Scrollbars
+        v_sb = ttk.Scrollbar(tree_container, orient=tk.VERTICAL, command=domain_tree.yview)
+        h_sb = ttk.Scrollbar(tree_container, orient=tk.HORIZONTAL, command=domain_tree.xview)
+        domain_tree.configure(yscrollcommand=v_sb.set, xscrollcommand=h_sb.set)
+        
+        domain_tree.grid(row=0, column=0, sticky="nsew")
+        v_sb.grid(row=0, column=1, sticky="ns")
+        h_sb.grid(row=1, column=0, sticky="ew")
+        tree_container.grid_rowconfigure(0, weight=1)
+        tree_container.grid_columnconfigure(0, weight=1)
+        
+        # Tag styles for visual distinction
+        domain_tree.tag_configure("discovered_category", foreground="#999999")
+        domain_tree.tag_configure("rule_category", foreground="#000000")
+        domain_tree.tag_configure("indirect_domain", foreground="#999999")
+
+        def populate_domain_table(event=None):
+            """Populate domain table when category selection changes"""
+            domain_tree.delete(*domain_tree.get_children())
+
+            selected = cat_var.get()
+            if not selected:
+                return
+
+            # Extract category name from dropdown value "Name (N rules, M hits)"
+            cat_name = selected.rsplit(' (', 1)[0]
+
+            cat_info = category_data.get(cat_name, {})
+            direct_hits = cat_info.get('direct_hits', cat_info.get('total_hits', 0))
+            rule_count = cat_info.get('rule_count', 0)
+            unique_domains = cat_info.get('unique_domains', 0)
+
+            # Update summary - use direct_hits for accurate count
+            summary_label.config(
+                text=f"Category: {cat_name}  |  Rules: {rule_count}  |  "
+                     f"Total hits: {direct_hits:,}  |  Unique domains: {unique_domains}")
+
+            # Determine if this is a rule-defined or discovered category
+            is_rule_category = cat_name in rule_defined_categories
+            row_tag = "rule_category" if is_rule_category else "discovered_category"
+
+            # Get domains sorted by hits descending
+            domains = cat_info.get('domains', {})
+            sorted_domains = sorted(domains.items(), key=lambda x: x[1]['hits'], reverse=True)
+
+            for hostname, dom_data in sorted_domains:
+                hits = dom_data.get('hits', 0)
+                percent = dom_data.get('percent', 0.0)
+                sids = dom_data.get('matched_sids', [])
+                actions = dom_data.get('actions', [])
+
+                # Check if this domain was directly matched by a rule targeting this category
+                # If matched_sids is empty, it means the domain appears here only because
+                # AWS classifies it in this category, but a different category's rule
+                # (earlier in strict rule ordering) fired first. These are "indirect" domains.
+                is_indirect = len(sids) == 0
+
+                if is_indirect:
+                    # Grey out indirect domains and show n/a for hits/percent/action
+                    sid_str = 'n/a'
+                    action_str = 'n/a'
+                    domain_tree.insert("", tk.END,
+                                      values=(hostname, "n/a", "n/a", sid_str, action_str),
+                                      tags=("indirect_domain",))
+                else:
+                    sid_str = ', '.join(str(s) for s in sids)
+                    action_str = ', '.join(actions) if actions else '(unknown)'
+                    domain_tree.insert("", tk.END,
+                                      values=(hostname, f"{hits:,}", f"{percent:.1f}%", sid_str, action_str),
+                                      tags=(row_tag,))
+        
+        cat_combo.bind('<<ComboboxSelected>>', populate_domain_table)
+        
+        # Initial population
+        populate_domain_table()
+        
+        # Double-click handler to jump to rule in main editor (only for direct domains)
+        # We need a reference to the results_window — get it from the parent_tab's toplevel
+        _results_window_ref = content.winfo_toplevel()
+        
+        def on_category_domain_double_click(event):
+            item = domain_tree.identify_row(event.y)
+            if not item:
+                return
+            
+            values = domain_tree.item(item, 'values')
+            if not values or len(values) < 4:
+                return
+            
+            # Check if this is an indirect domain (n/a values) — don't navigate for those
+            sid_str = values[3]  # Rule SID column
+            if sid_str == 'n/a':
+                return
+            
+            # Get the first SID from the comma-separated list
+            try:
+                first_sid = int(sid_str.split(',')[0].strip())
+            except (ValueError, TypeError):
+                return
+            
+            # Find the rule with this SID in the main rules list
+            rule = next((r for r in self.parent.rules
+                       if hasattr(r, 'sid') and r.sid == first_sid), None)
+            if not rule:
+                return
+            
+            line_num = self.parent.rules.index(rule) + 1
+            
+            # Jump to the rule in main editor
+            self._jump_to_rule_in_main_editor(line_num, _results_window_ref)
+        
+        domain_tree.bind("<Double-1>", on_category_domain_double_click)
+        
+        # Tip text
+        ttk.Label(content,
+                 text="💡 TIP: Same domain may appear in multiple categories. CloudWatch logs all categories "
+                      "a domain belongs to, not just the one matched by the rule. Click column headers to sort.",
+                 font=("TkDefaultFont", 8), foreground="#666666", wraplength=900,
+                 justify=tk.LEFT).pack(anchor=tk.W, pady=(0, 10))
+        
+        # Export and Help buttons
+        button_row = ttk.Frame(content)
+        button_row.pack(anchor=tk.W)
+        
+        def export_categories():
+            self._export_categories_report(category_data, analysis_results, rule_defined_categories)
+        
+        ttk.Button(button_row, text="Export Category Report", command=export_categories).pack(side=tk.LEFT, padx=(0, 10))
+        
+        def show_category_help():
+            help_dialog = tk.Toplevel(content.winfo_toplevel())
+            help_dialog.title("Categories Tab - Help")
+            help_dialog.geometry("650x550")
+            help_dialog.transient(content.winfo_toplevel())
+            help_dialog.grab_set()
+            help_dialog.resizable(True, True)
+            
+            hf = ttk.Frame(help_dialog)
+            hf.pack(fill=tk.BOTH, expand=True, padx=20, pady=20)
+            
+            ttk.Label(hf, text="How Category Data is Aggregated & Displayed",
+                     font=("TkDefaultFont", 12, "bold")).pack(anchor=tk.W, pady=(0, 15))
+            
+            help_text = (
+                "DATA SOURCE\n"
+                "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                "This tab analyzes CloudWatch alert logs from rules that use\n"
+                "aws_domain_category or aws_url_category keywords.\n\n"
+                
+                "HOW AWS CATEGORIES WORK\n"
+                "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                "When a category rule fires, the CloudWatch alert record includes\n"
+                "ALL categories AWS classifies that domain under — not just the\n"
+                "category the rule matched. For example, microsoft.com may belong\n"
+                "to both \"Technology and Internet\" and \"Business and Economy\".\n\n"
+                
+                "DIRECT vs INDIRECT DOMAINS\n"
+                "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                "• Direct domains (normal text): A rule targeting THIS category\n"
+                "  fired and matched the domain. Hits, %, SID, and Action are real.\n\n"
+                "• Indirect domains (greyed out, n/a): The domain belongs to this\n"
+                "  category in AWS's database, but a DIFFERENT category's rule\n"
+                "  (earlier in strict rule ordering) fired first. No rule targeting\n"
+                "  this specific category actually matched. All values show \"n/a\".\n\n"
+                
+                "DROPDOWN LABELS\n"
+                "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                "• Rules count: How many rules in your file TARGET this category\n"
+                "  (from rule definitions, not CloudWatch data).\n"
+                "• Hits count: Only DIRECT hits — from rules targeting this category.\n"
+                "  Indirect matches are excluded from the hit count.\n\n"
+                
+                "WHY SOME CATEGORIES SHOW 0 HITS WITH DOMAINS\n"
+                "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                "With strict rule ordering, an earlier rule may fire for a domain\n"
+                "before the rule targeting this category gets evaluated. The domain\n"
+                "still appears (greyed out) because AWS classifies it here, but no\n"
+                "rule for this category actually matched — hence 0 hits.\n\n"
+                
+                "EXAMPLE\n"
+                "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                "arkansasrazorbacks.com belongs to \"Entertainment\" AND\n"
+                "\"Sports and Recreation\". Rule targeting \"Entertainment\" fires first.\n"
+                "→ Under \"Entertainment\": normal text, real hits, real SID\n"
+                "→ Under \"Sports and Recreation\": greyed out, n/a (indirect)"
+            )
+            
+            text_widget = tk.Text(hf, wrap=tk.WORD, font=("TkDefaultFont", 9),
+                                 bg=help_dialog.cget('bg'), relief=tk.FLAT)
+            text_widget.pack(fill=tk.BOTH, expand=True)
+            text_widget.insert("1.0", help_text)
+            text_widget.config(state=tk.DISABLED)
+            
+            ttk.Button(hf, text="Close", command=help_dialog.destroy).pack(pady=(10, 0))
+        
+        ttk.Button(button_row, text="Help", command=show_category_help).pack(side=tk.LEFT)
+    
+    def _export_categories_report(self, category_data, analysis_results, rule_defined_categories):
+        """Export all categories to a text report file
+        
+        Args:
+            category_data: Dict mapping category → domain data
+            analysis_results: Full analysis results dict
+            rule_defined_categories: Set of categories from rules
+        """
+        filename = filedialog.asksaveasfilename(
+            title="Export Category Report",
+            defaultextension=".txt",
+            filetypes=[("Text files", "*.txt"), ("All files", "*.*")],
+            initialfile="category_domain_report"
+        )
+        
+        if not filename:
+            return
+        
+        try:
+            with open(filename, 'w', encoding='utf-8') as f:
+                f.write("Category-Based Domain Analysis Report\n")
+                f.write("=" * 70 + "\n")
+                f.write(f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+                f.write(f"Analysis Period: {analysis_results['time_range_days']} days\n")
+                f.write(f"Log Group: {analysis_results['log_group']}\n\n")
+                
+                for cat_name in sorted(category_data.keys()):
+                    cat_info = category_data[cat_name]
+                    direct_hits = cat_info.get('direct_hits', cat_info.get('total_hits', 0))
+                    rule_count = cat_info.get('rule_count', 0)
+                    rule_sids = cat_info.get('rule_sids', [])
+                    unique_domains = cat_info.get('unique_domains', 0)
+                    
+                    is_rule_cat = cat_name in rule_defined_categories
+                    cat_type = "" if is_rule_cat else " (discovered)"
+                    
+                    f.write(f"Category: {cat_name}{cat_type}\n")
+                    if rule_sids:
+                        f.write(f"Rules: {rule_count} (SIDs: {', '.join(str(s) for s in rule_sids)})\n")
+                    else:
+                        f.write(f"Rules: {rule_count}\n")
+                    f.write(f"Direct Hits: {direct_hits:,}\n")
+                    f.write(f"Unique Domains: {unique_domains}\n\n")
+                    
+                    f.write(f"  {'Domain':<40} {'Hits':>8} {'% of Cat':>10} {'Rule SID':<15} {'Action':<10}\n")
+                    f.write(f"  {'-'*40} {'-'*8} {'-'*10} {'-'*15} {'-'*10}\n")
+                    
+                    domains = cat_info.get('domains', {})
+                    for hostname, dom_data in sorted(domains.items(), key=lambda x: x[1]['hits'], reverse=True):
+                        matched_sids = dom_data.get('matched_sids', [])
+                        is_indirect = len(matched_sids) == 0
+                        
+                        host_display = hostname[:38] + '..' if len(hostname) > 40 else hostname
+                        
+                        if is_indirect:
+                            f.write(f"  {host_display:<40} {'n/a':>8} {'n/a':>10} {'n/a':<15} {'n/a':<10}  (indirect)\n")
+                        else:
+                            hits = dom_data.get('hits', 0)
+                            pct = dom_data.get('percent', 0.0)
+                            sids = ', '.join(str(s) for s in matched_sids)
+                            actions = ', '.join(dom_data.get('actions', []))
+                            f.write(f"  {host_display:<40} {hits:>8,} {pct:>9.1f}% {sids:<15} {actions:<10}\n")
+                    
+                    f.write("\n" + "=" * 70 + "\n\n")
+            
+            messagebox.showinfo("Export Complete", f"Category report exported to:\n{filename}")
+        except Exception as e:
+            messagebox.showerror("Export Error", f"Failed to export:\n{str(e)}")
     
     def update_category_button_state(self):
         """Update Insert Category button state based on protocol selection

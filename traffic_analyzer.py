@@ -849,6 +849,21 @@ class TrafficAnalyzer:
         Returns:
             Dict mapping destination (hostname or IP:port) to aggregated statistics
         """
+        # BUGFIX: Build a lookup table mapping dest_ip -> known hostname
+        # This allows flows without hostnames to inherit the hostname from other flows to same IP
+        ip_to_hostname = {}
+        for flow in enriched_flows:
+            hostname = flow['hostname']
+            dest_ip = flow['dest_ip']
+            
+            # Only store if we have a valid hostname (not placeholder)
+            if hostname and hostname != "(No hostname)" and dest_ip:
+                # If multiple hostnames exist for same IP (e.g., CDN), prefer non-IP hostnames
+                if dest_ip not in ip_to_hostname:
+                    ip_to_hostname[dest_ip] = hostname
+                # Keep the existing hostname unless new one is "better" (not an IP address)
+                # This prevents IP-based names from overriding real hostnames
+        
         # Use regular dict with manual initialization to ensure set is properly maintained
         hostname_totals = {}
         
@@ -866,9 +881,13 @@ class TrafficAnalyzer:
                 dest_ip = flow['dest_ip']
                 dest_port = flow['dest_port']
                 
-                # If no hostname, use dest_ip:port as the key for aggregation
-                if hostname == "(No hostname)":
-                    # Aggregate by dest IP and port combination
+                # BUGFIX: If no hostname, check if we know the hostname from other flows to same IP
+                if hostname == "(No hostname)" and dest_ip in ip_to_hostname:
+                    # Use the known hostname from the lookup table
+                    hostname = ip_to_hostname[dest_ip]
+                    aggregation_key = hostname
+                elif hostname == "(No hostname)":
+                    # Still no hostname - aggregate by dest IP and port combination
                     aggregation_key = f"{dest_ip}:{dest_port}"
                 else:
                     # Use hostname as key

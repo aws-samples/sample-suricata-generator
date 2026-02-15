@@ -556,7 +556,6 @@ class DomainImporter:
                     else:
                         # Use temporary filename for unsaved files
                         import tempfile
-                        import os
                         temp_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'user_files')
                         if not os.path.exists(temp_dir):
                             temp_dir = tempfile.gettempdir()
@@ -896,9 +895,9 @@ class DomainImporter:
                             pass_tls_message = message_template.replace("{domain}", domain_display).replace("traffic", "TLS traffic")
                         
                         if strict_domain:
-                            pass_tls_content = f'flow:to_server; tls.sni; content:"{domain}"; startswith; endswith; nocase; alert'
+                            pass_tls_content = f'flow:to_server; tls.sni; content:"{domain}"; startswith; endswith; alert'
                         else:
-                            pass_tls_content = f'flow:to_server; tls.sni; dotprefix; content:".{domain}"; endswith; nocase; alert'
+                            pass_tls_content = f'flow:to_server; tls.sni; dotprefix; content:".{domain}"; endswith; alert'
                         
                         pass_tls_rule = SuricataRule(
                             action="pass",
@@ -925,9 +924,9 @@ class DomainImporter:
                             pass_http_message = message_template.replace("{domain}", domain_display).replace("traffic", "HTTP traffic")
                         
                         if strict_domain:
-                            pass_http_content = f'flow:to_server; http.host; content:"{domain}"; startswith; endswith; nocase; alert'
+                            pass_http_content = f'flow:to_server; http.host; content:"{domain}"; startswith; endswith; alert'
                         else:
-                            pass_http_content = f'flow:to_server; http.host; dotprefix; content:".{domain}"; endswith; nocase; alert'
+                            pass_http_content = f'flow:to_server; http.host; dotprefix; content:".{domain}"; endswith; alert'
                         
                         pass_http_rule = SuricataRule(
                             action="pass",
@@ -955,9 +954,9 @@ class DomainImporter:
                             alert_tls_message = message_template.replace("{domain}", domain_display).replace("traffic", "TLS traffic").replace("Pass", "Alert for")
                         
                         if strict_domain:
-                            alert_tls_content = f'flow:to_server; tls.sni; content:"{domain}"; startswith; endswith; nocase'
+                            alert_tls_content = f'flow:to_server; tls.sni; content:"{domain}"; startswith; endswith'
                         else:
-                            alert_tls_content = f'flow:to_server; tls.sni; dotprefix; content:".{domain}"; endswith; nocase'
+                            alert_tls_content = f'flow:to_server; tls.sni; dotprefix; content:".{domain}"; endswith'
                         
                         alert_tls_rule = SuricataRule(
                             action="alert",
@@ -981,9 +980,9 @@ class DomainImporter:
                             pass_tls_message = message_template.replace("{domain}", domain_display).replace("traffic", "TLS traffic")
                         
                         if strict_domain:
-                            pass_tls_content = f'flow:to_server; tls.sni; content:"{domain}"; startswith; endswith; nocase'
+                            pass_tls_content = f'flow:to_server; tls.sni; content:"{domain}"; startswith; endswith'
                         else:
-                            pass_tls_content = f'flow:to_server; tls.sni; dotprefix; content:".{domain}"; endswith; nocase'
+                            pass_tls_content = f'flow:to_server; tls.sni; dotprefix; content:".{domain}"; endswith'
                         
                         pass_tls_rule = SuricataRule(
                             action="pass",
@@ -1007,9 +1006,9 @@ class DomainImporter:
                             alert_http_message = message_template.replace("{domain}", domain_display).replace("traffic", "HTTP traffic").replace("Pass", "Alert for")
                         
                         if strict_domain:
-                            alert_http_content = f'flow:to_server; http.host; content:"{domain}"; startswith; endswith; nocase'
+                            alert_http_content = f'flow:to_server; http.host; content:"{domain}"; startswith; endswith'
                         else:
-                            alert_http_content = f'flow:to_server; http.host; dotprefix; content:".{domain}"; endswith; nocase'
+                            alert_http_content = f'flow:to_server; http.host; dotprefix; content:".{domain}"; endswith'
                         
                         alert_http_rule = SuricataRule(
                             action="alert",
@@ -1033,9 +1032,9 @@ class DomainImporter:
                             pass_http_message = message_template.replace("{domain}", domain_display).replace("traffic", "HTTP traffic")
                         
                         if strict_domain:
-                            pass_http_content = f'flow:to_server; http.host; content:"{domain}"; startswith; endswith; nocase'
+                            pass_http_content = f'flow:to_server; http.host; content:"{domain}"; startswith; endswith'
                         else:
-                            pass_http_content = f'flow:to_server; http.host; dotprefix; content:".{domain}"; endswith; nocase'
+                            pass_http_content = f'flow:to_server; http.host; dotprefix; content:".{domain}"; endswith'
                         
                         pass_http_rule = SuricataRule(
                             action="pass",
@@ -1066,9 +1065,9 @@ class DomainImporter:
                         tls_message = message_template.replace("{domain}", domain_display)
                     
                     if strict_domain:
-                        tls_content = f'flow:to_server; tls.sni; content:"{domain}"; startswith; endswith; nocase'
+                        tls_content = f'flow:to_server; tls.sni; content:"{domain}"; startswith; endswith'
                     else:
-                        tls_content = f'flow:to_server; tls.sni; dotprefix; content:".{domain}"; endswith; nocase'
+                        tls_content = f'flow:to_server; tls.sni; dotprefix; content:".{domain}"; endswith'
                     tls_rule = SuricataRule(
                         action=action,
                         protocol="tls",
@@ -1095,9 +1094,9 @@ class DomainImporter:
                         http_message = message_template.replace("{domain}", domain_display)
                     
                     if strict_domain:
-                        http_content = f'flow:to_server; http.host; content:"{domain}"; startswith; endswith; nocase'
+                        http_content = f'flow:to_server; http.host; content:"{domain}"; startswith; endswith'
                     else:
-                        http_content = f'flow:to_server; http.host; dotprefix; content:".{domain}"; endswith; nocase'
+                        http_content = f'flow:to_server; http.host; dotprefix; content:".{domain}"; endswith'
                     http_rule = SuricataRule(
                         action=action,
                         protocol="http",
@@ -1302,7 +1301,6 @@ class DomainImporter:
                 else:
                     # Use temporary filename for unsaved files
                     import tempfile
-                    import os
                     temp_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'user_files')
                     if not os.path.exists(temp_dir):
                         temp_dir = tempfile.gettempdir()

@@ -640,6 +640,15 @@ class FlowTester:
                                     flow_scope_line = rule_info_dict['line']
                                     tier_action_taken = True  # Mark that an action has been taken in this tier
                                     flow_scope_action_taken = True  # Flow-scope action stops ALL tier processing
+                                    
+                                    # Immediately add FLOW-scope rules to matched_rules for all phases
+                                    # This ensures IPONLY rules that match during handshake are captured
+                                    results['matched_rules'].append(match_info)
+                                    
+                                    # Track for step mapping
+                                    if flow_state not in results['step_rule_mapping']:
+                                        results['step_rule_mapping'][flow_state] = []
+                                    results['step_rule_mapping'][flow_state].append(match_info)
         
         # Determine final action using Suricata 8.0+ deconfliction logic with line order
         # Per bug fix: https://redmine.openinfosecfoundation.org/issues/7653
@@ -668,9 +677,11 @@ class FlowTester:
             # No action rules matched this phase, continue to next phase
             return True
         
-        # Store the final matching rule (if not already stored during handshake)
-        # Handshake rules are stored immediately to capture both directions
-        if flow_state != 'handshake':
+        # Store the final matching rule if not already stored
+        # PACKET-scope handshake rules are stored immediately to capture both directions
+        # FLOW-scope rules are stored immediately when they match (above)
+        # So we only need to add if it's not a handshake or not already added
+        if flow_state != 'handshake' and final_rule not in results['matched_rules']:
             results['matched_rules'].append(final_rule)
             
             # Track step-to-rule mapping
@@ -705,19 +716,32 @@ class FlowTester:
         if rule_type == 'SIG_TYPE_IPONLY' and 'flow:' not in content:
             return True  # IPONLY rules without flow keywords match ALL flow states
         
-        # If no flow keywords (but not IPONLY), rule matches established connections only (not handshake)
-        # In real Suricata, PKT/APPLAYER rules without flow keywords match regular packets (established connections)
-        if 'flow:' not in content:
-            return flow_state == 'established' or flow_state == 'all'
-        
+        # FIRST: Check explicit flow state constraints - these take priority over rule type
         # Rules with flow:not_established only match handshake (TCP only)
         if 'not_established' in content:
             return flow_state == 'handshake'
         
         # Rules with flow:established only match established connections
+        # This MUST be checked before PKT direction checks, because a rule like
+        # "drop ip any any (flow:established,to_server;)" should NOT match during handshake
+        # even though it has to_server (which would match SYN packets)
         if 'established' in content:
-            # Only match if we're specifically in the 'established' phase
             return flow_state == 'established'
+        
+        # PKT rules (with flow keywords but NOT established/not_established) match at packet level
+        # IMPORTANT: Rules like "drop ip any any -> any any (flow:to_server;)" should match
+        # the TCP SYN packet during handshake since SYN IS to_server
+        if rule_type == 'SIG_TYPE_PKT':
+            # PKT rules with flow:to_server (without established constraint) match handshake
+            # PKT rules also match established and all states
+            if 'to_server' in content or 'to_client' in content:
+                # These rules match at packet level for both handshake and established
+                return True
+        
+        # If no flow keywords (but not IPONLY), rule matches established connections only (not handshake)
+        # In real Suricata, PKT/APPLAYER rules without flow keywords match regular packets (established connections)
+        if 'flow:' not in content:
+            return flow_state == 'established' or flow_state == 'all'
         
         # Rules with flow:to_server/to_client match both 'established' and 'all' states
         # For connectionless protocols (ICMP, UDP), these keywords just indicate direction

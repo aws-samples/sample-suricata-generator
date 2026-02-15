@@ -147,6 +147,10 @@ class RuleAnalyzer:
         pcre_restriction_issues = self.check_pcre_restrictions(rules)
         conflicts['pcre_restrictions'] = pcre_restriction_issues
         
+        # AWS Network Firewall: Check for threshold keyword (limited support)
+        threshold_issues = self.check_threshold_keyword(rules)
+        conflicts['threshold_limited'] = threshold_issues
+        
         # AWS Network Firewall: Check for priority keyword in strict order mode
         priority_strict_issues = self.check_priority_strict_order(rules)
         conflicts['priority_strict_order'] = priority_strict_issues
@@ -264,8 +268,15 @@ class RuleAnalyzer:
         if proto1 == 'ip':
             return True
         
-        # TCP is broader than HTTP/TLS (application layer protocols over TCP)
-        if proto1 == 'tcp' and proto2 in ['http', 'tls']:
+        # TCP is broader than all TCP-based application layer protocols
+        tcp_app_protocols = {'http', 'http2', 'https', 'tls', 'ssh', 'smtp', 'ftp', 'smb',
+                            'dcerpc', 'imap', 'pop3', 'krb5', 'msn', 'ikev2', 'rdp'}
+        if proto1 == 'tcp' and proto2 in tcp_app_protocols:
+            return True
+        
+        # UDP is broader than all UDP-based application layer protocols
+        udp_app_protocols = {'dns', 'dhcp', 'ntp', 'tftp', 'snmp', 'quic', 'nfs'}
+        if proto1 == 'udp' and proto2 in udp_app_protocols:
             return True
         
         return False
@@ -657,6 +668,10 @@ class RuleAnalyzer:
         content1 = (rule1.content or '').lower()
         content2 = (rule2.content or '').lower()
         
+        # Get full content including original_options for comprehensive analysis
+        full_content1 = content1 + ' ' + (rule1.original_options or '').lower()
+        full_content2 = content2 + ' ' + (rule2.original_options or '').lower()
+        
         # FIRST: Check if rules have mutually exclusive flow states
         # This must come BEFORE other checks since it's a fundamental incompatibility
         if self.flow_states_are_mutually_exclusive(rule1, rule2):
@@ -666,7 +681,7 @@ class RuleAnalyzer:
         # ssl_version makes a rule MORE specific (only matches specific TLS versions)
         # A rule with ssl_version:sslv2,sslv3,tls1.0,tls1.1 is NOT broader than rules without it
         # It only matches OLD TLS versions, while domain-based rules match ANY TLS version
-        if 'ssl_version:' in content1:
+        if 'ssl_version:' in full_content1:
             # Rule1 has version restriction - it's targeting specific versions, not all TLS
             # It cannot be broader than rule2
             return False
@@ -693,27 +708,22 @@ class RuleAnalyzer:
         if not content1 and not content2:
             return True
         
-        # Apply filters for non-conflicts
+        # Apply filters for non-conflicts using FULL content (includes original_options)
         # NOTE: noalert check is intentionally removed here
         # Even if a rule has noalert, it may be setting flowbits or performing other actions
         # that shouldn't be shadowed by broader rules
-        if self.has_negated_content(content1) or self.has_negated_content(content2):
+        if self.has_negated_content(full_content1) or self.has_negated_content(full_content2):
             return False
-        if self.uses_different_detection_mechanisms(content1, content2):
+        if self.uses_different_detection_mechanisms(full_content1, full_content2):
             return False
-        if self.has_geographic_specificity(content1, content2):
+        if self.has_geographic_specificity(full_content1, full_content2):
             return False
-        if self.domains_dont_match_patterns(content1, content2):
+        if self.domains_dont_match_patterns(full_content1, full_content2):
             return False
         if not self.flow_states_overlap(content1, content2):
             return False
-        
         # GEOIP COMPARISON: Check if both rules use geoip and if one is broader
         # Negated geoip (e.g., !KH,!CN) is BROADER than specific geoip (e.g., BT)
-        # Check both content and original_options since geoip might be in either
-        full_content1 = content1 + ' ' + (rule1.original_options or '').lower()
-        full_content2 = content2 + ' ' + (rule2.original_options or '').lower()
-        
         if 'geoip:' in full_content1 and 'geoip:' in full_content2:
             # Check if rule1 uses negated pattern (broader) and rule2 uses specific countries
             has_negated_geo1 = ',!' in full_content1 and 'geoip:' in full_content1
@@ -916,13 +926,24 @@ class RuleAnalyzer:
     
     def uses_different_detection_mechanisms(self, content1: str, content2: str) -> bool:
         """Check if rules use fundamentally different detection mechanisms"""
+        # AWS category-based detection (requires external database lookup)
+        has_aws_category1 = 'aws_url_category:' in content1 or 'aws_domain_category:' in content1
+        has_aws_category2 = 'aws_url_category:' in content2 or 'aws_domain_category:' in content2
+        
+        # Domain-based detection (tls.sni or http.host with specific content, not just categories)
+        has_domain_detection1 = (('tls.sni' in content1 or 'http.host' in content1) and 
+                                 'content:' in content1 and not has_aws_category1)
+        has_domain_detection2 = (('tls.sni' in content2 or 'http.host' in content2) and 
+                                 'content:' in content2 and not has_aws_category2)
+        
+        # If one uses AWS categories and the other uses specific domain detection, they don't conflict
+        # The analyzer cannot determine if a specific domain is in a given AWS category
+        if (has_aws_category1 and has_domain_detection2) or (has_aws_category2 and has_domain_detection1):
+            return True
+        
         # TLS version-specific detection
         has_ssl_version1 = 'ssl_version:' in content1
         has_ssl_version2 = 'ssl_version:' in content2
-        
-        # Domain-based detection (tls.sni or http.host with content)
-        has_domain_detection1 = ('tls.sni' in content1 or 'http.host' in content1) and 'content:' in content1
-        has_domain_detection2 = ('tls.sni' in content2 or 'http.host' in content2) and 'content:' in content2
         
         # If one uses ssl_version and the other uses domain detection, they don't conflict
         # Example: ssl_version:sslv2,sslv3,tls1.0 vs tls.sni with domain content
@@ -1170,8 +1191,18 @@ class RuleAnalyzer:
         
         if self.has_only_flow_keywords(content1) and not self.has_only_flow_keywords(content2):
             # Rule1 has only flow constraints, rule2 has actual content matching
-            # This makes rule1 significantly broader
-            return True
+            # HOWEVER: Rule1 is only "significantly broader" if it also has broad network/port scope
+            # A flow-only rule targeting a specific IP and specific ports (e.g., AD ports)
+            # is NOT broader than an app-layer rule targeting any destination
+            # We need rule1 to be at least as broad in network/port scope as rule2
+            rule1_has_narrower_scope = (
+                (rule1.dst_net != 'any' and rule2.dst_net == 'any') or
+                (rule1.src_net != 'any' and rule2.src_net == 'any') or
+                (rule1.dst_port != 'any' and rule2.dst_port == 'any') or
+                (rule1.src_port != 'any' and rule2.src_port == 'any')
+            )
+            if not rule1_has_narrower_scope:
+                return True
         
         return False
     
@@ -1180,9 +1211,9 @@ class RuleAnalyzer:
         """Check for protocol layering conflicts based on Suricata's rule type processing order
         
         Suricata processes rules in this order regardless of file position:
-        1. SIG_TYPE_APPLAYER (rules with app-layer-protocol keywords)
-        2. SIG_TYPE_PKT (rules with flow keywords but no app-layer-protocol)  
-        3. SIG_TYPE_IPONLY (rules with neither app-layer-protocol nor flow keywords)
+        1. SIG_TYPE_IPONLY (IP-only rules - processed first by IPONLY engine)
+        2. SIG_TYPE_PKT (packet rules with variable-like keywords)
+        3. SIG_TYPE_APPLAYER (application layer rules - processed last)
         
         This can cause conflicts when broader rules of a higher-priority type shadow 
         more specific rules of a lower-priority type.
@@ -1294,8 +1325,11 @@ class RuleAnalyzer:
         if any(keyword in content for keyword in ['flowbits:isset', 'flowbits:isnotset']):
             return 'SIG_TYPE_PKT'
         
-        # flowint with isset/notset operations
-        if 'flowint:' in content and any(op in content for op in ['isset', 'notset']):
+        # flowint - Per docs, all flowint operations (isset, notset, and all arithmetic
+        # operators like +, -, =, <, >, etc.) force PKT type. Only defining or unsetting
+        # the variable doesn't change the type. Since flowint is almost always used with
+        # operators, we conservatively treat any flowint usage as PKT.
+        if 'flowint:' in content:
             return 'SIG_TYPE_PKT'
         
         # iprep keyword
@@ -1339,6 +1373,22 @@ class RuleAnalyzer:
     def map_detailed_to_simplified(self, detailed_type: str) -> str:
         """Map detailed 10-type classification to simplified 3-tier for conflict detection
         
+        Per detect.h signature_properties:
+        - SIG_TYPE_NOT_SET:    SIG_PROP_FLOW_ACTION_PACKET
+        - SIG_TYPE_IPONLY:     SIG_PROP_FLOW_ACTION_FLOW
+        - SIG_TYPE_LIKE_IPONLY: SIG_PROP_FLOW_ACTION_FLOW
+        - SIG_TYPE_PDONLY:     SIG_PROP_FLOW_ACTION_FLOW
+        - SIG_TYPE_DEONLY:     SIG_PROP_FLOW_ACTION_PACKET
+        - SIG_TYPE_PKT:        SIG_PROP_FLOW_ACTION_PACKET
+        - SIG_TYPE_PKT_STREAM: SIG_PROP_FLOW_ACTION_FLOW_IF_STATEFUL
+        - SIG_TYPE_STREAM:     SIG_PROP_FLOW_ACTION_FLOW_IF_STATEFUL
+        - SIG_TYPE_APPLAYER:   SIG_PROP_FLOW_ACTION_FLOW
+        - SIG_TYPE_APP_TX:     SIG_PROP_FLOW_ACTION_FLOW
+        
+        For AWS Network Firewall (always stateful), PKT_STREAM and STREAM have
+        FLOW_IF_STATEFUL which means FLOW action scope in the stateful path.
+        We map them to APPLAYER (flow-scope) rather than PKT (packet-scope).
+        
         Args:
             detailed_type: One of the 10 detailed SIG_TYPE_* values
         
@@ -1346,15 +1396,15 @@ class RuleAnalyzer:
             Simplified type: SIG_TYPE_IPONLY, SIG_TYPE_PKT, or SIG_TYPE_APPLAYER
         """
         mapping = {
-            'SIG_TYPE_DEONLY': 'SIG_TYPE_PKT',          # Packet-level processing
-            'SIG_TYPE_IPONLY': 'SIG_TYPE_IPONLY',       # IP-only processing
-            'SIG_TYPE_LIKE_IPONLY': 'SIG_TYPE_IPONLY',  # IP-only processing
-            'SIG_TYPE_PDONLY': 'SIG_TYPE_APPLAYER',     # Application-layer processing
-            'SIG_TYPE_PKT': 'SIG_TYPE_PKT',             # Packet-level processing
-            'SIG_TYPE_PKT_STREAM': 'SIG_TYPE_PKT',      # Packet-level processing
-            'SIG_TYPE_STREAM': 'SIG_TYPE_PKT',          # Packet-level processing
-            'SIG_TYPE_APPLAYER': 'SIG_TYPE_APPLAYER',   # Application-layer processing
-            'SIG_TYPE_APP_TX': 'SIG_TYPE_APPLAYER',     # Application-layer processing
+            'SIG_TYPE_DEONLY': 'SIG_TYPE_PKT',          # SIG_PROP_FLOW_ACTION_PACKET
+            'SIG_TYPE_IPONLY': 'SIG_TYPE_IPONLY',       # SIG_PROP_FLOW_ACTION_FLOW (IP-only engine)
+            'SIG_TYPE_LIKE_IPONLY': 'SIG_TYPE_IPONLY',  # SIG_PROP_FLOW_ACTION_FLOW (IP-only engine)
+            'SIG_TYPE_PDONLY': 'SIG_TYPE_APPLAYER',     # SIG_PROP_FLOW_ACTION_FLOW
+            'SIG_TYPE_PKT': 'SIG_TYPE_PKT',             # SIG_PROP_FLOW_ACTION_PACKET
+            'SIG_TYPE_PKT_STREAM': 'SIG_TYPE_APPLAYER', # SIG_PROP_FLOW_ACTION_FLOW_IF_STATEFUL → FLOW in AWS NF (always stateful)
+            'SIG_TYPE_STREAM': 'SIG_TYPE_APPLAYER',     # SIG_PROP_FLOW_ACTION_FLOW_IF_STATEFUL → FLOW in AWS NF (always stateful)
+            'SIG_TYPE_APPLAYER': 'SIG_TYPE_APPLAYER',   # SIG_PROP_FLOW_ACTION_FLOW
+            'SIG_TYPE_APP_TX': 'SIG_TYPE_APPLAYER',     # SIG_PROP_FLOW_ACTION_FLOW
             'SIG_TYPE_NOT_SET': 'SIG_TYPE_IPONLY',      # Default to IP-only
         }
         return mapping.get(detailed_type, 'SIG_TYPE_IPONLY')
@@ -1507,45 +1557,56 @@ class RuleAnalyzer:
             # It's an intra-type ordering issue handled separately
             return None
         
-        # CRITICAL: Only flag as protocol layering conflict if the higher-priority rule
-        # is a low-level protocol rule WITHOUT flow/app-layer keywords
-        # If it HAS these keywords, it's elevated to application layer processing
-        
-        # Check if the higher priority rule is truly a low-level protocol rule
+        # Check if the higher priority rule is a low-level protocol rule
+        # that could shadow the more specific lower priority rule
         higher_protocol = higher_priority_rule.protocol.lower()
         higher_content = (higher_priority_rule.content or '').lower()
         
-        # If it's a low-level protocol with flow/app-layer keywords, it's elevated - not a protocol layering issue
-        if (higher_protocol in ['tcp', 'ip'] and 
-            ('flow:' in higher_content or 'app-layer-protocol:' in higher_content)):
-            return None
-        
-        # Only flag true protocol layering conflicts: low-level protocol rules WITHOUT elevation keywords
-        if not (higher_protocol in ['ip', 'icmp', 'udp', 'tcp'] and 
-                'flow:' not in higher_content and 
-                'app-layer-protocol:' not in higher_content):
+        # Only flag if the higher priority rule is a low-level protocol
+        if higher_protocol not in ['ip', 'icmp', 'udp', 'tcp']:
             return None
         
         # Check if higher priority rule could shadow lower priority rule
         if not self.rules_could_match_same_traffic(higher_priority_rule, lower_priority_rule, variables):
             return None
         
-        # Check if higher priority rule is broader than lower priority rule
-        if not self.rule_is_broader_for_type_conflict(higher_priority_rule, lower_priority_rule):
+        # Check if higher priority rule is SIGNIFICANTLY broader than lower priority rule
+        # This is critical - we only flag if the shadowing is meaningful
+        if not self.is_significantly_broader(higher_priority_rule, lower_priority_rule):
             return None
         
-        # Generate conflict description
+        # IMPORTANT: Check if this is truly an IPONLY rule (no keywords at all)
+        # vs a PKT rule (has flow keywords) or app-layer rule
+        # Pure IPONLY rules are the most dangerous because they match at packet level
+        # with NO constraints beyond IP/network/port matching
+        #
+        # PKT rules with flow keywords (like flow:to_server) are more constrained and
+        # typically work correctly with app-layer rules since they both respect flow state
+        higher_rule_type = self.get_suricata_rule_type(higher_priority_rule)
+        
+        # Only flag as a protocol layering conflict if:
+        # 1. It's a true IPONLY rule (no keywords), OR
+        # 2. It's a PKT/low-level rule WITHOUT flow keywords
+        if higher_rule_type == 'SIG_TYPE_PKT':
+            # It's a PKT rule - check if it has flow keywords
+            # PKT rules with flow keywords generally work correctly with app-layer rules
+            if self.has_flow_keywords(higher_priority_rule):
+                return None  # Flow keywords help mitigate the issue
+        # If it's IPONLY (no keywords), we continue to flag it
+        
+        # Generate conflict description based on rule actions
         higher_type_name = higher_priority_rule.protocol.upper()
         lower_type_name = lower_priority_rule.protocol.upper()
+        higher_type_label = self.get_display_label_for_type(self.get_detailed_suricata_rule_type(higher_priority_rule))
         
         if (higher_priority_rule.action in ['drop', 'reject'] and 
             lower_priority_rule.action == 'pass'):
             
-            issue = (f"{higher_type_name} rule at line {higher_line} (SIG_TYPE_IPONLY) "
+            issue = (f"{higher_type_name} rule at line {higher_line} ({higher_type_label}) "
                     f"will be processed before {lower_type_name} rule at line {lower_line_num} due to protocol layering, "
                     f"potentially blocking traffic that should be allowed")
             
-            suggestion = f"Add flow keywords to line {higher_line} or reorder rules"
+            suggestion = f"Move line {lower_line_num} above line {higher_line} or add flow keywords to line {higher_line} to make it more specific"
             
             return {
                 'upper_rule': upper_rule,
@@ -1560,11 +1621,49 @@ class RuleAnalyzer:
         elif (higher_priority_rule.action == 'pass' and 
               lower_priority_rule.action in ['drop', 'reject']):
             
-            issue = (f"{higher_type_name} rule at line {higher_line} (SIG_TYPE_IPONLY) "
+            issue = (f"{higher_type_name} rule at line {higher_line} ({higher_type_label}) "
                     f"will be processed before {lower_type_name} rule at line {lower_line_num} due to protocol layering, "
                     f"potentially allowing traffic that should be blocked")
             
-            suggestion = f"Add flow keywords to line {higher_line} or reorder rules"
+            suggestion = f"Move line {lower_line_num} above line {higher_line} or add flow keywords to line {higher_line} to make it more specific"
+            
+            return {
+                'upper_rule': upper_rule,
+                'lower_rule': lower_rule,
+                'upper_line': upper_line,
+                'lower_line': lower_line,
+                'severity': 'protocol_layering',
+                'issue': issue,
+                'suggestion': suggestion
+            }
+        
+        elif (higher_priority_rule.action in ['drop', 'reject'] and 
+              lower_priority_rule.action == 'alert'):
+            
+            issue = (f"{higher_type_name} rule at line {higher_line} ({higher_type_label}) "
+                    f"will be processed before {lower_type_name} rule at line {lower_line_num} due to protocol layering, "
+                    f"preventing alerts from being generated")
+            
+            suggestion = f"Move line {lower_line_num} above line {higher_line} or add flow keywords to line {higher_line} to make it more specific"
+            
+            return {
+                'upper_rule': upper_rule,
+                'lower_rule': lower_rule,
+                'upper_line': upper_line,
+                'lower_line': lower_line,
+                'severity': 'protocol_layering',
+                'issue': issue,
+                'suggestion': suggestion
+            }
+        
+        elif (higher_priority_rule.action in ['drop', 'reject'] and 
+              lower_priority_rule.action in ['drop', 'reject']):
+            
+            issue = (f"{higher_type_name} rule at line {higher_line} ({higher_type_label}) "
+                    f"will be processed before {lower_type_name} rule at line {lower_line_num} due to protocol layering, "
+                    f"making the lower rule redundant")
+            
+            suggestion = f"Consider removing line {lower_line_num} (unreachable) or move it above line {higher_line}"
             
             return {
                 'upper_rule': upper_rule,
@@ -2058,7 +2157,8 @@ class RuleAnalyzer:
             'ssl_state:', 'file.', 'smb.', 'krb5.', 'dcerpc.', 'ftp.',
             'app-layer-protocol:', 'geoip:', 'byte_test:', 'byte_extract:',
             'isdataat:', 'depth:', 'offset:', 'distance:', 'within:',
-            'flowbits:', 'flowint:', 'xbits:', 'hostbits:'  # State/condition keywords
+            'flowbits:', 'flowint:', 'xbits:', 'hostbits:',  # State/condition keywords
+            'aws_url_category:', 'aws_domain_category:'  # AWS category keywords (external DB lookup)
         ]
         
         # Check if content has any actual content matching or state keywords
@@ -2075,22 +2175,26 @@ class RuleAnalyzer:
         return has_flow
     
     def has_flow_keywords(self, rule: SuricataRule) -> bool:
-        """Check if rule has any flow keywords that would mitigate protocol layering issues"""
+        """Check if rule has any flow keywords that would mitigate protocol layering issues
+        
+        Note: Suricata allows optional whitespace after the colon in flow keywords,
+        e.g., 'flow: to_server' and 'flow:to_server' are both valid. We use regex
+        to handle this variation.
+        """
         content = (rule.content or '').lower()
         original_options = (rule.original_options or '').lower()
         full_content = content + ' ' + original_options
         
-        # Check for any flow keywords
-        flow_keywords = [
-            'flow:established',
-            'flow:to_server', 
-            'flow:to_client',
-            'flow:not_established',
-            'flow:stateless',
-            'flowbits:'
-        ]
+        # Use regex to match flow keywords with optional whitespace after colon
+        # This handles both 'flow:to_server' and 'flow: to_server' formats
+        if re.search(r'flow:\s*(established|to_server|to_client|not_established|stateless)', full_content):
+            return True
         
-        return any(keyword in full_content for keyword in flow_keywords)
+        # Check for flowbits (no whitespace issue here typically)
+        if 'flowbits:' in full_content:
+            return True
+        
+        return False
     
     def _deduplicate_protocol_layering_conflicts(self, conflicts: Dict[str, List[Dict]]) -> None:
         """Remove critical/warning conflicts that are covered by protocol layering conflicts
@@ -2863,9 +2967,9 @@ class RuleAnalyzer:
             if 'to_server' in flow_keywords and 'to_client' in flow_keywords:
                 contradictions.append("'to_server' and 'to_client' (flow cannot be in both directions)")
             
-        # Check for both established and not_established
-        if 'established' in flow_keywords and 'not_established' in flow_keywords:
-            contradictions.append("'established' and 'not_established' (mutually exclusive states)")
+            # Check for both established and not_established
+            if 'established' in flow_keywords and 'not_established' in flow_keywords:
+                contradictions.append("'established' and 'not_established' (mutually exclusive states)")
             
             if contradictions:
                 contradiction_str = '; '.join(contradictions)
@@ -3233,8 +3337,8 @@ class RuleAnalyzer:
             'filesha1:': 'File extraction (filesha1) is not supported by AWS Network Firewall',
             'filesha256:': 'File extraction (filesha256) is not supported by AWS Network Firewall',
             
-            # Thresholding (threshold keyword only - detection_filter is supported)
-            'threshold:': 'Thresholding (threshold keyword) is not supported by AWS Network Firewall',
+            # NOTE: 'threshold:' was moved out of unsupported keywords - it is now supported
+            # in limited capacity by AWS Network Firewall (handled as a warning below)
         }
         
         # Filter out comments and blank lines
@@ -3315,6 +3419,45 @@ class RuleAnalyzer:
                              f"AWS Network Firewall only allows 'pcre' with: content, tls.sni, http.host, or dns.query"),
                     'suggestion': f"Add one of the allowed companion keywords (content, tls.sni, http.host, dns.query) or remove 'pcre' keyword",
                     'severity': 'critical'
+                }
+                issues.append(issue)
+        
+        return issues
+    
+    def check_threshold_keyword(self, rules: List[SuricataRule]) -> List[Dict]:
+        """Check for threshold keyword usage in AWS Network Firewall
+        
+        AWS Network Firewall supports the threshold keyword in limited capacity.
+        This is not an error, but users should be aware of the limitations.
+        
+        Args:
+            rules: List of SuricataRule objects to analyze
+            
+        Returns:
+            List of dictionaries describing threshold keyword usage
+        """
+        issues = []
+        
+        # Filter out comments and blank lines
+        actual_rules = [r for r in rules if not getattr(r, 'is_comment', False) and not getattr(r, 'is_blank', False)]
+        
+        for rule in actual_rules:
+            line_num = rules.index(rule) + 1
+            
+            # Get full rule content
+            full_content = (rule.content or '') + ' ' + (rule.original_options or '')
+            full_content_lower = full_content.lower()
+            
+            # Check if rule contains threshold keyword
+            if 'threshold:' in full_content_lower:
+                issue = {
+                    'line': line_num,
+                    'rule': rule,
+                    'issue': (f"Rule uses 'threshold' keyword. AWS Network Firewall supports the threshold keyword "
+                             f"in limited capacity. Verify that your threshold configuration is compatible with "
+                             f"AWS Network Firewall's supported threshold options."),
+                    'suggestion': f"Review AWS Network Firewall documentation to confirm your threshold configuration is supported",
+                    'severity': 'warning'
                 }
                 issues.append(issue)
         
@@ -3552,6 +3695,16 @@ class RuleAnalyzer:
             report += f"🚨 AWS PCRE RESTRICTIONS - CRITICAL ({len(conflicts['pcre_restrictions'])})\n"
             report += f"-" * 30 + "\n"
             for i, issue in enumerate(conflicts['pcre_restrictions'], 1):
+                report += f"{i}. Line {issue['line']}\n"
+                report += f"   Issue: {issue['issue']}\n"
+                report += f"   Rule: {issue['rule'].to_string()[:80]}...\n"
+                report += f"   Suggestion: {issue['suggestion']}\n\n"
+        
+        # AWS Network Firewall: Threshold keyword (limited support - WARNING)
+        if conflicts.get('threshold_limited'):
+            report += f"⚠️ AWS THRESHOLD KEYWORD - LIMITED SUPPORT ({len(conflicts['threshold_limited'])})\n"
+            report += f"-" * 30 + "\n"
+            for i, issue in enumerate(conflicts['threshold_limited'], 1):
                 report += f"{i}. Line {issue['line']}\n"
                 report += f"   Issue: {issue['issue']}\n"
                 report += f"   Rule: {issue['rule'].to_string()[:80]}...\n"
@@ -3819,6 +3972,17 @@ class RuleAnalyzer:
                 html += f'<h2 class="critical">🚨 AWS PCRE RESTRICTIONS - CRITICAL ({len(conflicts["pcre_restrictions"])})</h2>'
                 for i, issue in enumerate(conflicts['pcre_restrictions'], 1):
                     html += f'<div class="conflict conflict-critical">'
+                    html += f'<strong>{i}. Line {issue["line"]}</strong><br>'
+                    html += f'<strong>Issue:</strong> {issue["issue"]}<br>'
+                    html += f'<strong>Suggestion:</strong> {issue["suggestion"]}<br>'
+                    html += f'<div class="rule-text">Rule: {issue["rule"].to_string()[:100]}...</div>'
+                    html += '</div>'
+            
+            # AWS Network Firewall: Threshold keyword (limited support - WARNING)
+            if conflicts.get('threshold_limited'):
+                html += f'<h2 class="warning">⚠️ AWS THRESHOLD KEYWORD - LIMITED SUPPORT ({len(conflicts["threshold_limited"])})</h2>'
+                for i, issue in enumerate(conflicts['threshold_limited'], 1):
+                    html += f'<div class="conflict conflict-warning">'
                     html += f'<strong>{i}. Line {issue["line"]}</strong><br>'
                     html += f'<strong>Issue:</strong> {issue["issue"]}<br>'
                     html += f'<strong>Suggestion:</strong> {issue["suggestion"]}<br>'

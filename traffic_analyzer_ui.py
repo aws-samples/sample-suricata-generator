@@ -1323,17 +1323,34 @@ class TrafficAnalyzerUI:
         else:
             # Filter flows for this hostname (internet traffic only)
             hostname = destination
-            flows = []
+            
+            # BUGFIX: First, find the dest_ip(s) associated with this hostname
+            # Some flows may have hostname, others may have "(No hostname)" but same dest_ip
+            dest_ips_for_hostname = set()
             for f in self.current_results['top_talkers']:
                 if f['hostname'] == hostname and not f['is_aws']:
-                    # Additional check: Exclude VPC-to-VPC (both src and dest are RFC1918)
-                    src_is_private = self._is_private_ip(f['src_ip'])
-                    dest_is_private = self._is_private_ip(f['dest_ip'])
+                    dest_ips_for_hostname.add(f['dest_ip'])
+            
+            # Now collect ALL flows that either:
+            # 1. Have this exact hostname, OR
+            # 2. Have "(No hostname)" but dest_ip matches one we found above
+            flows = []
+            for f in self.current_results['top_talkers']:
+                if not f['is_aws']:
+                    # Check if this flow should be included
+                    matches_hostname = (f['hostname'] == hostname)
+                    matches_ip_with_no_hostname = (f['hostname'] == "(No hostname)" and 
+                                                   f['dest_ip'] in dest_ips_for_hostname)
                     
-                    # Only include if destination is NOT private (internet traffic)
-                    # VPC-to-VPC traffic (both private) should only appear on Tab 3
-                    if not dest_is_private:
-                        flows.append(f)
+                    if matches_hostname or matches_ip_with_no_hostname:
+                        # Additional check: Exclude VPC-to-VPC (both src and dest are RFC1918)
+                        src_is_private = self._is_private_ip(f['src_ip'])
+                        dest_is_private = self._is_private_ip(f['dest_ip'])
+                        
+                        # Only include if destination is NOT private (internet traffic)
+                        # VPC-to-VPC traffic (both private) should only appear on Tab 3
+                        if not dest_is_private:
+                            flows.append(f)
         
         if not flows:
             messagebox.showinfo("No Data", f"No flow data found for {destination}")

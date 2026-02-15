@@ -1,5 +1,131 @@
 # Release Notes
 
+## Version 1.31.0 - February 15, 2026
+
+### New Feature: Category-Based Domain Analysis (Rule Usage Analyzer - Tab 9)
+- **Category Domain Visibility**: New "Categories" tab in the Rule Usage Analysis results window shows which specific domains were seen in CloudWatch alert logs for each URL/domain category
+  - **Compliance Reporting**: Answer questions like "Show me all Command & Control domains we detected" or "Which Malware domains did we detect this month?"
+  - **Threat Intelligence**: Understand attack patterns by category with per-domain hit counts and rule associations
+  - **Policy Validation**: Verify that category-based rules are catching expected traffic with direct vs indirect domain distinction
+  - **Domain Discovery**: See exactly which domains triggered each category rule, with sortable columns for Domain, Hits, % of Category, Rule SID, and Action
+- **Smart Category Dropdown**: Hybrid population from both rule definitions and CloudWatch data
+  - Rule-defined categories always appear (even with 0 hits) — shows how many rules target each category
+  - Discovered categories from CloudWatch added automatically when domains belong to multiple categories
+  - Format: `Category Name (N rules, M hits)` with accurate direct hit counts
+- **Direct vs Indirect Domain Display**: Visual distinction between domains matched by rules targeting the selected category vs domains that appear only because AWS classifies them in that category
+  - **Direct domains** (normal text): A rule targeting this category fired and matched the domain — real hits, SIDs, and actions shown
+  - **Indirect domains** (greyed out, n/a): Domain belongs to this category per AWS's database, but a different category's rule fired first due to strict rule ordering
+- **Separate CloudWatch Query**: Runs an independent query (`isPresent(event.aws_category)`) that does not affect existing analysis tabs — if the category query fails, the other 8 tabs are unaffected
+- **Truncation Warning**: Displays a warning banner if the category query returned the maximum 10,000 records, advising users to analyze a shorter time range
+- **Export Category Report**: Export all categories with domain tables, hit counts, SIDs, and direct/indirect indicators to a plain text report file
+- **Help Button**: In-tab help explaining how category data is aggregated, direct vs indirect domains, dropdown labels, and strict rule ordering effects
+- **Persistent Cache**: Category analysis data saved and loaded with .stats companion files for instant access on subsequent opens without re-querying CloudWatch
+- **Empty State Guidance**: When no category data exists, the tab displays clear instructions on how to create category rules and enable the feature
+
+## Version 1.30.6 - February 14, 2026
+
+### Rules Analysis Engine Bug Fix (v1.10.5) - Protocol Layering False Positive Reduction
+- **Fixed Excessive Protocol Layering Conflict Detection**: Corrected two bugs causing hundreds of false positive protocol layering conflicts, particularly with east-west traffic rules using specific IPs and ports
+  - **Bug Fix 1 - Flow Keyword Detection with Whitespace**: Fixed `has_flow_keywords()` failing to detect flow keywords when a space follows the colon (e.g., `flow: to_server` vs `flow:to_server`)
+    - **Root Cause**: Method used simple string matching (`'flow:to_server' in content`) which didn't match `flow: to_server` (with space after colon) — a valid and common Suricata syntax
+    - **Impact**: PKT rules with flow keywords like `flow: to_server` were not recognized as having flow keywords, causing them to be flagged as protocol layering conflicts when they should have been filtered out
+    - **Solution**: Changed from string-based matching to regex-based matching with `re.search(r'flow:\s*(established|to_server|to_client|not_established|stateless)', ...)` to handle optional whitespace
+    - **Example**: `pass tcp $HOME_NET any -> 10.0.1.48 $AD (flow: to_server; ...)` was incorrectly flagged as conflicting with HTTP app-layer rules
+  - **Bug Fix 2 - Scope-Aware "Significantly Broader" Check for Flow-Only Rules**: Fixed `is_significantly_broader()` incorrectly classifying narrow-scope flow-only rules as "significantly broader"
+    - **Root Cause**: When a rule had only flow keywords (no content matching), it was always considered "significantly broader" regardless of its network/port scope
+    - **Impact**: Rules targeting specific IPs and specific ports (e.g., AD traffic on `10.0.1.48:$AD`) were incorrectly flagged as broader than rules targeting `any any` destinations, generating false protocol layering conflicts
+    - **Solution**: Added network/port scope comparison — a flow-only rule is NOT considered "significantly broader" if it has narrower scope (specific dst_net while the other has `any`, or specific dst_port while the other has `any`)
+    - **Example**: `pass tcp $HOME_NET any -> 10.0.1.48 $AD (flow: to_server; ...)` is clearly narrower than `reject http $HOME_NET any -> any any (http.host; pcre; ...)` and should not be flagged
+- **Real-World Impact**: On the tgw-attached-fw.suricata test file, these fixes eliminate the majority of false positive protocol layering conflicts (previously 276 findings) involving east-west AD traffic rules vs HTTP/TLS application-layer rules
+- **No Legitimate Findings Lost**: Both fixes only suppress false positives — rules that genuinely lack flow keywords or are genuinely broader continue to be flagged
+
+## Version 1.30.6 - February 13, 2026
+
+### Rules Analysis Engine Bug Fix (v1.10.4) - IPONLY Rule Conflict Detection
+- **Fixed Missing IPONLY Protocol Layering Conflicts**: Corrected critical bug where pure IPONLY rules (no keywords) were not being detected as conflicting with more specific APPLAYER rules
+  - **Root Cause**: Overly restrictive filtering logic prevented detection of broad IPONLY rules that shadow specific TLS/HTTP rules with domain matching
+  - **Impact**: Rules like `drop ip any any -> any any` (pure IPONLY, no keywords) were not flagged as shadowing specific `pass tls ... (tls.sni; content:".example.com")` rules, creating security policy violations
+  - **Three-Part Solution**:
+    1. **Extended Conflict Types**: Added detection for DROP/REJECT vs ALERT and DROP/REJECT vs DROP/REJECT conflicts
+    2. **IPONLY vs PKT Distinction**: Only flags pure IPONLY rules (no keywords) or PKT rules without flow keywords - does not flag PKT rules with flow keywords (they work correctly with app-layer rules)
+    3. **AWS Category Filtering**: Added detection for AWS category keywords (`aws_url_category`, `aws_domain_category`) to prevent false positives when comparing category-based rules vs domain-specific rules
+  - **False Positive Elimination**: Enhanced `has_only_flow_keywords()` to recognize AWS category keywords as content matching, preventing early exit before proper validation
+- **Best Practices Compatibility**: Changes maintain zero false positives on AWS best practices template file (only 1 legitimate conflict detected)
+
+### Flow Tester Bug Fix (v1.1.1) - IPONLY Rule Matching
+- **Fixed Missing IPONLY Rules in Flow Tests**: Corrected bug where IPONLY rules were not appearing in matched rules during flow testing
+  - **Root Cause**: FLOW-scope rules (IPONLY and APPLAYER types) were only being added to matched_rules at the end of processing, but since they stop all further processing, the storage code may not execute properly
+  - **Impact**: Pure IPONLY rules like `drop ip any any -> any any` did not appear in flow test results even though they would match and block the traffic
+  - **Solution**: Modified `_test_flow_phase()` to immediately add FLOW-scope rules to matched_rules when they match, before setting the flag that stops all tier processing
+  - **Enhanced PKT Matching**: Updated `_flow_state_matches()` to allow PKT rules with `flow:to_server` to match during handshake phase (TCP SYN is to_server)
+
+### User Impact
+- **Accurate Conflict Detection**: Rule analyzer now correctly identifies when broad IPONLY rules shadow specific application-layer rules
+- **Complete Flow Test Results**: Flow tester now shows all matching rules including critical IPONLY rules that would block traffic
+- **Production Safety**: Prevents deploying rule sets where broad drop rules unintentionally block specific allow rules
+
+## Version 1.30.6 - February 13, 2026 (continued)
+
+### Bug Fix: SID Extraction from Message Text
+- **Fixed SID Renumbering During Paste Operations**: Corrected critical bug where SIDs were incorrectly extracted from message text instead of the actual SID field, causing false duplicate detection and unnecessary renumbering
+  - **Root Cause**: The SID extraction regex `sid:(\d+)` in `suricata_rule.py` matched the FIRST occurrence of `sid:` in the options string, which could be inside message text rather than the actual SID field
+  - **Impact**: Rules with message text referencing other SIDs (e.g., `msg:"Pass rules don't alert, alert is on sid:100044"`) were incorrectly parsed, causing false duplicate detection and renumbering during paste operations
+  - **Solution**: Changed SID extraction to use the LAST occurrence of `sid:\d+` pattern, which is always the actual SID field (never in message text)
+  - **Technical Fix**: Modified `from_string()` method in `suricata_rule.py` to use `re.finditer()` and select the last match instead of first match
+  - **Additional Enhancement**: Improved `assign_safe_sids()` in `suricata_generator.py` to build complete SID inventory from paste batch before renumbering, preventing renumbered SIDs from conflicting with later rules
+- **User Impact**: Paste operations now preserve original SIDs for all unique rules, only renumbering actual duplicates. Rules with message text containing SID references no longer trigger false duplicate detection.
+
+---
+
+## Version 1.30.5 - February 12, 2026
+
+### Bug Fix: Domain Importer Error Handling
+- **Fixed UnboundLocalError in Domain Rule Insertion**: Corrected critical bug preventing domain rule insertion via "Insert Domain Allow Rule" button
+  - **Root Cause**: Redundant `import os` statements inside conditional blocks in two functions created variable scoping conflicts where Python treated `os` as a local variable
+  - **Impact**: When clicking "Insert Domain Allow Rule" button, users received `UnboundLocalError: cannot access local variable 'os' where it is not associated with a value` error
+  - **Solution**: Removed redundant local `import os` statements from `on_insert()` and `on_import()` functions, relying on module-level import
+  - **Affected Methods**:
+    - `insert_domain_rule()` in domain_importer.py (line ~1312)
+    - `show_bulk_import_dialog()` in domain_importer.py (line ~627)
+  - **Technical Fix**: Module-level `import os` (line 6) is sufficient for all uses throughout the file
+
+### Enhancement: Domain Rule Keyword Removal
+- **Removed "nocase" Keyword from Domain Rules**: Eliminated nocase keyword from all domain rule generation to improve rule clarity
+  - **Impact**: All 16 instances of `; nocase` keyword removed from generated domain rules
+  - **Affected Rules**: Pass rules with alert keyword, alert/pass rule pairs, and drop/reject/alert rules for both TLS and HTTP protocols
+  - **User Request**: Change implemented per user feedback to remove unnecessary keyword from domain matching rules
+
+---
+
+## Version 1.30.4 - February 12, 2026
+
+### Bug Fix: Traffic Analysis Hostname Aggregation and Drill-Down
+- **Fixed Split Destination Display in Internet Traffic Tab**: Corrected bug where flows to the same destination IP were displayed as separate entries when some flows had hostname data and others didn't
+  - **Root Cause**: The `aggregate_by_hostname()` method aggregated each flow independently - flows with hostnames grouped by hostname, flows without hostnames grouped by IP:port - even when both went to the same destination IP
+  - **Impact**: Traffic to a destination appeared split across multiple table rows (e.g., "arkansasrazorbacks.com" and "130.211.43.98:443") even though all traffic went to 130.211.43.98
+  - **Real-World Example**: 
+    - Flow 0123456789012345: dest_ip 130.211.43.98, hostname "arkansasrazorbacks.com" (from alert log)
+    - Flow 0123456789012346: dest_ip 130.211.43.98, hostname "(No hostname)" (no alert match)
+    - **Before Fix**: Appeared as two separate destinations in Internet Traffic tab
+    - **After Fix**: Both flows now aggregate under "arkansasrazorbacks.com"
+  - **Two-Part Solution**:
+    1. **Aggregation Fix** (`traffic_analyzer.py`): Build IP-to-hostname lookup table before aggregation, allowing flows without hostnames to inherit known hostnames from other flows to the same dest_ip
+    2. **Drill-Down Fix** (`traffic_analyzer_ui.py`): When drilling down on a hostname, include ALL flows to associated dest_ips (both flows with hostname and flows with "(No hostname)")
+  - **Multi-IP Support**: If multiple IPs have flows with the same hostname, all are correctly grouped (requires at least one flow per IP to have hostname data for correlation)
+
+### Technical Implementation
+- **traffic_analyzer.py**: Enhanced `aggregate_by_hostname()` with IP-to-hostname lookup table built from all flows before aggregation begins
+- **traffic_analyzer_ui.py**: Modified `_show_drilldown_tab1()` to find all dest_ips for clicked hostname and include flows with "(No hostname)" matching those IPs
+- **No Breaking Changes**: Flows maintain original hostname values in underlying data; only aggregation and drill-down display logic changed
+
+### User Impact
+- **Unified Destination View**: All traffic to a destination now appears under single hostname entry (when hostname data available from any flow)
+- **Complete Flow Visibility**: Drill-down shows ALL flows to destination including those without individual hostname data
+- **Better Traffic Analysis**: More accurate representation of where traffic is actually going
+- **Improved Reporting**: Export and statistics now correctly reflect consolidated traffic patterns
+
+---
+
 ## Version 1.30.3 - February 11, 2026
 
 ### Bug Fix: MacOS Insert Category Dialog - Python 3.13 Compatibility and Layout

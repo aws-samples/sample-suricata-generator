@@ -164,9 +164,13 @@ class SuricataRule:
             if msg_match:
                 message = msg_match.group(1)
             
-            # Extract SID number
-            sid_match = re.search(r'sid:(\d+)', options_str)
-            if sid_match:
+            # Extract SID number - match sid: that is NOT inside quoted strings
+            # Use negative lookbehind to ensure we're not inside a msg:"..." field
+            # Strategy: Find the LAST occurrence of sid:\d+ (the actual SID field)
+            sid_matches = list(re.finditer(r'sid:(\d+)', options_str))
+            if sid_matches:
+                # Use the LAST match (the actual sid: field, not references in msg:)
+                sid_match = sid_matches[-1]
                 try:
                     sid = int(sid_match.group(1))
                     if not (SuricataConstants.SID_MIN <= sid <= SuricataConstants.SID_MAX):

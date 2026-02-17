@@ -382,15 +382,11 @@ class AWSRuleGroupBrowser:
             rule_groups_data.clear()
             
             if not rule_groups:
-                messagebox.showinfo(
-                    "No Rule Groups Found",
-                    "No rule groups found in your account for the default region.\n\n"
-                    "This could mean:\n"
-                    "• No rule groups exist in this region\n"
-                    "• You don't have permissions to view them\n"
-                    "• Check AWS credentials are configured correctly"
+                # Don't destroy dialog - let user switch regions
+                status_label.config(
+                    text=f"Region: {self.selected_region} | No rule groups found in this region. "
+                         f"Try selecting a different region."
                 )
-                dialog.destroy()
                 return
             
             # Populate tree
@@ -444,8 +440,9 @@ class AWSRuleGroupBrowser:
         # Load rule groups
         load_rule_groups()
         
-        # Wait for dialog
-        dialog.wait_window()
+        # Wait for dialog (only if it wasn't already destroyed by an error in load_rule_groups)
+        if dialog.winfo_exists():
+            dialog.wait_window()
         
         return selected_data[0]
     

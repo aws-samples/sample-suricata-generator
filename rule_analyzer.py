@@ -36,7 +36,7 @@ class RuleAnalyzer:
         Returns:
             Dictionary with conflict categories: {'critical': [], 'warning': [], 'info': [], 'protocol_layering': [], 'sticky_buffer_order': [], 'udp_flow_established': [], 'protocol_keyword_mismatch': []}
         """
-        conflicts = {'critical': [], 'warning': [], 'info': [], 'protocol_layering': [], 'sticky_buffer_order': [], 'udp_flow_established': [], 'protocol_keyword_mismatch': [], 'asymmetric_flow': [], 'reject_ip_protocol': [], 'unsupported_keywords': [], 'pcre_restrictions': [], 'priority_strict_order': []}
+        conflicts = {'critical': [], 'warning': [], 'info': [], 'protocol_layering': [], 'sticky_buffer_order': [], 'udp_flow_established': [], 'protocol_keyword_mismatch': [], 'asymmetric_flow': [], 'reject_ip_protocol': [], 'reject_quic_protocol': [], 'unsupported_keywords': [], 'pcre_restrictions': [], 'priority_strict_order': []}
         
         # Filter out comments and blank lines for analysis
         actual_rules = [r for r in rules if not getattr(r, 'is_comment', False) and not getattr(r, 'is_blank', False)]
@@ -138,6 +138,10 @@ class RuleAnalyzer:
         # Check for reject actions on IP protocol rules (AWS Network Firewall restriction)
         reject_ip_issues = self.check_reject_on_ip_protocol(rules)
         conflicts['reject_ip_protocol'] = reject_ip_issues
+        
+        # Check for reject actions on QUIC protocol rules (AWS Network Firewall restriction)
+        reject_quic_issues = self.check_reject_on_quic_protocol(rules)
+        conflicts['reject_quic_protocol'] = reject_quic_issues
         
         # AWS Network Firewall: Check for unsupported keywords
         unsupported_keyword_issues = self.check_unsupported_keywords(rules)
@@ -3298,6 +3302,40 @@ class RuleAnalyzer:
         
         return issues
     
+    def check_reject_on_quic_protocol(self, rules: List[SuricataRule]) -> List[Dict]:
+        """Check for reject actions on QUIC protocol rules (AWS Network Firewall restriction)
+        
+        AWS Network Firewall does not allow reject actions on QUIC protocol rules.
+        QUIC protocol rules must use drop, pass, or alert actions instead.
+        
+        Args:
+            rules: List of SuricataRule objects to analyze
+            
+        Returns:
+            List of dictionaries describing reject on QUIC protocol issues
+        """
+        issues = []
+        
+        # Filter out comments and blank lines
+        actual_rules = [r for r in rules if not getattr(r, 'is_comment', False) and not getattr(r, 'is_blank', False)]
+        
+        for rule in actual_rules:
+            # Get line number in original rules list
+            line_num = rules.index(rule) + 1
+            
+            # Check if rule uses QUIC protocol with reject action
+            if rule.protocol.lower() == 'quic' and rule.action.lower() == 'reject':
+                issue = {
+                    'line': line_num,
+                    'rule': rule,
+                    'issue': f"AWS Network Firewall does not allow REJECT action on QUIC protocol rules. This rule will be rejected as invalid syntax.",
+                    'suggestion': "Change action from 'reject' to 'drop' for QUIC protocol rules",
+                    'severity': 'critical'
+                }
+                issues.append(issue)
+        
+        return issues
+    
     def check_unsupported_keywords(self, rules: List[SuricataRule]) -> List[Dict]:
         """Check for AWS Network Firewall unsupported keywords
         
@@ -3680,6 +3718,16 @@ class RuleAnalyzer:
                 report += f"   Rule: {issue['rule'].to_string()[:80]}...\n"
                 report += f"   Suggestion: {issue['suggestion']}\n\n"
         
+        # Reject on QUIC protocol issues (AWS Network Firewall restriction)
+        if conflicts.get('reject_quic_protocol'):
+            report += f"🚨 REJECT ON QUIC PROTOCOL - CRITICAL ({len(conflicts['reject_quic_protocol'])})\n"
+            report += f"-" * 30 + "\n"
+            for i, issue in enumerate(conflicts['reject_quic_protocol'], 1):
+                report += f"{i}. Line {issue['line']}\n"
+                report += f"   Issue: {issue['issue']}\n"
+                report += f"   Rule: {issue['rule'].to_string()[:80]}...\n"
+                report += f"   Suggestion: {issue['suggestion']}\n\n"
+        
         # AWS Network Firewall: Unsupported keywords (CRITICAL)
         if conflicts.get('unsupported_keywords'):
             report += f"🚨 AWS UNSUPPORTED KEYWORDS - CRITICAL ({len(conflicts['unsupported_keywords'])})\n"
@@ -3949,6 +3997,17 @@ class RuleAnalyzer:
             if conflicts.get('reject_ip_protocol'):
                 html += f'<h2 class="critical">🚨 REJECT ON IP PROTOCOL - CRITICAL ({len(conflicts["reject_ip_protocol"])})</h2>'
                 for i, issue in enumerate(conflicts['reject_ip_protocol'], 1):
+                    html += f'<div class="conflict conflict-critical">'
+                    html += f'<strong>{i}. Line {issue["line"]}</strong><br>'
+                    html += f'<strong>Issue:</strong> {issue["issue"]}<br>'
+                    html += f'<strong>Suggestion:</strong> {issue["suggestion"]}<br>'
+                    html += f'<div class="rule-text">Rule: {issue["rule"].to_string()[:100]}...</div>'
+                    html += '</div>'
+            
+            # Reject on QUIC protocol issues (AWS Network Firewall restriction)
+            if conflicts.get('reject_quic_protocol'):
+                html += f'<h2 class="critical">🚨 REJECT ON QUIC PROTOCOL - CRITICAL ({len(conflicts["reject_quic_protocol"])})</h2>'
+                for i, issue in enumerate(conflicts['reject_quic_protocol'], 1):
                     html += f'<div class="conflict conflict-critical">'
                     html += f'<strong>{i}. Line {issue["line"]}</strong><br>'
                     html += f'<strong>Issue:</strong> {issue["issue"]}<br>'

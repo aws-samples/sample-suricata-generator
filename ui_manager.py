@@ -8468,18 +8468,74 @@ Would you like to run a complete analysis?"""
                 # No matches
                 results_tree.insert("", tk.END, values=("", "", "", "", "No rules matched this flow"))
             
-            # Display final action
+            # Display final action with scope conflict and partial allow details
             final_action = results['final_action']
+            scope_conflict = results.get('scope_conflict', False)
+            partial_allow = results.get('partial_allow', False)
+            
             if final_action == 'PASS':
                 final_label.config(text="ALLOWED", foreground="#2E7D32")
             elif final_action in ['DROP', 'REJECT']:
-                final_label.config(text="BLOCKED", foreground="#D32F2F")
+                if partial_allow:
+                    # Handshake succeeded but established connection blocked
+                    final_label.config(
+                        text=f"BLOCKED ({final_action}) - Port appears OPEN but connections will FAIL",
+                        foreground="#D32F2F")
+                elif scope_conflict:
+                    # PACKET-scope override of FLOW-scope
+                    final_label.config(
+                        text=f"BLOCKED ({final_action}) - PACKET scope overrides FLOW scope PASS",
+                        foreground="#D32F2F")
+                else:
+                    final_label.config(text="BLOCKED", foreground="#D32F2F")
             elif final_action == 'NO_RULES':
                 final_label.config(text="NO RULES TO EVALUATE", foreground="#FF6600")
             elif 'no matching rules' in final_action.lower():
                 final_label.config(text="UNDETERMINED (no matching rules)", foreground="#FF6600")
             else:
                 final_label.config(text=final_action, foreground="#000000")
+            
+            # Show flowbits inferences if any
+            flowbits_inferences = results.get('flowbits_inferences', [])
+            if flowbits_inferences:
+                # Add flowbits inference rows to results tree (as info rows)
+                results_tree.insert("", tk.END, values=("", "", "", "", "--- Flowbits Inference ---"),
+                                   tags=('info_header',))
+                results_tree.tag_configure("info_header", foreground="#666666", background="#F0F0F0")
+                for inference in flowbits_inferences:
+                    # Color based on TRUE/FALSE
+                    if "= TRUE" in inference:
+                        tag = 'flowbits_true'
+                    else:
+                        tag = 'flowbits_false'
+                    results_tree.insert("", tk.END, values=("", "", "", "", inference), tags=(tag,))
+                results_tree.tag_configure("flowbits_true", foreground="#2E7D32", background="#F0FFF0")
+                results_tree.tag_configure("flowbits_false", foreground="#D32F2F", background="#FFF0F0")
+            
+            # Show scope details if there's a conflict
+            scope_details = results.get('scope_details', {})
+            if scope_conflict or partial_allow:
+                results_tree.insert("", tk.END, values=("", "", "", "", "--- Scope Analysis ---"),
+                                   tags=('info_header',))
+                for phase_name, phase_detail in scope_details.items():
+                    flow_action = phase_detail.get('flow_scope_action')
+                    pkt_action = phase_detail.get('packet_scope_action')
+                    flow_rule = phase_detail.get('flow_scope_rule')
+                    pkt_rule = phase_detail.get('packet_scope_rule')
+                    
+                    if flow_action or pkt_action:
+                        flow_sid = f"SID {flow_rule['rule'].sid}" if flow_rule else "none"
+                        pkt_sid = f"SID {pkt_rule['rule'].sid}" if pkt_rule else "none"
+                        scope_text = f"Phase '{phase_name}': FLOW={flow_action or 'none'} ({flow_sid}), PACKET={pkt_action or 'none'} ({pkt_sid})"
+                        
+                        if flow_action == 'pass' and pkt_action in ['drop', 'reject']:
+                            tag = 'scope_conflict'
+                        else:
+                            tag = 'scope_info'
+                        results_tree.insert("", tk.END, values=("", "", "", "", scope_text), tags=(tag,))
+                
+                results_tree.tag_configure("scope_conflict", foreground="#D32F2F", background="#FFF0F0")
+                results_tree.tag_configure("scope_info", foreground="#666666")
                 
         except Exception as e:
             messagebox.showerror("Flow Test Error", f"An error occurred during flow testing:\n\n{str(e)}\n\nPlease check your inputs and try again.")

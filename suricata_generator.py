@@ -27,6 +27,15 @@ class SuricataRuleGenerator:
     def __init__(self):
         # Initialize main window
         self.root = tk.Tk()
+        
+        # macOS fix: Disable transient() globally to prevent child windows from
+        # disappearing when dragged to another monitor. On macOS, transient()
+        # constrains child windows to the parent's screen space, which causes
+        # windows to vanish on multi-monitor setups. This does not affect Windows/Linux.
+        import platform
+        if platform.system() == 'Darwin':
+            tk.Toplevel.transient = lambda self, parent=None: None
+        
         self.root.title("Suricata Rule Generator for AWS Network Firewall")
         self.root.geometry("1220x900")
         

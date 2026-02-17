@@ -1,5 +1,66 @@
 # Release Notes
 
+## Flow Tester Enhancement (v1.2.0) - February 17, 2026
+
+### Three Major Fixes: Flowbits Inference, Cross-Scope Deconfliction, and Partial Allow Detection
+- **Flowbits Inference Engine**: The flow tester no longer skips rules with `flowbits:isnotset` — it now infers the flowbits state by scanning the ruleset
+  - **How It Works**: When encountering `flowbits:isnotset,<bitname>`, the tester finds all rules that do `flowbits:set,<bitname>` and checks if any would match the current flow. If no setter matches, the bit is NOT set, so `isnotset` = TRUE and the rule is evaluated
+  - **Real-World Impact**: Default block rules like `reject tcp ... (flowbits:isnotset,blocked; flowbits:isnotset,X25519Kyber768; ...)` now correctly match plain TCP flows where no TLS rule sets those bits
+  - **Inference Display**: Results table shows color-coded flowbits inference rows (green for TRUE, red for FALSE) with explanations like "flowbits:isnotset,blocked = TRUE (no tls rule that sets 'blocked' matches this tcp flow)"
+- **Cross-Scope Deconfliction Fix**: PACKET-scope DROP/REJECT now correctly overrides FLOW-scope PASS
+  - **The Problem**: FLOW-scope PASS from IPONLY rules (e.g., `pass ip 10.0.2.16/28 <> 10.0.1.16/28`) was incorrectly stopping all further rule evaluation, preventing PACKET-scope rules from firing
+  - **The Fix**: All three tiers (IPONLY, PKT, APPLAYER) now evaluate independently within their scope. A FLOW-scope PASS allows the flow to exist, but PACKET-scope rules still inspect individual packets and can reject them
+  - **Scope Conflict Display**: When FLOW=PASS but PACKET=REJECT, the final action label shows "BLOCKED (REJECT) - PACKET scope overrides FLOW scope PASS" with a detailed scope analysis section in the results table
+- **Partial Allow Detection**: Detects when the TCP handshake succeeds but the established connection is blocked
+  - **The Scenario**: Port appears OPEN (handshake rules pass SYN/SYN-ACK/ACK) but actual connections FAIL (established-phase reject rule fires)
+  - **How Users See This**: Tools like `Test-NetConnection` show port is open, but RDP/SSH/etc. connections fail — a confusing troubleshooting scenario
+  - **Display**: Final action label shows "BLOCKED (REJECT) - Port appears OPEN but connections will FAIL" — directly addressing the user's confusion
+
+### Bug Fix: Missing FLOW-Scope Rules in Matched Results
+- **Fixed Missing SIDs**: Corrected indentation bug where FLOW-scope rules (IPONLY pass/alert) were not appearing in the matched rules table during handshake phase
+  - **Root Cause**: The `else: # scope == 'FLOW'` branch was at incorrect indentation level, causing it to be unreachable when PACKET-scope rules were also present
+  - **Impact**: SIDs like 100057 (IPONLY pass) and 202501022 (PKT pass to_client) were missing from results
+  - **Solution**: Fixed indentation so both PACKET and FLOW scope branches are correctly nested within the action processing logic
+
+---
+
+## Rules Analysis Engine Enhancement (v1.11.0) - February 16, 2026
+
+### New Check: Reject Action on QUIC Protocol (AWS Network Firewall Restriction)
+- **QUIC Protocol Reject Detection**: New critical validation check identifies rules that use REJECT action with QUIC protocol, which is not supported by AWS Network Firewall
+  - **AWS Restriction**: AWS Network Firewall does not allow the `reject` action on `quic` protocol rules; such rules must use `drop`, `pass`, or `alert` instead
+  - **Automatic Detection**: Analyzer scans all rules and flags QUIC protocol + reject action combinations as CRITICAL issues
+  - **Report Integration**: New dedicated section "🚨 REJECT ON QUIC PROTOCOL - CRITICAL" in both text and HTML analysis reports
+  - **Clear Guidance**: Each detected issue includes specific line number, full rule text, and actionable suggestion to change action from `reject` to `drop`
+  - **Pre-Deployment Safety**: Catches this configuration error before attempting to deploy to AWS Network Firewall
+  - **Consistent Pattern**: Follows same detection pattern as existing reject-on-IP-protocol check
+
+---
+
+## Version 1.31.2 - February 16, 2026
+
+### Bug Fix: macOS Multi-Monitor Window Disappearing
+- **Fixed popup windows disappearing when dragged to another monitor on macOS**: All popup/dialog windows (flow tester, analysis results, configuration dialogs, etc.) would vanish when dragged from the primary monitor to a secondary monitor on macOS
+  - **Root Cause**: tkinter's `Toplevel.transient()` on macOS (Cocoa-based Tk) constrains child windows to the parent window's screen/display space. When a transient window is moved to a different monitor, macOS hides it because it's outside the parent's display bounds. This behavior does not occur on Windows or Linux
+  - **Solution**: Added a global monkey-patch at application startup that makes `transient()` a no-op on macOS (`platform.system() == 'Darwin'`). This fixes all 79 popup windows across 8 source files without modifying any individual dialog code
+  - **Scope**: Affects `ui_manager.py`, `suricata_generator.py`, `traffic_analyzer_ui.py`, `stateful_rule_importer.py`, `search_manager.py`, `file_manager.py`, `domain_list_importer.py`, and `domain_importer.py`
+  - **Windows/Linux Impact**: None — the fix only activates on macOS. `grab_set()` continues to provide modal behavior on all platforms
+
+---
+
+## Version 1.31.1 - February 16, 2026
+
+### Bug Fix: macOS AWS Rule Group Import Crash
+- **Fixed TclError Crash on macOS When Importing from AWS**: Resolved two bugs in the "Import from AWS" rule group browser that caused crashes on macOS
+  - **Bug Fix 1 - wait_window on Destroyed Dialog**: Fixed `TclError: bad window path name` crash when AWS errors (credentials, permissions, timeout) caused the browse dialog to be destroyed before `wait_window()` was called
+    - **Root Cause**: `load_rule_groups()` called `dialog.destroy()` on error paths, then `browse_and_select()` called `dialog.wait_window()` on the already-destroyed dialog. macOS Cocoa-based Tk strictly validates window references, raising an error, while Windows Win32-based Tk silently tolerates it
+    - **Solution**: Added `dialog.winfo_exists()` guard before calling `wait_window()`
+  - **Bug Fix 2 - Empty Region Destroys Browse Dialog**: Fixed the browse dialog being destroyed when no rule groups exist in the selected region, preventing users from switching to a different region
+    - **Root Cause**: When `_fetch_rule_groups()` returned an empty list, `load_rule_groups()` showed a `messagebox.showinfo()` and called `dialog.destroy()`, closing the entire browse dialog
+    - **Impact**: Users with rule groups in other regions (e.g., us-east-1) but none in their default region (e.g., us-west-2) could not switch regions to find their rule groups
+    - **Solution**: Replaced `dialog.destroy()` with an inline status message: "No rule groups found in this region. Try selecting a different region." — the browse dialog stays open for region switching
+  - **macOS vs Windows**: Bug 1 was macOS-only (Windows Tk silently ignores `wait_window` on destroyed dialogs). Bug 2 affected both platforms — the dialog would close on both, but only macOS raised a `TclError` for the subsequent `wait_window` call
+
 ## Version 1.31.0 - February 15, 2026
 
 ### New Feature: Category-Based Domain Analysis (Rule Usage Analyzer - Tab 9)

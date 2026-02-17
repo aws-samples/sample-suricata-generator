@@ -895,9 +895,9 @@ class DomainImporter:
                             pass_tls_message = message_template.replace("{domain}", domain_display).replace("traffic", "TLS traffic")
                         
                         if strict_domain:
-                            pass_tls_content = f'flow:to_server; tls.sni; content:"{domain}"; startswith; endswith; alert'
+                            pass_tls_content = f'flow:to_server; tls.sni; content:"{domain}"; startswith; endswith; nocase; alert'
                         else:
-                            pass_tls_content = f'flow:to_server; tls.sni; dotprefix; content:".{domain}"; endswith; alert'
+                            pass_tls_content = f'flow:to_server; tls.sni; dotprefix; content:".{domain}"; endswith; nocase; alert'
                         
                         pass_tls_rule = SuricataRule(
                             action="pass",
@@ -954,9 +954,9 @@ class DomainImporter:
                             alert_tls_message = message_template.replace("{domain}", domain_display).replace("traffic", "TLS traffic").replace("Pass", "Alert for")
                         
                         if strict_domain:
-                            alert_tls_content = f'flow:to_server; tls.sni; content:"{domain}"; startswith; endswith'
+                            alert_tls_content = f'flow:to_server; tls.sni; content:"{domain}"; startswith; endswith; nocase'
                         else:
-                            alert_tls_content = f'flow:to_server; tls.sni; dotprefix; content:".{domain}"; endswith'
+                            alert_tls_content = f'flow:to_server; tls.sni; dotprefix; content:".{domain}"; endswith; nocase'
                         
                         alert_tls_rule = SuricataRule(
                             action="alert",
@@ -980,9 +980,9 @@ class DomainImporter:
                             pass_tls_message = message_template.replace("{domain}", domain_display).replace("traffic", "TLS traffic")
                         
                         if strict_domain:
-                            pass_tls_content = f'flow:to_server; tls.sni; content:"{domain}"; startswith; endswith'
+                            pass_tls_content = f'flow:to_server; tls.sni; content:"{domain}"; startswith; endswith; nocase'
                         else:
-                            pass_tls_content = f'flow:to_server; tls.sni; dotprefix; content:".{domain}"; endswith'
+                            pass_tls_content = f'flow:to_server; tls.sni; dotprefix; content:".{domain}"; endswith; nocase'
                         
                         pass_tls_rule = SuricataRule(
                             action="pass",
@@ -1065,9 +1065,9 @@ class DomainImporter:
                         tls_message = message_template.replace("{domain}", domain_display)
                     
                     if strict_domain:
-                        tls_content = f'flow:to_server; tls.sni; content:"{domain}"; startswith; endswith'
+                        tls_content = f'flow:to_server; tls.sni; content:"{domain}"; startswith; endswith; nocase'
                     else:
-                        tls_content = f'flow:to_server; tls.sni; dotprefix; content:".{domain}"; endswith'
+                        tls_content = f'flow:to_server; tls.sni; dotprefix; content:".{domain}"; endswith; nocase'
                     tls_rule = SuricataRule(
                         action=action,
                         protocol="tls",

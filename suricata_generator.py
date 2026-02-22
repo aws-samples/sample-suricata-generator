@@ -18,6 +18,7 @@ from flow_tester import FlowTester
 from rule_filter import RuleFilter
 from template_manager import TemplateManager
 from rule_usage_analyzer import RuleUsageAnalyzer, HAS_BOTO3
+from aws_session_manager import AWSSessionManager
 from constants import SuricataConstants
 from version import get_main_version
 from security_validator import security_validator, validate_rule_input, validate_file_operation
@@ -55,6 +56,7 @@ class SuricataRuleGenerator:
         self.pending_history = []  # Pending history entries to write on save
         self.rule_guids = {}  # {sid: guid} mapping for active rules with GUID-based tracking
         self.config_file = self.get_safe_config_path()  # User config file
+        self.aws_session = AWSSessionManager()  # AWS session manager with profile support
         self.rule_analyzer = RuleAnalyzer()  # Rule analysis engine
         self.file_manager = FileManager()  # File operations manager
         self.domain_importer = DomainImporter(self)  # Domain import functionality
@@ -3431,13 +3433,8 @@ class SuricataRuleGenerator:
         
         ttk.Label(region_selector_frame, text="Region:").pack(side=tk.LEFT, padx=(0, 5))
         
-        # Get default region and populate selector
-        try:
-            import boto3
-            session = boto3.Session()
-            default_region = session.region_name or 'us-east-1'
-        except:
-            default_region = 'us-east-1'
+        # Get default region from aws_session manager
+        default_region = self.aws_session.get_default_region()
         
         # All AWS standard commercial regions (excludes China and GovCloud)
         aws_regions = [

@@ -1,6 +1,6 @@
 # Suricata Rule Generator for AWS Network Firewall
 
-**Current Version: 1.31.2**
+**Current Version: 1.32.0**
 
 A GUI application for creating, editing, and managing Suricata rules - specifically designed for AWS Network Firewall deployments using strict rule ordering.
 
@@ -36,7 +36,8 @@ A GUI application for creating, editing, and managing Suricata rules - specifica
 ### 🎯 Advanced Features
 - [Rule Templates](#rule-templates)
 - [URL and Domain Category Filtering](#url-and-domain-category-filtering)
-- [Category-Based Domain Analysis](#category-based-domain-analysis) ⭐ NEW
+- [AWS Profile Support](#aws-profile-support) ⭐ NEW
+- [Category-Based Domain Analysis](#category-based-domain-analysis)
 - [Bulk Domain Import](#bulk-domain-import)
 - [AWS Rule Group Import](#aws-rule-group-import)
 - [Rule Filtering](#rule-filtering)
@@ -1185,9 +1186,99 @@ drop tls $HOME_NET any -> any any (msg:"Block Child Abuse, Adult and Mature Cont
 
 ---
 
+## AWS Profile Support
+
+> 🔑 **Switch between AWS accounts and regions** directly within the program — no more reconfiguring AWS CLI! ⭐ NEW in v1.32.0
+
+![Profiles](images/profile.png)
+
+The AWS Profile Support feature adds a centralized session manager and status bar profile selector, enabling seamless multi-account workflows without leaving the application.
+
+### Profile Selector
+
+**Location:** Right side of status bar
+```
+AWS Profile: [(default) ▼] [↻]
+```
+
+**Dropdown Contents:**
+- `(default)` — Uses the standard AWS credential chain (environment variables, `~/.aws/credentials` default profile, IAM role)
+- All named profiles from `~/.aws/credentials` and `~/.aws/config`
+- `↻` Refresh button re-reads config files to pick up newly added profiles
+
+**States:**
+- **Profiles available:** Dropdown populated and active
+- **No profiles found:** Dropdown shows `(no profiles found)` — disabled (refresh still enabled)
+- **boto3 not installed:** Dropdown shows `(boto3 not installed)` — disabled
+
+### Behavior
+
+**Session-Only Selection:**
+- Profile resets to `(default)` on every program launch (similar to previous behavior)
+- Not persisted to disk — predictable startup behavior
+- Eliminates risk of accidentally connecting to the wrong account
+
+**Lazy Validation:**
+- Selecting a profile does NOT trigger any AWS API call
+- Credentials are only validated when you perform an explicit AWS action (deploy, import, analysis, etc.)
+- Non-AWS features completely unaffected by profile selection
+
+**Default Region Integration:**
+- Each profile can define a default region in `~/.aws/config`
+- Selecting a profile automatically sets the default region for all region selectors
+- You can still override the region in any dialog (existing behavior preserved)
+
+### Affected AWS Features
+
+Profile selection applies to all AWS operations:
+- ✅ Export > AWS Network Firewall (Direct Deploy)
+- ✅ Import Stateful Rule Group from AWS
+- ✅ Import Domain List from AWS
+- ✅ Traffic Analysis (CloudWatch queries)
+- ✅ Rule Usage Analysis (CloudWatch queries)
+- ✅ Help > AWS Setup credential verification
+
+### Profile-Aware Error Messages
+
+When AWS operations fail, error dialogs include the active profile name:
+```
+AWS credentials are not configured for profile 'dev-account'.
+
+To configure this profile:
+• Run: aws configure --profile dev-account
+
+Or select a different profile from the status bar dropdown.
+```
+
+### Graceful Degradation
+
+- **boto3 not installed:** Dropdown disabled. All non-AWS features work normally.
+- **No AWS config files:** Dropdown shows `(default)` only. AWS features still work with environment variables or IAM roles.
+- **Invalid/expired credentials:** Error surfaced only when an AWS action is attempted — never on startup or profile selection.
+
+### AssumeRole and SSO Support
+
+Profiles configured with `role_arn`/`source_profile` or SSO settings work transparently — boto3 handles role assumption and SSO credential resolution natively when the profile name is provided.
+
+### Typical Multi-Account Workflow
+
+1. Launch program → status bar shows `AWS Profile: (default)`
+2. Select `prod-account` from dropdown → status bar updates
+3. Import rule group from AWS → connects to production account
+4. Edit rules
+5. Select `staging-account` from dropdown
+6. Export/deploy to AWS → deploys to staging account
+7. Close and reopen program → profile resets to `(default)`
+
+### Cross-Platform
+
+Works on Windows, macOS, and Linux. All file path resolution for AWS config files is delegated to boto3/botocore which handles platform differences natively.
+
+---
+
 ## Category-Based Domain Analysis
 
-> 📊 **See which domains triggered each category rule** — compliance reporting, threat intelligence, and policy validation! ⭐ NEW in v1.31.0
+> 📊 **See which domains triggered each category rule** — compliance reporting, threat intelligence, and policy validation!
 
 ![Category Analysis](images/category_analysis.png)
 
@@ -2697,7 +2788,8 @@ Suricata internally classifies rules by their keywords and protocol:
 
 ### Advanced Features
 - ✅ **URL and Domain Category Filtering** *(v1.30.0)*: AWS-maintained category blocking (51 categories)
-- ✅ **Category-Based Domain Analysis** *(v1.31.0)*: See which domains triggered each category rule ⭐ NEW
+- ✅ **AWS Profile Support** *(v1.32.0)*: Multi-account profile selector in status bar ⭐ NEW
+- ✅ **Category-Based Domain Analysis** *(v1.31.0)*: See which domains triggered each category rule
 - ✅ **CloudWatch Rule Usage Analysis** *(v1.27.0)*: Production rule effectiveness analytics
 - ✅ **Analyze Traffic Costs** *(v1.29.0)*: VPC endpoint recommendations and cost analysis
 - ✅ **AWS Direct Import** *(v1.27.3)*: Browse and import rule groups directly from AWS
@@ -2875,9 +2967,10 @@ The application follows a modular architecture with specialized managers:
 - **stateful_rule_importer.py**: AWS rule group imports *(v1.18.7)*
 - **rule_analyzer.py**: Conflict detection and reporting
 - **rule_usage_analyzer.py**: CloudWatch usage analytics *(v1.27.0)*
-- **traffic_analyzer.py**: Traffic cost analysis backend *(v1.29.0)* ⭐ NEW
-- **traffic_analyzer_ui.py**: Traffic cost analysis UI *(v1.29.0)* ⭐ NEW
-- **aws_service_detector.py**: AWS service identification from IP addresses *(v1.29.0)* ⭐ NEW
+- **aws_session_manager.py**: Centralized AWS credential and session management *(v1.32.0)* ⭐ NEW
+- **traffic_analyzer.py**: Traffic cost analysis backend *(v1.29.0)*
+- **traffic_analyzer_ui.py**: Traffic cost analysis UI *(v1.29.0)*
+- **aws_service_detector.py**: AWS service identification from IP addresses *(v1.29.0)*
 - **flow_tester.py**: Network traffic simulation
 - **advanced_editor.py**: IDE-style text editor *(v1.19.0)*
 - **revision_manager.py**: Per-rule revision history and rollback *(v1.25.0)*

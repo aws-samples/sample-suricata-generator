@@ -132,7 +132,8 @@ class RuleUsageAnalyzer:
         rules: Optional[List] = None,
         region: Optional[str] = None,
         start_date=None,
-        end_date=None
+        end_date=None,
+        aws_session=None
     ) -> Optional[Dict]:
         """Analyze rule usage from CloudWatch Logs
         
@@ -148,6 +149,7 @@ class RuleUsageAnalyzer:
             region: Optional AWS region to use (uses default credentials region if not specified)
             start_date: Optional custom start date (datetime.date) for custom date range
             end_date: Optional custom end date (datetime.date) for custom date range
+            aws_session: Optional AWSSessionManager instance for centralized credential management
             
         Returns:
             Dict with comprehensive analysis results, or None if cancelled/failed
@@ -167,7 +169,10 @@ class RuleUsageAnalyzer:
                 start_time = end_time - timedelta(days=time_range_days)
             
             # Create CloudWatch Logs client with specified region
-            client = boto3.client('logs', region_name=region) if region else boto3.client('logs')
+            if aws_session:
+                client = aws_session.get_client('logs', region_name=region)
+            else:
+                client = boto3.client('logs', region_name=region) if region else boto3.client('logs')
             
             # Submit query
             if progress_callback:

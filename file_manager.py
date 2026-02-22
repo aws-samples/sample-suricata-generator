@@ -1291,8 +1291,8 @@ EOF
             # STEP 6: Build ReferenceSets
             reference_sets = self._build_reference_sets(variables, export_rules)
             
-            # STEP 7: Create boto3 client with specified region
-            client = boto3.client('network-firewall', region_name=region)
+            # STEP 7: Create boto3 client with specified region (via aws_session manager)
+            client = parent_app.aws_session.get_client('network-firewall', region_name=region)
             
             # STEP 8: Check if rule group exists (for overwrite detection)
             rule_group_exists = False
@@ -1402,13 +1402,15 @@ EOF
             
         except NoCredentialsError:
             progress_dialog.destroy()
+            profile_display = parent_app.aws_session.display_name if hasattr(parent_app, 'aws_session') else '(default)'
             messagebox.showerror(
                 "AWS Credentials Not Found",
-                "AWS credentials are not configured.\n\n"
+                f"AWS credentials are not configured for profile '{profile_display}'.\n\n"
                 "To use AWS export, configure credentials using:\n"
-                "• AWS CLI: aws configure\n"
+                f"• AWS CLI: aws configure" + (f" --profile {profile_display}" if profile_display != '(default)' else "") + "\n"
                 "• Environment variables\n"
                 "• IAM role (if on AWS)\n\n"
+                "Or select a different profile from the status bar dropdown.\n\n"
                 "See Help > AWS Setup for detailed instructions."
             )
             return False
@@ -1695,12 +1697,11 @@ EOF
             parent_app: Reference to parent application for dialog creation
         """
         import webbrowser
-        import boto3
         
         arn = response['RuleGroupResponse']['RuleGroupArn']
         
-        # Get region from boto3 session
-        session = boto3.Session()
+        # Get region from aws_session manager
+        session = parent_app.aws_session.get_session()
         region = session.region_name or 'us-east-1'
         
         # Construct AWS console URL for the rule group

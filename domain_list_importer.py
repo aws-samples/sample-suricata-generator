@@ -145,20 +145,21 @@ class DomainListImporter:
         # Initialize boto3 client
         try:
             if region:
-                nfw_client = boto3.client('network-firewall', region_name=region)
+                nfw_client = self.app.aws_session.get_client('network-firewall', region_name=region)
             else:
-                nfw_client = boto3.client('network-firewall')
+                nfw_client = self.app.aws_session.get_client('network-firewall')
                 region = nfw_client.meta.region_name
         except NoCredentialsError:
+            profile_display = self.app.aws_session.display_name if hasattr(self.app, 'aws_session') else '(default)'
             messagebox.showerror("AWS Credentials Not Found",
-                "AWS credentials are not configured. To use this feature, you need to:\n\n"
-                "1. Install AWS CLI: https://aws.amazon.com/cli/\n"
-                "2. Run: aws configure\n"
-                "3. Enter your Access Key ID and Secret Access Key\n\n"
+                f"AWS credentials are not configured for profile '{profile_display}'.\n\n"
+                "To configure this profile:\n"
+                f"• Run: aws configure" + (f" --profile {profile_display}" if profile_display != '(default)' else "") + "\n\n"
                 "Alternative: Set environment variables:\n"
                 "• AWS_ACCESS_KEY_ID\n"
                 "• AWS_SECRET_ACCESS_KEY\n"
-                "• AWS_DEFAULT_REGION")
+                "• AWS_DEFAULT_REGION\n\n"
+                "Or select a different profile from the status bar dropdown.")
             return None
         except Exception as e:
             messagebox.showerror("AWS Connection Error",
@@ -480,7 +481,7 @@ class DomainListImporter:
             """Handle region change"""
             new_region = selected_region_var.get()
             nonlocal nfw_client
-            nfw_client = boto3.client('network-firewall', region_name=new_region)
+            nfw_client = self.app.aws_session.get_client('network-firewall', region_name=new_region)
             load_rule_groups()
         
         # Bind events

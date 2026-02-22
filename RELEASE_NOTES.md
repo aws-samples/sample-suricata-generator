@@ -1,5 +1,45 @@
 # Release Notes
 
+## Version 1.32.0 - February 22, 2026
+
+### New Feature: AWS Profile Support
+- **Multi-Account AWS Profile Selector**: New centralized AWS session management enables seamless switching between AWS accounts and regions directly within the program
+  - **Profile Selector in Status Bar**: Dropdown combobox on the right side of the status bar shows all available AWS profiles from `~/.aws/credentials` and `~/.aws/config`
+    - Select any profile to immediately change which AWS credentials and default region are used for all subsequent AWS operations
+    - `(default)` option uses the standard AWS credential chain (identical to previous behavior)
+    - `↻` Refresh button re-reads AWS config files to pick up newly added profiles without restarting
+  - **Session-Only Selection**: Profile resets to `(default)` on every program launch — not persisted to disk for predictable startup behavior and security
+  - **Centralized Session Manager**: New `aws_session_manager.py` module provides a single point of control for all AWS API calls across 8 source files
+    - All boto3 `Session()` and `client()` calls routed through `AWSSessionManager` for consistent credential usage
+    - Profile's configured default region automatically picked up by region selectors throughout the program
+    - Lazy credential validation — no AWS API calls triggered on profile selection or startup
+  - **Profile-Aware Error Messages**: All AWS credential error dialogs updated to include the active profile name and suggest `aws configure --profile <name>` or switching profiles
+  - **Comprehensive AWS Feature Coverage**: Profile selection affects all AWS operations:
+    - Export > AWS Network Firewall (Direct Deploy)
+    - Import Stateful Rule Group from AWS
+    - Import Domain List from AWS
+    - Traffic Analysis (CloudWatch queries)
+    - Rule Usage Analysis (CloudWatch queries)
+    - Help > AWS Setup credential verification
+  - **Graceful Degradation**: Non-AWS features completely unaffected by profile selection
+    - boto3 not installed → dropdown shows `(boto3 not installed)` and is disabled
+    - No AWS config files → dropdown shows `(no profiles found)` and is disabled
+  - **Native AssumeRole and SSO Support**: Profiles with `role_arn`/`source_profile` or SSO configuration work transparently via boto3's native handling
+  - **Cross-Platform**: Works on Windows, macOS, and Linux — all file path resolution delegated to boto3/botocore
+
+---
+
+## Version 1.31.3 - February 19, 2026
+
+### Bug Fix: Untracked Rules Lost on Stats File Reload
+- **Fixed untracked SIDs not persisting across program restarts**: Corrected bug where the Untracked tab showed 0 rules when viewing saved analysis results after closing and reopening the program, despite previously showing the correct count
+  - **Root Cause**: The `untracked_sids` field was missing from both the `_serialize_analysis_results()` and `_deserialize_analysis_results()` methods in `ui_manager.py`. When saving to `.stats` file, `untracked_sids` was not written to JSON; when loading, it was never restored — defaulting to an empty set
+  - **Impact**: After closing the program and reopening with a saved `.stats` file, the Untracked tab always showed "0" rules even though the original analysis had detected untracked SIDs (e.g., AWS default policy rules not in the user's rule file)
+  - **Solution**: Added `untracked_sids` to both serialization (save) and deserialization (load) methods, matching the existing pattern used for `unused_sids` and `unlogged_sids`
+  - **Existing `.stats` files**: Files saved before this fix will load with an empty untracked set (graceful default). Re-save after running analysis to persist the data
+
+---
+
 ## Flow Tester Enhancement (v1.2.0) - February 17, 2026
 
 ### Three Major Fixes: Flowbits Inference, Cross-Scope Deconfliction, and Partial Allow Detection

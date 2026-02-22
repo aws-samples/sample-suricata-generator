@@ -203,8 +203,7 @@ class TrafficAnalyzerUI:
         default_region = self._last_region
         if not default_region:
             try:
-                session = boto3.Session()
-                default_region = session.region_name or 'us-east-1'
+                default_region = self.parent.aws_session.get_default_region()
             except:
                 default_region = 'us-east-1'
         
@@ -297,7 +296,7 @@ class TrafficAnalyzerUI:
             dialog.update()
             
             try:
-                logs_client = boto3.client('logs', region_name=region)
+                logs_client = self.parent.aws_session.get_client('logs', region_name=region)
                 
                 # Query for log groups with pagination
                 log_groups = []
@@ -636,9 +635,11 @@ class TrafficAnalyzerUI:
                 # Create analyzer with either days or custom dates
                 if start_date and end_date:
                     analyzer = TrafficAnalyzer(log_group, region, alert_log_group=alert_log_group,
-                                             start_date=start_date, end_date=end_date)
+                                             start_date=start_date, end_date=end_date,
+                                             aws_session=self.parent.aws_session)
                 else:
-                    analyzer = TrafficAnalyzer(log_group, region, days, alert_log_group)
+                    analyzer = TrafficAnalyzer(log_group, region, days, alert_log_group,
+                                             aws_session=self.parent.aws_session)
                 analyzer_ref[0] = analyzer
                 
                 # Run analysis

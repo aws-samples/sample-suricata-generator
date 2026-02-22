@@ -85,6 +85,14 @@ class AWSRuleGroupBrowser:
         Returns:
             Dict with rule group data or None if cancelled
         """
+        # Always clear cached data when opening the dialog so that
+        # fresh results are fetched from AWS.  This ensures profile
+        # or credential changes are immediately reflected without
+        # requiring a manual Refresh click.
+        self.cached_rule_groups = None
+        self.cache_timestamp = None
+        self.expanded_details.clear()
+        
         # Create browse dialog
         dialog = tk.Toplevel(self.parent.root)
         dialog.title("Browse AWS Rule Groups")
@@ -112,7 +120,7 @@ class AWSRuleGroupBrowser:
         
         # Get default region from boto3
         try:
-            session = boto3.Session()
+            session = self.parent.aws_session.get_session()
             default_region = session.region_name or 'us-east-1'
         except:
             default_region = 'us-east-1'
@@ -330,16 +338,17 @@ class AWSRuleGroupBrowser:
                     
                 except NoCredentialsError:
                     progress_dialog.destroy()
+                    profile_display = self.parent.aws_session.display_name if hasattr(self.parent, 'aws_session') else '(default)'
                     messagebox.showerror(
                         "AWS Credentials Not Found",
-                        "AWS credentials are not configured. To use this feature, you need to:\n\n"
-                        "1. Install AWS CLI: https://aws.amazon.com/cli/\n"
-                        "2. Run: aws configure\n"
-                        "3. Enter your Access Key ID and Secret Access Key\n\n"
+                        f"AWS credentials are not configured for profile '{profile_display}'.\n\n"
+                        "To configure this profile:\n"
+                        f"• Run: aws configure" + (f" --profile {profile_display}" if profile_display != '(default)' else "") + "\n\n"
                         "Alternative: Set environment variables:\n"
                         "• AWS_ACCESS_KEY_ID\n"
                         "• AWS_SECRET_ACCESS_KEY\n"
-                        "• AWS_DEFAULT_REGION"
+                        "• AWS_DEFAULT_REGION\n\n"
+                        "Or select a different profile from the status bar dropdown."
                     )
                     dialog.destroy()
                     return
@@ -465,7 +474,7 @@ class AWSRuleGroupBrowser:
         
         # Create client with selected region (or default if not set)
         region = self.selected_region if self.selected_region else None
-        client = boto3.client('network-firewall', region_name=region)
+        client = self.parent.aws_session.get_client('network-firewall', region_name=region)
         
         rule_groups = []
         
@@ -571,7 +580,7 @@ class AWSRuleGroupBrowser:
         try:
             # Fetch details from AWS using selected region
             region = self.selected_region if self.selected_region else None
-            client = boto3.client('network-firewall', region_name=region)
+            client = self.parent.aws_session.get_client('network-firewall', region_name=region)
             response = client.describe_rule_group(
                 RuleGroupArn=rg_data['arn'],
                 Type='STATEFUL'
@@ -860,7 +869,7 @@ class StatefulRuleImporter:
         if not HAS_BOTO3:
             raise ImportError("boto3 is required for AWS import")
         
-        client = boto3.client('network-firewall', region_name=region)
+        client = self.parent.aws_session.get_client('network-firewall', region_name=region)
         
         response = client.describe_rule_group(
             RuleGroupArn=arn,

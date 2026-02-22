@@ -10,7 +10,6 @@ Author: Suricata Generator Team
 Created: 2026-01-25
 """
 
-import boto3
 import time
 import json
 import os
@@ -106,7 +105,8 @@ class TrafficAnalyzer:
     def __init__(self, log_group: str, region: str, days: Optional[int] = None, 
                  alert_log_group: Optional[str] = None,
                  start_date: Optional[date] = None,
-                 end_date: Optional[date] = None):
+                 end_date: Optional[date] = None,
+                 aws_session=None):
         """Initialize traffic analyzer
         
         Args:
@@ -117,6 +117,7 @@ class TrafficAnalyzer:
                            will attempt to auto-detect by replacing "Flow" with "Alert"
             start_date: Optional custom start date (overrides days parameter)
             end_date: Optional custom end date (overrides days parameter)
+            aws_session: Optional AWSSessionManager instance for centralized credential management
         """
         self.log_group = log_group
         self.region = region
@@ -169,7 +170,11 @@ class TrafficAnalyzer:
                 self.alert_log_group = log_group
         
         # Initialize AWS clients
-        self.logs_client = boto3.client('logs', region_name=region)
+        if aws_session:
+            self.logs_client = aws_session.get_client('logs', region_name=region)
+        else:
+            import boto3
+            self.logs_client = boto3.client('logs', region_name=region)
         
         # Initialize AWS service detector (downloads IP ranges and builds trees)
         self.aws_service_detector = AWSServiceDetector()

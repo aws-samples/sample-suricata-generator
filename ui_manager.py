@@ -324,13 +324,11 @@ class UIManager:
         
         ttk.Label(region_selector_frame, text="Region:").pack(side=tk.LEFT, padx=(0, 5))
         
-        # Get default region from boto3 or last used region
+        # Get default region from aws_session or last used region
         default_region = getattr(self.parent, '_last_region', None)
         if not default_region:
             try:
-                import boto3
-                session = boto3.Session()
-                default_region = session.region_name or 'us-east-1'
+                default_region = self.parent.aws_session.get_default_region()
             except:
                 default_region = 'us-east-1'
         
@@ -390,8 +388,7 @@ class UIManager:
             dialog.update()
             
             try:
-                import boto3
-                logs_client = boto3.client('logs', region_name=selected_region)
+                logs_client = self.parent.aws_session.get_client('logs', region_name=selected_region)
                 
                 # Query for log groups with pagination
                 log_groups = []
@@ -945,7 +942,8 @@ class UIManager:
                     rules=self.parent.rules,  # Pass rules list to detect unlogged rules
                     region=region,  # Pass selected region to analyzer
                     start_date=start_date,  # Custom date range (None for preset ranges)
-                    end_date=end_date
+                    end_date=end_date,
+                    aws_session=self.parent.aws_session  # Pass session manager for profile support
                 )
                 
                 # Check if analysis was cancelled (returns None)
@@ -965,13 +963,15 @@ class UIManager:
                 
                 # Handle specific AWS errors
                 if "NoCredentialsError" in error_msg:
+                    profile_display = self.parent.aws_session.display_name
                     messagebox.showerror(
                         "AWS Credentials Not Found",
-                        "No AWS credentials were found.\n\n"
+                        f"No AWS credentials were found for profile '{profile_display}'.\n\n"
                         "Please configure your credentials using:\n"
-                        "• AWS CLI: aws configure\n"
+                        f"• AWS CLI: aws configure" + (f" --profile {profile_display}" if profile_display != '(default)' else "") + "\n"
                         "• Environment variables\n"
-                        "• IAM role (if running on AWS)"
+                        "• IAM role (if running on AWS)\n\n"
+                        "Or select a different profile from the status bar dropdown."
                     )
                 elif "AccessDeniedException" in error_msg:
                     messagebox.showerror(
@@ -6013,7 +6013,7 @@ Would you like to run a complete analysis?"""
             self.refresh_history_display()
     
     def setup_status_bar(self, parent):
-        """Setup status bar at bottom of window with colored action counts"""
+        """Setup status bar at bottom of window with colored action counts and AWS profile selector"""
         status_frame = ttk.Frame(parent, relief=tk.SUNKEN, borderwidth=1)
         status_frame.pack(fill=tk.X, pady=(5, 0))
         
@@ -6034,6 +6034,9 @@ Would you like to run a complete analysis?"""
         self.refs_label = tk.Label(status_frame, text="", fg="#008B8B", font=("TkDefaultFont", 9))
         self.filter_label = tk.Label(status_frame, text="", fg="#666666", font=("TkDefaultFont", 9))
         
+        # AWS Profile selector (right side of status bar)
+        self._setup_aws_profile_selector(status_frame)
+        
         # Store references in parent for access by other components
         self.parent.status_label = self.status_label
         self.parent.pass_label = self.pass_label
@@ -6044,6 +6047,112 @@ Would you like to run a complete analysis?"""
         self.parent.vars_label = self.vars_label
         self.parent.refs_label = self.refs_label
         self.parent.filter_label = self.filter_label
+    
+    def _setup_aws_profile_selector(self, status_frame):
+        """Setup AWS profile dropdown and refresh button on right side of status bar
+        
+        Handles three states:
+        - boto3 not installed: Shows '(boto3 not installed)' disabled
+        - No profiles found: Shows '(no profiles found)' disabled  
+        - Profiles available: Shows dropdown with profile list and refresh button
+        """
+        from aws_session_manager import HAS_BOTO3
+        
+        # Container for profile selector (right-aligned)
+        profile_frame = ttk.Frame(status_frame)
+        profile_frame.pack(side=tk.RIGHT, padx=5, pady=2)
+        
+        # Label
+        ttk.Label(profile_frame, text="AWS Profile:", 
+                 font=("TkDefaultFont", 9)).pack(side=tk.LEFT, padx=(0, 3))
+        
+        # Profile dropdown
+        self._aws_profile_var = tk.StringVar(value="(default)")
+        self._aws_profile_combo = ttk.Combobox(
+            profile_frame,
+            textvariable=self._aws_profile_var,
+            state="readonly",
+            width=18
+        )
+        self._aws_profile_combo.pack(side=tk.LEFT, padx=(0, 3))
+        
+        # Refresh button
+        self._aws_profile_refresh_btn = ttk.Button(
+            profile_frame,
+            text="↻",
+            width=2,
+            command=self._refresh_aws_profiles
+        )
+        self._aws_profile_refresh_btn.pack(side=tk.LEFT)
+        
+        # Bind selection change
+        self._aws_profile_combo.bind('<<ComboboxSelected>>', self._on_aws_profile_changed)
+        
+        # Populate on startup
+        if not HAS_BOTO3:
+            # boto3 not installed - disable dropdown
+            self._aws_profile_var.set("(boto3 not installed)")
+            self._aws_profile_combo.config(state="disabled")
+            self._aws_profile_refresh_btn.config(state="disabled")
+        else:
+            self._refresh_aws_profiles()
+    
+    def _refresh_aws_profiles(self):
+        """Re-read AWS config files and repopulate profile dropdown
+        
+        Preserves current selection if it still exists after refresh.
+        Resets to (default) if current selection no longer exists.
+        """
+        from aws_session_manager import HAS_BOTO3
+        
+        if not HAS_BOTO3:
+            return
+        
+        # Remember current selection
+        current_selection = self._aws_profile_var.get()
+        
+        # Get available profiles
+        profiles = self.parent.aws_session.list_available_profiles()
+        
+        if not profiles:
+            # No profiles found
+            self._aws_profile_var.set("(no profiles found)")
+            self._aws_profile_combo['values'] = ["(no profiles found)"]
+            self._aws_profile_combo.config(state="disabled")
+            self._aws_profile_refresh_btn.config(state="normal")  # Keep refresh enabled
+            return
+        
+        # Build dropdown values: (default) first, then named profiles
+        dropdown_values = ["(default)"]
+        for p in profiles:
+            if p != 'default':
+                dropdown_values.append(p)
+        
+        # Update combobox
+        self._aws_profile_combo['values'] = dropdown_values
+        self._aws_profile_combo.config(state="readonly")
+        
+        # Preserve current selection if it still exists
+        if current_selection in dropdown_values:
+            self._aws_profile_var.set(current_selection)
+        else:
+            # Reset to (default)
+            self._aws_profile_var.set("(default)")
+            self.parent.aws_session.profile_name = None
+    
+    def _on_aws_profile_changed(self, event=None):
+        """Handle AWS profile selection change
+        
+        Updates AWSSessionManager with new profile. Does NOT trigger any AWS API calls.
+        """
+        selected = self._aws_profile_var.get()
+        
+        # Ignore disabled states
+        if selected in ("(boto3 not installed)", "(no profiles found)"):
+            return
+        
+        # Update session manager (treats '(default)' as None)
+        self.parent.aws_session.profile_name = selected
     
     def on_rule_select(self, event):
         """Handle rule selection to populate editor fields with selected rule data"""
@@ -10634,6 +10743,7 @@ Would you like to run a complete analysis?"""
         # Serialize sets as lists
         serialized['unused_sids'] = list(results.get('unused_sids', []))
         serialized['unlogged_sids'] = list(results.get('unlogged_sids', set()))
+        serialized['untracked_sids'] = list(results.get('untracked_sids', set()))
         serialized['file_sids'] = list(results.get('file_sids', []))
 
         # Serialize category analysis data (already JSON-serializable)
@@ -10741,6 +10851,7 @@ Would you like to run a complete analysis?"""
         # Deserialize sets from lists
         results['unused_sids'] = set(stats_data.get('unused_sids', []))
         results['unlogged_sids'] = set(stats_data.get('unlogged_sids', []))
+        results['untracked_sids'] = set(stats_data.get('untracked_sids', []))
         results['file_sids'] = stats_data.get('file_sids', [])
 
         # Deserialize category analysis data (already in correct format)
@@ -11191,9 +11302,9 @@ Would you like to run a complete analysis?"""
             self._display_test_results(results, results_display)
             return
         
-        # Test 2: Credentials
+        # Test 2: Credentials (using aws_session for profile support)
         try:
-            session = boto3.Session()
+            session = self.parent.aws_session.get_session()
             creds = session.get_credentials()
             if creds:
                 results.append(("✓", "AWS credentials configured"))
@@ -11214,7 +11325,7 @@ Would you like to run a complete analysis?"""
         results.append(("", ""))
         results.append(("", "CloudWatch Logs:"))
         try:
-            client = boto3.client('logs')
+            client = self.parent.aws_session.get_client('logs')
             
             # Test DescribeLogGroups (no filter - list ALL log groups)
             response = client.describe_log_groups(limit=10)
@@ -11280,7 +11391,7 @@ Would you like to run a complete analysis?"""
         results.append(("", ""))
         results.append(("", "Network Firewall:"))
         try:
-            nfw_client = boto3.client('network-firewall')
+            nfw_client = self.parent.aws_session.get_client('network-firewall')
             
             # Test ListRuleGroups
             response = nfw_client.list_rule_groups(

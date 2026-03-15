@@ -641,7 +641,7 @@ class SearchManager:
                     if old_text.startswith('# ') and new_text and not new_text.startswith('#'):
                         # Attempt to parse as a rule
                         try:
-                            from suricata_rule import SuricataRule
+                            from src.core.suricata_rule import SuricataRule
                             potential_rule = SuricataRule.from_string(new_text)
                             
                             if potential_rule:

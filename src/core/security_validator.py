@@ -9,7 +9,7 @@ malicious input.
 import re
 import os
 from typing import Optional
-from constants import SuricataConstants, SecurityConstants, ValidationMessages
+from src.core.constants import SuricataConstants, SecurityConstants, ValidationMessages
 
 
 class SecurityValidator:

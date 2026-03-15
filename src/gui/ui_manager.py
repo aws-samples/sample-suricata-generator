@@ -3,8 +3,8 @@ from tkinter import ttk, messagebox, simpledialog, filedialog
 import re
 import os
 from typing import Optional
-from constants import SuricataConstants
-from suricata_rule import SuricataRule
+from src.core.constants import SuricataConstants
+from src.core.suricata_rule import SuricataRule
 from datetime import datetime, timedelta
 
 class UIManager:
@@ -65,6 +65,7 @@ class UIManager:
         file_menu.add_separator()
         file_menu.add_command(label="Load AWS Best Practices Template", command=self.parent.domain_importer.load_aws_template)
         file_menu.add_command(label="Import Domain List", command=self.parent.import_domain_list)
+        file_menu.add_command(label="Import Palo Alto Configuration", command=self.parent.palo_alto_importer.import_configuration)
         file_menu.add_command(label="Import Rule Group", command=self.parent.stateful_rule_importer.import_standard_rule_group)
         file_menu.add_command(label="Export Rule Group", command=self.parent.export_file)
         file_menu.add_separator()
@@ -96,7 +97,7 @@ class UIManager:
         
         # Add Rule Usage Analyzer menu item (Phase 2)
         tools_menu.add_separator()
-        from rule_usage_analyzer import HAS_BOTO3
+        from src.analysis.rule_usage_analyzer import HAS_BOTO3
         if HAS_BOTO3:
             tools_menu.add_command(label="Analyze Rule Usage", command=self.show_rule_usage_analyzer)
         else:
@@ -120,7 +121,7 @@ class UIManager:
         help_menu.add_separator()
         
         # Phase 11: Add AWS Setup guide (covers both Rule Usage Analyzer AND Rule Group Import)
-        from rule_usage_analyzer import HAS_BOTO3
+        from src.analysis.rule_usage_analyzer import HAS_BOTO3
         if HAS_BOTO3:
             help_menu.add_command(label="AWS Setup", command=self.show_aws_setup_help)
             help_menu.add_separator()
@@ -170,7 +171,7 @@ class UIManager:
     # Phase 2: Rule Usage Analyzer Menu Integration
     def show_rule_usage_analyzer(self):
         """Show Rule Usage Analyzer entry point - checks boto3 and shows first-time welcome"""
-        from rule_usage_analyzer import HAS_BOTO3
+        from src.analysis.rule_usage_analyzer import HAS_BOTO3
         
         if not HAS_BOTO3:
             response = messagebox.askyesno(
@@ -657,7 +658,7 @@ class UIManager:
         else:
             # For unsaved files, check for _unsaved_.history
             import tempfile
-            temp_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'user_files')
+            temp_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), 'user_files')
             if not os.path.exists(temp_dir):
                 temp_dir = tempfile.gettempdir()
             history_filename = os.path.join(temp_dir, '_unsaved_.history')
@@ -667,7 +668,7 @@ class UIManager:
             return None, None
         
         try:
-            from revision_manager import RevisionManager
+            from src.managers.revision_manager import RevisionManager
             revision_manager = RevisionManager(history_filename)
             
             # Get GUID for this rule (prefer GUID, fallback to SID)
@@ -743,7 +744,7 @@ class UIManager:
         else:
             # For unsaved files, check for _unsaved_.history
             import tempfile
-            temp_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'user_files')
+            temp_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), 'user_files')
             if not os.path.exists(temp_dir):
                 temp_dir = tempfile.gettempdir()
             history_filename = os.path.join(temp_dir, '_unsaved_.history')
@@ -753,7 +754,7 @@ class UIManager:
             return None
         
         try:
-            from revision_manager import RevisionManager
+            from src.managers.revision_manager import RevisionManager
             revision_manager = RevisionManager(history_filename)
             
             # Get GUID for this rule (prefer GUID, fallback to SID)
@@ -3000,7 +3001,7 @@ Would you like to run a complete analysis?"""
         unlogged_tree_container.grid_columnconfigure(0, weight=1)
         
         # Populate with unlogged rules
-        from rule_usage_analyzer import RuleUsageAnalyzer
+        from src.analysis.rule_usage_analyzer import RuleUsageAnalyzer
         
         for sid in sorted(unlogged_sids):
             # Find rule in main rule list
@@ -3292,12 +3293,12 @@ Would you like to run a complete analysis?"""
         is_truncated = category_data.pop('_truncated', False)
         
         # Get rule-defined categories from the loaded rules
-        from rule_usage_analyzer import RuleUsageAnalyzer
+        from src.analysis.rule_usage_analyzer import RuleUsageAnalyzer
         rule_defined_categories = RuleUsageAnalyzer.extract_rule_categories(self.parent.rules)
         
         # Build per-category rule count from rules file for accurate counts
         # This handles categories that have no CloudWatch data but DO have rules targeting them
-        from rule_usage_analyzer import RuleUsageAnalyzer
+        from src.analysis.rule_usage_analyzer import RuleUsageAnalyzer
         _, sid_to_cats = RuleUsageAnalyzer()._extract_category_rule_sids(self.parent.rules)
         cat_to_rule_count = {}
         for sid, cats in sid_to_cats.items():
@@ -3716,7 +3717,7 @@ Would you like to run a complete analysis?"""
         Returns:
             str: Complete HTML document
         """
-        from version import get_main_version
+        from src.core.version import get_main_version
         version_str = get_main_version()
         
         categories = results['categories']
@@ -4047,7 +4048,7 @@ Would you like to run a complete analysis?"""
     
     def _export_unused_html(self, filename, unused_sids, confidence_level, results):
         """Export unused rules as HTML"""
-        from version import get_main_version
+        from src.core.version import get_main_version
         version_str = get_main_version()
         
         categories = results['categories']
@@ -4270,7 +4271,7 @@ Would you like to run a complete analysis?"""
     
     def _export_low_freq_html(self, filename, low_freq_sids, results):
         """Export low-frequency rules as HTML"""
-        from version import get_main_version
+        from src.core.version import get_main_version
         version_str = get_main_version()
         
         sid_stats = results.get('sid_stats', {})
@@ -4496,7 +4497,7 @@ Would you like to run a complete analysis?"""
     
     def _export_tiers_html(self, filename, results):
         """Export tier distribution as HTML"""
-        from version import get_main_version
+        from src.core.version import get_main_version
         version_str = get_main_version()
         
         categories = results['categories']
@@ -4705,7 +4706,7 @@ Would you like to run a complete analysis?"""
     
     def _export_search_html(self, filename, sid, stats, results):
         """Export search result as HTML"""
-        from version import get_main_version
+        from src.core.version import get_main_version
         version_str = get_main_version()
         
         # Find the rule
@@ -4837,7 +4838,7 @@ Would you like to run a complete analysis?"""
     
     def _export_unlogged_text(self, filename, unlogged_sids, results):
         """Export unlogged rules as plain text"""
-        from rule_usage_analyzer import RuleUsageAnalyzer
+        from src.analysis.rule_usage_analyzer import RuleUsageAnalyzer
         
         with open(filename, 'w', encoding='utf-8') as f:
             f.write("UNLOGGED RULES EXPORT\n")
@@ -4883,8 +4884,8 @@ Would you like to run a complete analysis?"""
     
     def _export_unlogged_html(self, filename, unlogged_sids, results):
         """Export unlogged rules as HTML"""
-        from version import get_main_version
-        from rule_usage_analyzer import RuleUsageAnalyzer
+        from src.core.version import get_main_version
+        from src.analysis.rule_usage_analyzer import RuleUsageAnalyzer
         version_str = get_main_version()
         
         total = results['total_rules']
@@ -6056,7 +6057,7 @@ Would you like to run a complete analysis?"""
         - No profiles found: Shows '(no profiles found)' disabled  
         - Profiles available: Shows dropdown with profile list and refresh button
         """
-        from aws_session_manager import HAS_BOTO3
+        from src.aws.aws_session_manager import HAS_BOTO3
         
         # Container for profile selector (right-aligned)
         profile_frame = ttk.Frame(status_frame)
@@ -6103,7 +6104,7 @@ Would you like to run a complete analysis?"""
         Preserves current selection if it still exists after refresh.
         Resets to (default) if current selection no longer exists.
         """
-        from aws_session_manager import HAS_BOTO3
+        from src.aws.aws_session_manager import HAS_BOTO3
         
         if not HAS_BOTO3:
             return
@@ -8263,7 +8264,7 @@ Would you like to run a complete analysis?"""
         category_note_label.pack(pady=(0, 2))
         
         # Version
-        from version import get_flow_tester_version
+        from src.core.version import get_flow_tester_version
         version_label = ttk.Label(main_frame,
                                  text=f"Flow Tester Version: {get_flow_tester_version()}",
                                  font=("TkDefaultFont", 8),
@@ -8510,7 +8511,7 @@ Would you like to run a complete analysis?"""
                     return
             
             # Create FlowTester instance
-            from flow_tester import FlowTester
+            from src.analysis.flow_tester import FlowTester
             flow_tester = FlowTester(self.parent.rules, self.parent.variables, self.parent.rule_analyzer)
             
             # Run the test
@@ -9152,7 +9153,7 @@ Would you like to run a complete analysis?"""
         # Load common ports from JSON file
         try:
             script_dir = os.path.dirname(os.path.abspath(__file__))
-            common_ports_file = os.path.join(script_dir, "common_ports.json")
+            common_ports_file = os.path.join(os.path.dirname(os.path.dirname(script_dir)), "data", "common_ports.json")
             
             with open(common_ports_file, 'r', encoding='utf-8') as f:
                 common_ports_data = json.load(f)
@@ -9645,13 +9646,13 @@ Would you like to run a complete analysis?"""
         else:
             # For unsaved files, check for _unsaved_.history
             import tempfile
-            temp_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'user_files')
+            temp_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), 'user_files')
             if not os.path.exists(temp_dir):
                 temp_dir = tempfile.gettempdir()
             history_filename = os.path.join(temp_dir, '_unsaved_.history')
         
         # Check format version first to determine how to display rev
-        from revision_manager import RevisionManager
+        from src.managers.revision_manager import RevisionManager
         
         if os.path.exists(history_filename):
             revision_manager = RevisionManager(history_filename)
@@ -9750,7 +9751,7 @@ Would you like to run a complete analysis?"""
         else:
             # For unsaved files, check for _unsaved_.history
             import tempfile
-            temp_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'user_files')
+            temp_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), 'user_files')
             if not os.path.exists(temp_dir):
                 temp_dir = tempfile.gettempdir()
             history_filename = os.path.join(temp_dir, '_unsaved_.history')
@@ -9768,7 +9769,7 @@ Would you like to run a complete analysis?"""
             has_v2_format = True
         elif os.path.exists(history_filename):
             # Check format version on disk
-            from revision_manager import RevisionManager
+            from src.managers.revision_manager import RevisionManager
             revision_manager = RevisionManager(history_filename)
             # If format is 2.0 or there are snapshots, show dropdown
             has_v2_format = (revision_manager.format_version == '2.0')
@@ -9816,7 +9817,7 @@ Would you like to run a complete analysis?"""
     
     def show_rollback_confirmation(self, current_rule: SuricataRule, target_rev: int):
         """Show side-by-side comparison dialog for rule rollback"""
-        from revision_manager import RevisionManager
+        from src.managers.revision_manager import RevisionManager
         
         # Build history filename (check both saved file and unsaved temp file)
         if self.parent.current_file:
@@ -9826,7 +9827,7 @@ Would you like to run a complete analysis?"""
         else:
             # For unsaved files, check for _unsaved_.history
             import tempfile
-            temp_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'user_files')
+            temp_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), 'user_files')
             if not os.path.exists(temp_dir):
                 temp_dir = tempfile.gettempdir()
             history_filename = os.path.join(temp_dir, '_unsaved_.history')
@@ -12640,7 +12641,7 @@ Would you like to run a complete analysis?"""
         # Load category list from content_keywords.json
         try:
             script_dir = os.path.dirname(os.path.abspath(__file__))
-            keywords_file = os.path.join(script_dir, 'content_keywords.json')
+            keywords_file = os.path.join(os.path.dirname(os.path.dirname(script_dir)), 'data', 'content_keywords.json')
             
             with open(keywords_file, 'r', encoding='utf-8') as f:
                 keywords_data = json.load(f)

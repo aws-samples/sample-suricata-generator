@@ -6,7 +6,7 @@ including action, protocol, SID range, and network variables.
 """
 
 from typing import List, Set
-from suricata_rule import SuricataRule
+from src.core.suricata_rule import SuricataRule
 
 
 class RuleFilter:

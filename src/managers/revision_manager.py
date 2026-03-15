@@ -11,7 +11,7 @@ import json
 import datetime
 import uuid
 from typing import List, Optional, Dict, Tuple
-from suricata_rule import SuricataRule
+from src.core.suricata_rule import SuricataRule
 
 
 class RevisionManager:

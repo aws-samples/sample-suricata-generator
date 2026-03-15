@@ -3,7 +3,7 @@ from tkinter import ttk, messagebox
 from typing import Optional, Dict, List
 import time
 
-from suricata_rule import SuricataRule
+from src.core.suricata_rule import SuricataRule
 
 # Optional boto3 import with graceful degradation
 HAS_BOTO3 = False

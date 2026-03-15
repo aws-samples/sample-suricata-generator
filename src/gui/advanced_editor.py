@@ -24,9 +24,9 @@ except ImportError:
 
 # Import constants and rule analyzer (reuse from main app)
 try:
-    from constants import SuricataConstants
-    from rule_analyzer import RuleAnalyzer
-    from suricata_rule import SuricataRule
+    from src.core.constants import SuricataConstants
+    from src.analysis.rule_analyzer import RuleAnalyzer
+    from src.core.suricata_rule import SuricataRule
     HAS_RULE_ANALYZER = True
 except ImportError:
     # Minimal fallback
@@ -366,7 +366,7 @@ class AdvancedEditorWx(wx.Dialog):
         """Load content keywords from JSON - REUSES existing file"""
         try:
             # Look for content_keywords.json in same directory as this script
-            keywords_file = os.path.join(os.path.dirname(__file__), 'content_keywords.json')
+            keywords_file = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), 'data', 'content_keywords.json')
             if os.path.exists(keywords_file):
                 with open(keywords_file, 'r', encoding='utf-8') as f:
                     self.keywords_data = json.load(f)

@@ -1,5 +1,45 @@
 # Release Notes
 
+## Version 2.0.0 - March 14, 2026
+
+### Project Restructuring
+- **Organized Source Code into Package Structure**: Restructured all Python source files from a flat root directory into a well-organized `src/` package with categorized subdirectories
+  - **`src/core/`**: Core data models and utilities (`suricata_rule.py`, `constants.py`, `version.py`, `security_validator.py`, `rule_filter.py`)
+  - **`src/analysis/`**: Rule analysis and testing (`rule_analyzer.py`, `flow_tester.py`, `rule_usage_analyzer.py`)
+  - **`src/aws/`**: AWS integration (`aws_session_manager.py`, `aws_service_detector.py`, `traffic_analyzer.py`, `traffic_analyzer_ui.py`)
+  - **`src/importers/`**: Import functionality (`domain_importer.py`, `domain_list_importer.py`, `stateful_rule_importer.py`, `palo_alto_importer.py`)
+  - **`src/managers/`**: File, search, template, and revision management (`file_manager.py`, `search_manager.py`, `template_manager.py`, `revision_manager.py`)
+  - **`src/gui/`**: UI components (`ui_manager.py`, `advanced_editor.py`, `advanced_editor_tkinter_backup.py`)
+  - **`data/`**: Data files moved to dedicated directory (`common_ports.json`, `content_keywords.json`, `rule_templates.json`, `palo_alto_app_map.json`)
+- **Added `.gitignore`**: New `.gitignore` file excludes `__pycache__/`, `*.pyc`, virtual environments, IDE files, and OS-specific files
+- **No Functionality Changes**: All features work identically — this is purely an organizational improvement
+- **Same Launch Command**: Program still launches with `python suricata_generator.py` from the project root
+
+---
+
+## Version 1.33.0 - March 14, 2026
+
+### New Feature: Palo Alto Networks Configuration Import (Beta)
+- **Import Palo Alto XML Configurations**: Convert Palo Alto Networks firewall security policies to Suricata rules for AWS Network Firewall migration
+  - **File > Import Palo Alto Configuration**: Multi-step wizard guides users through XML file selection, zone mapping, scope selection, and conversion preview
+  - **App-ID Conversion**: Best-effort mapping of Palo Alto App-ID applications to Suricata equivalents
+    - **Tier 1 (High Confidence)**: Direct protocol mapping for 24 applications (ssl→tls, web-browsing→http, dns→dns, ssh→ssh, etc.)
+    - **Tier 2 (Medium Confidence)**: Domain-based TLS SNI matching for 50+ SaaS/cloud applications (Facebook, Slack, Teams, GitHub, etc.)
+    - **Tier 3 (Unmappable)**: Commented-out stubs with suggested alternatives for proprietary App-ID signatures
+  - **Address Object Resolution**: Supports ip-netmask, ip-range, FQDN, address groups (including nested groups), and inline IP/CIDR addresses
+  - **Zone-to-Variable Mapping**: PA zones converted to Suricata IP Set variables with optional CIDR definition dialog
+  - **GeoIP Support**: Country codes in source/destination fields automatically converted to Suricata `geoip` keywords
+  - **URL Category Mapping**: PA URL filtering categories mapped to AWS `aws_domain_category` keywords; custom URL category lists expanded to domain-matching rules
+  - **FQDN Domain Rules**: FQDN address objects generate TLS SNI + HTTP host rule pairs; non-HTTP/TLS protocols flagged with manual IP resolution guidance
+  - **Deny Action Mapping**: Application-aware deny action conversion — TCP apps map to `reject` (RST), UDP apps map to `drop`, matching PA's per-application deny behavior
+  - **Conversion Report**: Export detailed text or HTML reports documenting every mapping decision, warning, and recommendation
+  - **Test Mode**: Convert all imported rules to `alert` action for safe production testing
+  - **Rule Analyzer Integration**: Optional post-import analysis for conflict detection and optimization
+  - **Data-Driven Design**: All application mappings, URL categories, and service definitions stored in user-editable `palo_alto_app_map.json`
+  - **Supported PAN-OS Versions**: 10.1, 10.2, 11.0, 11.1, 11.2 (core XML schema compatible with 8.x and 9.x)
+
+---
+
 ## Version 1.32.0 - February 22, 2026
 
 ### New Feature: AWS Profile Support

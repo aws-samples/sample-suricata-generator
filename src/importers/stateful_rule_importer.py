@@ -4,7 +4,7 @@ import json
 from typing import List, Dict, Optional
 import time
 
-from suricata_rule import SuricataRule
+from src.core.suricata_rule import SuricataRule
 
 # Optional boto3 import with graceful degradation
 HAS_BOTO3 = False
@@ -1128,7 +1128,7 @@ class StatefulRuleImporter:
         Returns:
             Tuple of (message, sid, rev, content)
         """
-        from constants import SuricataConstants
+        from src.core.constants import SuricataConstants
         
         msg = ""
         sid = SuricataConstants.SID_MIN

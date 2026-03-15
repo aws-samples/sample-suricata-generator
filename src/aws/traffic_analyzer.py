@@ -17,7 +17,7 @@ from datetime import datetime, timedelta, date
 from collections import defaultdict
 from typing import Dict, List, Optional, Callable, Any
 
-from aws_service_detector import AWSServiceDetector
+from src.aws.aws_service_detector import AWSServiceDetector
 
 
 class TrafficAnalyzer:

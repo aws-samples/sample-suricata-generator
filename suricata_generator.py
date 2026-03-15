@@ -7,21 +7,22 @@ from typing import List, Dict, Optional, Tuple
 import urllib.request
 import urllib.error
 
-from suricata_rule import SuricataRule
-from rule_analyzer import RuleAnalyzer
-from file_manager import FileManager
-from domain_importer import DomainImporter
-from stateful_rule_importer import StatefulRuleImporter
-from search_manager import SearchManager
-from ui_manager import UIManager
-from flow_tester import FlowTester
-from rule_filter import RuleFilter
-from template_manager import TemplateManager
-from rule_usage_analyzer import RuleUsageAnalyzer, HAS_BOTO3
-from aws_session_manager import AWSSessionManager
-from constants import SuricataConstants
-from version import get_main_version
-from security_validator import security_validator, validate_rule_input, validate_file_operation
+from src.core.suricata_rule import SuricataRule
+from src.analysis.rule_analyzer import RuleAnalyzer
+from src.managers.file_manager import FileManager
+from src.importers.domain_importer import DomainImporter
+from src.importers.stateful_rule_importer import StatefulRuleImporter
+from src.importers.palo_alto_importer import PaloAltoImporter
+from src.managers.search_manager import SearchManager
+from src.gui.ui_manager import UIManager
+from src.analysis.flow_tester import FlowTester
+from src.core.rule_filter import RuleFilter
+from src.managers.template_manager import TemplateManager
+from src.analysis.rule_usage_analyzer import RuleUsageAnalyzer, HAS_BOTO3
+from src.aws.aws_session_manager import AWSSessionManager
+from src.core.constants import SuricataConstants
+from src.core.version import get_main_version, get_analyzer_version, get_flow_tester_version, get_palo_alto_importer_version
+from src.core.security_validator import security_validator, validate_rule_input, validate_file_operation
 
 class SuricataRuleGenerator:
     """Main application class for the Suricata Rule Generator GUI"""
@@ -61,9 +62,10 @@ class SuricataRuleGenerator:
         self.file_manager = FileManager()  # File operations manager
         self.domain_importer = DomainImporter(self)  # Domain import functionality
         self.stateful_rule_importer = StatefulRuleImporter(self)  # Stateful rule group import functionality
+        self.palo_alto_importer = PaloAltoImporter(self)  # Palo Alto configuration import functionality
         
         # Import domain_list_importer after domain_importer is initialized
-        from domain_list_importer import DomainListImporter
+        from src.importers.domain_list_importer import DomainListImporter
         self.domain_list_importer = DomainListImporter(self)  # AWS Domain List import functionality
         self.search_manager = SearchManager(self)  # Search functionality manager
         self.ui_manager = UIManager(self)  # UI components manager
@@ -73,7 +75,7 @@ class SuricataRuleGenerator:
         
         # Traffic Analysis & VPC Endpoints (optional - requires boto3, intervaltree, requests)
         try:
-            from traffic_analyzer_ui import TrafficAnalyzerUI
+            from src.aws.traffic_analyzer_ui import TrafficAnalyzerUI
             self.traffic_analyzer_ui = TrafficAnalyzerUI(self)
         except ImportError:
             self.traffic_analyzer_ui = None  # Dependencies not installed
@@ -760,7 +762,7 @@ class SuricataRuleGenerator:
                            and not getattr(r, 'is_blank', False)]
             
             if actual_rules:
-                from revision_manager import RevisionManager
+                from src.managers.revision_manager import RevisionManager
                 
                 # Determine history filename
                 if self.current_file:
@@ -1545,7 +1547,7 @@ class SuricataRuleGenerator:
                 
                 # If tracking enabled, check format version before saving snapshot
                 if self.tracking_enabled:
-                    from revision_manager import RevisionManager
+                    from src.managers.revision_manager import RevisionManager
                     
                     # Build history filename (works for both saved and unsaved files)
                     if self.current_file:
@@ -1718,7 +1720,7 @@ class SuricataRuleGenerator:
                     
                     # If tracking enabled and fields changed, create snapshot for v2.0 format
                     if self.tracking_enabled and fields_changed:
-                        from revision_manager import RevisionManager
+                        from src.managers.revision_manager import RevisionManager
                         
                         # Build history filename
                         if self.current_file:
@@ -2048,7 +2050,7 @@ class SuricataRuleGenerator:
                     history_filename += '.history'
                 
                 if os.path.exists(history_filename):
-                    from revision_manager import RevisionManager
+                    from src.managers.revision_manager import RevisionManager
                     revision_manager = RevisionManager(history_filename)
                     self.rule_guids = revision_manager.extract_rule_guids()
             
@@ -2059,7 +2061,7 @@ class SuricataRuleGenerator:
                     history_filename += '.history'
                 
                 if os.path.exists(history_filename):
-                    from revision_manager import RevisionManager
+                    from src.managers.revision_manager import RevisionManager
                     revision_manager = RevisionManager(history_filename)
                     needs_upgrade, version = revision_manager.detect_format_and_upgrade_needed()
                     
@@ -2148,7 +2150,7 @@ class SuricataRuleGenerator:
                         history_filename += '.history'
                     
                     if os.path.exists(history_filename):
-                        from revision_manager import RevisionManager
+                        from src.managers.revision_manager import RevisionManager
                         revision_manager = RevisionManager(history_filename)
                         self.rule_guids = revision_manager.extract_rule_guids()
                 
@@ -2532,7 +2534,7 @@ class SuricataRuleGenerator:
         
         # If tracking enabled, create baseline snapshots for pasted rules at their current rev
         if self.tracking_enabled:
-            from revision_manager import RevisionManager
+            from src.managers.revision_manager import RevisionManager
             
             # Build history filename
             if self.current_file:
@@ -4100,7 +4102,7 @@ class SuricataRuleGenerator:
                 
                 # If tracking enabled, check format version before saving snapshot
                 if self.tracking_enabled:
-                    from revision_manager import RevisionManager
+                    from src.managers.revision_manager import RevisionManager
                     
                     # Build history filename even if file not saved yet
                     if self.current_file:
@@ -4480,7 +4482,7 @@ class SuricataRuleGenerator:
                 
                 # If tracking enabled and rev changed, check format version before saving snapshot
                 if self.tracking_enabled and fields_changed:
-                    from revision_manager import RevisionManager
+                    from src.managers.revision_manager import RevisionManager
                     
                     # Build history filename even if file not saved yet
                     if self.current_file:
@@ -4849,7 +4851,7 @@ class SuricataRuleGenerator:
             
             # If tracking enabled, check format version before saving snapshot
             if self.tracking_enabled:
-                from revision_manager import RevisionManager
+                from src.managers.revision_manager import RevisionManager
                 
                 # Build history filename even if file not saved yet
                 if self.current_file:
@@ -6113,7 +6115,7 @@ class SuricataRuleGenerator:
         import json
         
         # Check if wxPython is available by checking advanced_editor.py
-        editor_path = os.path.join(os.path.dirname(__file__), 'advanced_editor.py')
+        editor_path = os.path.join(os.path.dirname(__file__), 'src', 'gui', 'advanced_editor.py')
         if not os.path.exists(editor_path):
             messagebox.showerror("Error", "Advanced editor file not found.")
             return
@@ -6287,7 +6289,10 @@ class SuricataRuleGenerator:
         
         # Insert version (unbolded)
         text_widget.insert(tk.END, f"\nVersion {self.get_version_number()}")
-        
+        text_widget.insert(tk.END, f"\n  Rule Analyzer v{get_analyzer_version()}")
+        text_widget.insert(tk.END, f"\n  Flow Tester v{get_flow_tester_version()}")
+        text_widget.insert(tk.END, f"\n  Palo Alto Importer v{get_palo_alto_importer_version()}")
+
         text_widget.insert(tk.END, "\n\n")
         
         # Insert release notes
@@ -7966,7 +7971,7 @@ class SuricataRuleGenerator:
                     
                     # If tracking enabled, create baseline snapshots for all template rules
                     if self.tracking_enabled:
-                        from revision_manager import RevisionManager
+                        from src.managers.revision_manager import RevisionManager
                         
                         # Build history filename
                         if self.current_file:
@@ -8103,7 +8108,7 @@ class SuricataRuleGenerator:
                     
                     # If tracking enabled, create baseline snapshots for all template rules
                     if self.tracking_enabled:
-                        from revision_manager import RevisionManager
+                        from src.managers.revision_manager import RevisionManager
                         
                         # Build history filename
                         if self.current_file:

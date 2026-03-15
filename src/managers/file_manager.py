@@ -16,10 +16,10 @@ import urllib.error
 from typing import List, Optional
 from tkinter import ttk, messagebox
 import tkinter as tk
-from suricata_rule import SuricataRule
-from constants import SuricataConstants, SecurityConstants, ValidationMessages
-from security_validator import validate_file_operation, security_validator
-from version import get_main_version
+from src.core.suricata_rule import SuricataRule
+from src.core.constants import SuricataConstants, SecurityConstants, ValidationMessages
+from src.core.security_validator import validate_file_operation, security_validator
+from src.core.version import get_main_version
 
 
 class FileManager:
@@ -389,7 +389,7 @@ class FileManager:
             # Handle v2.0 snapshot entries using RevisionManager
             if snapshot_entries:
                 try:
-                    from revision_manager import RevisionManager
+                    from src.managers.revision_manager import RevisionManager
                     revision_manager = RevisionManager(history_filename)
                     
                     # Write snapshot entries directly (batch write)

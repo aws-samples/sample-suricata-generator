@@ -1,6 +1,6 @@
 # Suricata Rule Generator for AWS Network Firewall
 
-**Current Version: 1.32.0**
+**Current Version: 2.0.0**
 
 A GUI application for creating, editing, and managing Suricata rules - specifically designed for AWS Network Firewall deployments using strict rule ordering.
 
@@ -36,9 +36,10 @@ A GUI application for creating, editing, and managing Suricata rules - specifica
 ### 🎯 Advanced Features
 - [Rule Templates](#rule-templates)
 - [URL and Domain Category Filtering](#url-and-domain-category-filtering)
-- [AWS Profile Support](#aws-profile-support) ⭐ NEW
+- [AWS Profile Support](#aws-profile-support)
 - [Category-Based Domain Analysis](#category-based-domain-analysis)
 - [Bulk Domain Import](#bulk-domain-import)
+- [Palo Alto Configuration Import](#palo-alto-configuration-import) ⭐ NEW
 - [AWS Rule Group Import](#aws-rule-group-import)
 - [Rule Filtering](#rule-filtering)
 - [Bulk SID Management](#bulk-sid-management)
@@ -672,7 +673,7 @@ arn:aws:ec2:region:account:managed-prefix-list/pl-id
 
 ---
 
-## Managing AWS Tags ⭐ NEW in v1.28.0
+## Managing AWS Tags
 
 > 🏷️ **Tag your rule groups** for better AWS resource organization, cost allocation, and compliance tracking.
 
@@ -1006,7 +1007,7 @@ Rule Templates provide pre-configured security patterns that generate complete S
 
 ## URL and Domain Category Filtering
 
-> 🔗 **Block traffic by AWS-maintained content categories** - No manual domain lists needed! ⭐ NEW in v1.30.0
+> 🔗 **Block traffic by AWS-maintained content categories** - No manual domain lists needed! - NEW in v1.30.0
 
 AWS Network Firewall now supports category-based filtering using AWS's automatically-updated category database. Block entire threat categories (malware, phishing, C2) or productivity categories (social media, shopping, entertainment) without maintaining domain lists manually.
 
@@ -1188,7 +1189,7 @@ drop tls $HOME_NET any -> any any (msg:"Block Child Abuse, Adult and Mature Cont
 
 ## AWS Profile Support
 
-> 🔑 **Switch between AWS accounts and regions** directly within the program — no more reconfiguring AWS CLI! ⭐ NEW in v1.32.0
+> 🔑 **Switch between AWS accounts and regions** directly within the program — no more reconfiguring AWS CLI! - NEW in v1.32.0
 
 ![Profiles](images/profile.png)
 
@@ -1337,11 +1338,11 @@ After deploying category rules and running **Tools > Analyze Rule Usage**, the n
 
 > 📦 **Import hundreds of domains** and automatically generate rules for each one - now with AWS Domain List import in v1.27.7!
 
-### Two Import Methods ⭐ NEW
+### Two Import Methods
 
 ![Import Domain List](images/import_domain_list.png)
 
-**Method 1: AWS Domain List Import** ⭐ **NEW in v1.27.7**
+**Method 1: AWS Domain List Import** 
 - Browse and import Domain List rule groups directly from AWS
 - No CLI commands or file exports needed
 - Visual search and protocol customization
@@ -1474,6 +1475,130 @@ Savings: 8 rules → 2 rules (75% reduction)
 
 ---
 
+## Palo Alto Configuration Import
+
+> 🔥 **Migrate from Palo Alto Networks to AWS Network Firewall** — convert PA security policies to Suricata rules automatically! ⭐ NEW in v1.33.0 (Beta)
+
+![Import Palo Alto](images/palo_import.png)
+
+### Overview
+
+The Palo Alto Configuration Import feature converts Palo Alto Networks firewall security policy rules from XML configuration exports into Suricata rules for AWS Network Firewall. It handles application mapping, address/service object resolution, zone conversion, GeoIP rules, URL categories, and FQDN domain matching.
+
+### Accessing the Feature
+
+**File > Import Palo Alto Configuration**
+
+### Multi-Step Import Wizard
+
+**Step 1: File Selection**
+- Browse for PA XML configuration export file
+- Options: Import disabled rules, include descriptions/zone info/conversion notes
+
+**Step 1.5: Zone Mapping** *(shown if zones found)*
+- Define network CIDRs for each PA zone (or leave blank for later)
+- Zone variables created in the Variables tab
+
+**Step 2: Scope Selection**
+- Review configuration summary (rules, objects, zones, applications)
+- Select virtual system (if multiple vsys)
+- Choose all rules or select specific rules to import
+
+**Step 3: Conversion Preview**
+- Summary statistics (fully converted, partially converted, not convertible)
+- Scrollable rules preview with conversion notes
+- Configurable starting SID
+- Test mode option (convert all actions to alert)
+- Optional post-import rule analyzer
+- Export Report button (text or HTML)
+
+### Application Mapping (App-ID Conversion)
+
+PA's App-ID is converted using a tiered approach:
+
+| Tier | Confidence | Description | Examples |
+|------|-----------|-------------|----------|
+| **Tier 1** | High | Direct protocol mapping | ssl→tls, web-browsing→http, dns→dns, ssh→ssh |
+| **Tier 2** | Medium | Domain-based TLS SNI matching | facebook→.facebook.com, slack→.slack.com |
+| **Tier 3** | — | Unmappable (commented out) | bittorrent, skype (behavioral signatures) |
+| **Tier 5** | — | Wildcard (app: any) | Uses service/port to determine protocol |
+
+- **24 Tier 1 applications** with direct protocol mappings
+- **50+ Tier 2 applications** with domain-based matching
+- Multiple applications per rule expand to separate Suricata rules
+
+### Key Conversion Features
+
+**Address Object Resolution:**
+- ip-netmask → Suricata IP Set variables
+- ip-range → Variables with conversion note
+- FQDN → TLS SNI + HTTP host rule pairs
+- Address groups → Expanded variables (supports nested groups)
+- Inline IP/CIDR → Used directly in rules
+
+**Zone Handling:**
+- PA zones → Suricata IP Set variables ($TRUST, $DMZ, etc.)
+- Zone used as network field when source/destination is `any`
+- Zone info preserved in comments above each rule
+
+**GeoIP Support:**
+- Country codes (CN, RU, etc.) → `geoip:dst,CODE` or `geoip:src,CODE`
+- Multiple country codes combined into single geoip keyword
+- Detects country codes in source/destination member fields
+
+**URL Category Mapping:**
+- Built-in PA categories → `aws_domain_category` keywords
+- Custom URL category lists → Domain-matching rule pairs
+- Category disambiguation (built-in → custom → unresolved)
+
+**Deny Action Mapping:**
+- TCP-based applications → Suricata `reject` (sends RST, matching PA behavior)
+- UDP-based applications → Suricata `drop` (silent drop)
+- Configurable per-application via `deny_action` field in `palo_alto_app_map.json`
+
+**Disabled Rules:**
+- Imported as commented-out rules with `# [DISABLED]` prefix
+- Unique SIDs assigned for easy re-enabling
+
+### Data-Driven Design
+
+All mappings stored in user-editable `palo_alto_app_map.json`:
+- Protocol mappings (Tier 1)
+- Domain mappings (Tier 2)
+- URL category mappings (PA → AWS)
+- Application default ports
+- Built-in PAN-OS service definitions
+- ISO 3166-1 country codes for GeoIP
+
+See `docs/palo_alto_app_map_json.md` for complete documentation.
+
+### Conversion Report
+
+Export detailed reports documenting every mapping decision:
+- **Text format**: Plain text with 9 sections
+- **HTML format**: Professional styled report with stat cards and color-coded tables
+- Per-rule conversion details with status indicators
+- Application mapping results by tier
+- Variable mappings and URL category mappings
+- Recommendations for post-import actions
+
+### Supported PAN-OS Versions
+
+- **Target**: PAN-OS 10.1, 10.2, 11.0, 11.1, 11.2
+- **Compatible**: PAN-OS 8.x and 9.x (core XML schema unchanged)
+
+### Limitations
+
+- **App-ID fidelity**: Proprietary behavioral signatures cannot be replicated
+- **Zone semantics**: Must be replaced with explicit network addresses
+- **Rule expansion**: One PA rule may generate multiple Suricata rules
+- **Session vs packet**: Some behavioral differences are unavoidable
+- **Beta status**: Review all converted rules before production deployment
+
+> 📖 **Full Documentation**: See `new_features/FEATURE_SPEC_palo_alto_import.md` for complete specification.
+
+---
+
 ## AWS Rule Group Import
 
 > 📥 **Import existing AWS Network Firewall rule groups** for editing and enhancement - Direct AWS connectivity in v1.27.3!
@@ -1482,7 +1607,7 @@ Savings: 8 rules → 2 rules (75% reduction)
 
 ### Two Import Methods
 
-**Method 1: Direct AWS Import** ⭐ **NEW in v1.27.3**
+**Method 1: Direct AWS Import** - **NEW in v1.27.3**
 - Browse and import directly from your AWS account
 - No CLI commands needed
 - Visual search and selection
@@ -2132,7 +2257,7 @@ This feature builds upon AWS Network Firewall's robust monitoring foundation by 
 
 ## Analyze Traffic Costs
 
-> 💰 **Identify where your firewall costs are coming from** and discover VPC endpoint opportunities for cost savings! ⭐ NEW in v1.29.0
+> 💰 **Identify where your firewall costs are coming from** and discover VPC endpoint opportunities for cost savings! - NEW in v1.29.0
 
 ![Traffic Costs](images/traffic_costs.png)
 
@@ -2392,9 +2517,9 @@ Generate AWS Network Firewall resources for deployment in multiple formats:
 ### Export Formats
 - **Terraform (.tf)**: Complete resource definition for Terraform workflows
 - **CloudFormation (.cft)**: JSON template for CloudFormation stacks
-- **AWS Network Firewall (Direct Deploy)**: Deploy directly to AWS ⭐ **NEW in v1.27.2**
+- **AWS Network Firewall (Direct Deploy)**: Deploy directly to AWS - **NEW in v1.27.2**
 
-### AWS Network Firewall Direct Deploy ⭐ NEW
+### AWS Network Firewall Direct Deploy
 
 ![export_aws](images/export_aws.png)
 
@@ -2788,7 +2913,8 @@ Suricata internally classifies rules by their keywords and protocol:
 
 ### Advanced Features
 - ✅ **URL and Domain Category Filtering** *(v1.30.0)*: AWS-maintained category blocking (51 categories)
-- ✅ **AWS Profile Support** *(v1.32.0)*: Multi-account profile selector in status bar ⭐ NEW
+- ✅ **Palo Alto Configuration Import** *(v1.33.0)*: Convert PA firewall policies to Suricata ⭐ NEW
+- ✅ **AWS Profile Support** *(v1.32.0)*: Multi-account profile selector in status bar
 - ✅ **Category-Based Domain Analysis** *(v1.31.0)*: See which domains triggered each category rule
 - ✅ **CloudWatch Rule Usage Analysis** *(v1.27.0)*: Production rule effectiveness analytics
 - ✅ **Analyze Traffic Costs** *(v1.29.0)*: VPC endpoint recommendations and cost analysis
@@ -2820,9 +2946,9 @@ Suricata internally classifies rules by their keywords and protocol:
 
 ### Import and Export
 - ✅ Infrastructure as code export (Terraform, CloudFormation)
-- ✅ AWS Network Firewall direct deploy ⭐ NEW
+- ✅ AWS Network Firewall direct deploy
 - ✅ Bulk domain import with consolidation
-- ✅ AWS rule group direct import (browse AWS) ⭐ NEW
+- ✅ AWS rule group direct import (browse AWS)
 - ✅ AWS rule group import from CLI JSON
 - ✅ AWS best practices template loading
 - ✅ Test mode export (all formats)
@@ -2947,38 +3073,47 @@ The `common_ports.json` file defines pre-configured port variables for the Add C
 
 ## Technical Architecture
 
-The application follows a modular architecture with specialized managers:
+The application follows a modular architecture organized into a `src/` package with categorized subdirectories *(restructured in v2.0.0)*:
 
-### Core Modules
-- **suricata_generator.py**: Main application and manager coordination
-- **suricata_rule.py**: Rule parsing, validation, and formatting
-- **constants.py**: Application constants and validation patterns
-- **version.py**: Centralized version management
-- **security_validator.py**: Input validation and security protection
-
-### Manager Modules
-- **ui_manager.py**: Complete user interface management
-- **template_manager.py**: Rule template system *(v1.24.0)*
-- **file_manager.py**: File operations and exports
-- **search_manager.py**: Search functionality
-- **rule_filter.py**: Rule filtering system *(v1.22.0)*
-- **domain_importer.py**: Bulk domain processing
-- **domain_list_importer.py**: AWS Domain List imports *(v1.27.7)*
-- **stateful_rule_importer.py**: AWS rule group imports *(v1.18.7)*
-- **rule_analyzer.py**: Conflict detection and reporting
-- **rule_usage_analyzer.py**: CloudWatch usage analytics *(v1.27.0)*
-- **aws_session_manager.py**: Centralized AWS credential and session management *(v1.32.0)* ⭐ NEW
-- **traffic_analyzer.py**: Traffic cost analysis backend *(v1.29.0)*
-- **traffic_analyzer_ui.py**: Traffic cost analysis UI *(v1.29.0)*
-- **aws_service_detector.py**: AWS service identification from IP addresses *(v1.29.0)*
-- **flow_tester.py**: Network traffic simulation
-- **advanced_editor.py**: IDE-style text editor *(v1.19.0)*
-- **revision_manager.py**: Per-rule revision history and rollback *(v1.25.0)*
-
-### Configuration Files
-- **content_keywords.json**: Auto-complete keyword definitions *(v1.19.0)*
-- **rule_templates.json**: Pre-built security templates *(v1.24.0)*
-- **common_ports.json**: Port variable library *(v1.24.1)*
+### Directory Structure
+```
+suricata_generator.py          # Main entry point (root directory)
+src/
+  core/                        # Core data models and utilities
+    suricata_rule.py           # Rule parsing, validation, and formatting
+    constants.py               # Application constants and validation patterns
+    version.py                 # Centralized version management
+    security_validator.py      # Input validation and security protection
+    rule_filter.py             # Rule filtering system
+  analysis/                    # Rule analysis and testing
+    rule_analyzer.py           # Conflict detection and reporting
+    flow_tester.py             # Network traffic simulation
+    rule_usage_analyzer.py     # CloudWatch usage analytics
+  aws/                         # AWS integration
+    aws_session_manager.py     # Centralized AWS credential and session management
+    aws_service_detector.py    # AWS service identification from IP addresses
+    traffic_analyzer.py        # Traffic cost analysis backend
+    traffic_analyzer_ui.py     # Traffic cost analysis UI
+  importers/                   # Import functionality
+    domain_importer.py         # Bulk domain processing
+    domain_list_importer.py    # AWS Domain List imports
+    stateful_rule_importer.py  # AWS rule group imports
+    palo_alto_importer.py      # Palo Alto Networks configuration import
+  managers/                    # File, search, template, revision management
+    file_manager.py            # File operations and exports
+    search_manager.py          # Search functionality
+    template_manager.py        # Rule template system
+    revision_manager.py        # Per-rule revision history and rollback
+  gui/                         # UI components
+    ui_manager.py              # Complete user interface management
+    advanced_editor.py         # IDE-style text editor (wxPython/Scintilla)
+    advanced_editor_tkinter_backup.py  # Tkinter fallback editor
+data/                          # Data and configuration files
+  content_keywords.json        # Auto-complete keyword definitions
+  rule_templates.json          # Pre-built security templates
+  common_ports.json            # Port variable library
+  palo_alto_app_map.json       # PA application/URL category/service mappings
+```
 
 ### Security Features
 - **Injection Protection**: Filters dangerous patterns

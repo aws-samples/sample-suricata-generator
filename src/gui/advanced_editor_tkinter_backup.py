@@ -4,8 +4,8 @@ import json
 import os
 import re
 from typing import List, Dict, Optional, Tuple
-from suricata_rule import SuricataRule
-from constants import SuricataConstants
+from src.core.suricata_rule import SuricataRule
+from src.core.constants import SuricataConstants
 
 
 class AdvancedEditor:
@@ -109,7 +109,7 @@ class AdvancedEditor:
     def load_content_keywords(self):
         """Load content keywords from JSON file"""
         try:
-            keywords_file = os.path.join(os.path.dirname(__file__), 'content_keywords.json')
+            keywords_file = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), 'data', 'content_keywords.json')
             if os.path.exists(keywords_file):
                 with open(keywords_file, 'r', encoding='utf-8') as f:
                     self.keywords_data = json.load(f)

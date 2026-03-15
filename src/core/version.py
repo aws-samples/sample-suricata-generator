@@ -6,13 +6,16 @@ The rule analyzer and flow tester have their own separate version numbers.
 """
 
 # Main program version - update this single location for version changes
-MAIN_VERSION = "1.32.0"
+MAIN_VERSION = "2.0.0"
 
 # Rule analyzer version (managed separately)
 ANALYZER_VERSION = "1.11.0"
 
 # Flow tester version (managed separately)
 FLOW_TESTER_VERSION = "1.2.0"
+
+# Palo Alto importer version (managed separately)
+PALO_ALTO_IMPORTER_VERSION = "1.0.0-beta"
 
 
 def get_main_version() -> str:
@@ -28,3 +31,8 @@ def get_analyzer_version() -> str:
 def get_flow_tester_version() -> str:
     """Get the flow tester version number"""
     return FLOW_TESTER_VERSION
+
+
+def get_palo_alto_importer_version() -> str:
+    """Get the Palo Alto importer version number"""
+    return PALO_ALTO_IMPORTER_VERSION

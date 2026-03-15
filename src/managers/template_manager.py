@@ -9,20 +9,26 @@ with static rules.
 import json
 import os
 from typing import List, Dict, Optional, Any
-from suricata_rule import SuricataRule
+from src.core.suricata_rule import SuricataRule
 
 
 class TemplateManager:
     """Manages rule templates for quick rule generation from common patterns"""
     
-    def __init__(self, template_file: str = 'rule_templates.json'):
+    def __init__(self, template_file: str = None):
         """Initialize template manager
         
         Args:
-            template_file: Path to JSON file containing template definitions
+            template_file: Path to JSON file containing template definitions.
+                          If None, looks in project's data/ directory.
         """
         self.templates = []
-        self.template_file = template_file
+        if template_file is None:
+            # Default: look in project root's data/ directory
+            project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+            self.template_file = os.path.join(project_root, 'data', 'rule_templates.json')
+        else:
+            self.template_file = template_file
         self.load_templates()
     
     def load_templates(self) -> bool:

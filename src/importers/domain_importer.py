@@ -6,7 +6,7 @@ import re
 import os
 from typing import List, Optional, Dict
 
-from suricata_rule import SuricataRule
+from src.core.suricata_rule import SuricataRule
 
 
 class ToolTip:
@@ -546,7 +546,7 @@ class DomainImporter:
                 
                 # If tracking enabled, create baseline snapshots for all imported rules
                 if self.parent.tracking_enabled:
-                    from revision_manager import RevisionManager
+                    from src.managers.revision_manager import RevisionManager
                     
                     # Build history filename
                     if self.parent.current_file:
@@ -556,7 +556,7 @@ class DomainImporter:
                     else:
                         # Use temporary filename for unsaved files
                         import tempfile
-                        temp_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'user_files')
+                        temp_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), 'user_files')
                         if not os.path.exists(temp_dir):
                             temp_dir = tempfile.gettempdir()
                         history_filename = os.path.join(temp_dir, '_unsaved_.history')
@@ -1291,7 +1291,7 @@ class DomainImporter:
             
             # If tracking enabled, create baseline snapshots for inserted rules
             if self.parent.tracking_enabled:
-                from revision_manager import RevisionManager
+                from src.managers.revision_manager import RevisionManager
                 
                 # Build history filename
                 if self.parent.current_file:
@@ -1301,7 +1301,7 @@ class DomainImporter:
                 else:
                     # Use temporary filename for unsaved files
                     import tempfile
-                    temp_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'user_files')
+                    temp_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), 'user_files')
                     if not os.path.exists(temp_dir):
                         temp_dir = tempfile.gettempdir()
                     history_filename = os.path.join(temp_dir, '_unsaved_.history')

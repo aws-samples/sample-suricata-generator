@@ -23,8 +23,8 @@ except ImportError:
     HAS_BOTO3 = False
 
 try:
-    from traffic_analyzer import TrafficAnalyzer
-    from aws_service_detector import AWSServiceDetector
+    from src.aws.traffic_analyzer import TrafficAnalyzer
+    from src.aws.aws_service_detector import AWSServiceDetector
     HAS_ANALYZER = True
 except ImportError:
     HAS_ANALYZER = False
@@ -115,7 +115,7 @@ class TrafficAnalyzerUI:
             
             # Check if cached results exist
             try:
-                from traffic_analyzer import TrafficAnalyzer
+                from src.aws.traffic_analyzer import TrafficAnalyzer
                 if TrafficAnalyzer.has_cached_results(stats_file):
                     # Ask user if they want to use cached data
                     cached_results = TrafficAnalyzer.load_results(stats_file)
@@ -2151,7 +2151,7 @@ Typical cost: $0.50 - $2.00 for 30-day analysis."""
             results: Analysis results dictionary
         """
         try:
-            from traffic_analyzer import TrafficAnalyzer
+            from src.aws.traffic_analyzer import TrafficAnalyzer
             
             # Check if a rule file is currently loaded
             if hasattr(self.parent, 'current_file') and self.parent.current_file:

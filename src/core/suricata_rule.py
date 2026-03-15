@@ -7,7 +7,7 @@ individual Suricata rules with parsing, validation, and formatting capabilities.
 
 import re
 from typing import Optional
-from constants import SuricataConstants, ValidationMessages
+from src.core.constants import SuricataConstants, ValidationMessages
 
 
 class SuricataRule:

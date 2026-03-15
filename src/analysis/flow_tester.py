@@ -11,8 +11,8 @@ Version: See version.py for current version information
 import ipaddress
 import re
 from typing import List, Dict, Optional, Tuple
-from suricata_rule import SuricataRule
-from version import get_flow_tester_version
+from src.core.suricata_rule import SuricataRule
+from src.core.version import get_flow_tester_version
 
 
 class FlowTester:

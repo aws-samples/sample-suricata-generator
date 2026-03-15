@@ -1,0 +1,1076 @@
+{
+    "version": "1.0.0",
+    "last_updated": "2026-03-11",
+    "description": "Mapping file for Palo Alto Networks to Suricata rule conversion. Contains application-to-protocol mappings, domain-based application mappings, URL category mappings, default ports for application-default service resolution, ISO 3166-1 country codes for GeoIP detection, and built-in PAN-OS service definitions.",
+    "panos_versions_tested": ["10.1", "10.2", "11.0", "11.1"],
+
+    "protocol_mappings": {
+        "_description": "Tier 1: Direct PA application to Suricata protocol mappings (high confidence). 'suricata_protocol' is the Suricata rule protocol keyword. 'default_port' is used when service is 'application-default'. 'app_layer' indicates if Suricata has app-layer detection (port can be 'any'). 'deny_action' (optional) specifies what Suricata action to use when PA action is 'deny' — PA deny behavior varies by application (TCP apps send RST, UDP apps send ICMP unreachable). Values: 'reject' (sends RST/ICMP unreachable, like PA deny) or 'drop' (silent drop). If absent, defaults to 'drop'.",
+        "ssl": {
+            "suricata_protocol": "tls",
+            "default_port": "443",
+            "app_layer": true,
+            "deny_action": "reject",
+            "description": "SSL/TLS encrypted traffic"
+        },
+        "web-browsing": {
+            "suricata_protocol": "http",
+            "default_port": "80",
+            "app_layer": true,
+            "deny_action": "reject",
+            "description": "HTTP web browsing"
+        },
+        "dns": {
+            "suricata_protocol": "dns",
+            "default_port": "53",
+            "app_layer": true,
+            "deny_action": "drop",
+            "description": "Domain Name System"
+        },
+        "ssh": {
+            "suricata_protocol": "ssh",
+            "default_port": "22",
+            "app_layer": true,
+            "deny_action": "reject",
+            "description": "Secure Shell"
+        },
+        "ftp": {
+            "suricata_protocol": "ftp",
+            "default_port": "21",
+            "app_layer": true,
+            "deny_action": "reject",
+            "description": "File Transfer Protocol"
+        },
+        "smtp": {
+            "suricata_protocol": "smtp",
+            "default_port": "25",
+            "app_layer": true,
+            "deny_action": "reject",
+            "description": "Simple Mail Transfer Protocol"
+        },
+        "imap": {
+            "suricata_protocol": "imap",
+            "default_port": "143",
+            "app_layer": true,
+            "deny_action": "reject",
+            "description": "Internet Message Access Protocol"
+        },
+        "ntp": {
+            "suricata_protocol": "ntp",
+            "default_port": "123",
+            "app_layer": true,
+            "deny_action": "drop",
+            "description": "Network Time Protocol"
+        },
+        "dhcp": {
+            "suricata_protocol": "dhcp",
+            "default_port": "67",
+            "app_layer": true,
+            "deny_action": "drop",
+            "description": "Dynamic Host Configuration Protocol"
+        },
+        "smb": {
+            "suricata_protocol": "smb",
+            "default_port": "445",
+            "app_layer": true,
+            "deny_action": "reject",
+            "description": "Server Message Block"
+        },
+        "kerberos": {
+            "suricata_protocol": "krb5",
+            "default_port": "88",
+            "app_layer": true,
+            "deny_action": "reject",
+            "description": "Kerberos authentication"
+        },
+        "quic": {
+            "suricata_protocol": "quic",
+            "default_port": "443",
+            "app_layer": true,
+            "deny_action": "drop",
+            "description": "QUIC transport protocol (AWS NF does not support reject on QUIC)"
+        },
+        "icmp": {
+            "suricata_protocol": "icmp",
+            "default_port": null,
+            "app_layer": false,
+            "deny_action": "drop",
+            "description": "Internet Control Message Protocol"
+        },
+        "tftp": {
+            "suricata_protocol": "tftp",
+            "default_port": "69",
+            "app_layer": true,
+            "deny_action": "drop",
+            "description": "Trivial File Transfer Protocol"
+        },
+        "dcerpc": {
+            "suricata_protocol": "dcerpc",
+            "default_port": "135",
+            "app_layer": true,
+            "deny_action": "reject",
+            "description": "Distributed Computing Environment / Remote Procedure Call"
+        },
+        "ikev2": {
+            "suricata_protocol": "ikev2",
+            "default_port": "500",
+            "app_layer": true,
+            "deny_action": "drop",
+            "description": "Internet Key Exchange v2"
+        },
+        "snmp": {
+            "suricata_protocol": "udp",
+            "default_port": "161",
+            "app_layer": false,
+            "deny_action": "drop",
+            "description": "Simple Network Management Protocol"
+        },
+        "syslog": {
+            "suricata_protocol": "udp",
+            "default_port": "514",
+            "app_layer": false,
+            "deny_action": "drop",
+            "description": "System logging"
+        },
+        "ms-rdp": {
+            "suricata_protocol": "tcp",
+            "default_port": "3389",
+            "app_layer": false,
+            "deny_action": "reject",
+            "description": "Microsoft Remote Desktop Protocol"
+        },
+        "mysql": {
+            "suricata_protocol": "tcp",
+            "default_port": "3306",
+            "app_layer": false,
+            "deny_action": "reject",
+            "description": "MySQL database"
+        },
+        "ms-sql": {
+            "suricata_protocol": "tcp",
+            "default_port": "1433",
+            "app_layer": false,
+            "deny_action": "reject",
+            "description": "Microsoft SQL Server"
+        },
+        "postgresql": {
+            "suricata_protocol": "tcp",
+            "default_port": "5432",
+            "app_layer": false,
+            "deny_action": "reject",
+            "description": "PostgreSQL database"
+        },
+        "ldap": {
+            "suricata_protocol": "tcp",
+            "default_port": "389",
+            "app_layer": false,
+            "deny_action": "reject",
+            "description": "Lightweight Directory Access Protocol"
+        },
+        "http2": {
+            "suricata_protocol": "http2",
+            "default_port": "443",
+            "app_layer": true,
+            "deny_action": "reject",
+            "description": "HTTP/2 protocol"
+        }
+    },
+
+    "domain_mappings": {
+        "_description": "Tier 2: PA application to domain-based TLS SNI matching (medium confidence). Each entry generates a TLS rule with tls.sni content matching. 'deny_action' (optional) specifies Suricata action for PA 'deny' — defaults to 'reject' for TLS apps since PA deny sends a TCP RST for these.",
+        "amazon-base": {
+            "domain": ".amazon.com",
+            "deny_action": "reject",
+            "description": "Amazon services"
+        },
+        "apple-base": {
+            "domain": ".apple.com",
+            "description": "Apple services"
+        },
+        "aws-console": {
+            "domain": ".aws.amazon.com",
+            "description": "AWS Management Console"
+        },
+        "azure-base": {
+            "domain": ".azure.com",
+            "description": "Microsoft Azure cloud services"
+        },
+        "bitbucket-base": {
+            "domain": ".bitbucket.org",
+            "description": "Bitbucket code hosting"
+        },
+        "box-base": {
+            "domain": ".box.com",
+            "description": "Box cloud storage"
+        },
+        "confluence": {
+            "domain": ".atlassian.net",
+            "description": "Atlassian Confluence"
+        },
+        "discord-base": {
+            "domain": ".discord.com",
+            "description": "Discord messaging platform"
+        },
+        "docker-base": {
+            "domain": ".docker.com",
+            "description": "Docker container platform"
+        },
+        "dropbox-base": {
+            "domain": ".dropbox.com",
+            "description": "Dropbox file storage"
+        },
+        "facebook-base": {
+            "domain": ".facebook.com",
+            "description": "Facebook social media platform"
+        },
+        "facebook": {
+            "domain": ".facebook.com",
+            "description": "Facebook social media platform"
+        },
+        "github-base": {
+            "domain": ".github.com",
+            "description": "GitHub code hosting"
+        },
+        "gitlab-base": {
+            "domain": ".gitlab.com",
+            "description": "GitLab code hosting"
+        },
+        "google-base": {
+            "domain": ".google.com",
+            "description": "Google services"
+        },
+        "google-cloud-base": {
+            "domain": ".cloud.google.com",
+            "description": "Google Cloud Platform"
+        },
+        "google-drive-base": {
+            "domain": ".drive.google.com",
+            "description": "Google Drive file storage"
+        },
+        "heroku": {
+            "domain": ".heroku.com",
+            "description": "Heroku cloud platform"
+        },
+        "icloud-base": {
+            "domain": ".icloud.com",
+            "description": "Apple iCloud services"
+        },
+        "instagram": {
+            "domain": ".instagram.com",
+            "description": "Instagram social media platform"
+        },
+        "jira": {
+            "domain": ".atlassian.net",
+            "description": "Atlassian Jira project management"
+        },
+        "linkedin-base": {
+            "domain": ".linkedin.com",
+            "description": "LinkedIn professional network"
+        },
+        "ms-teams": {
+            "domain": ".teams.microsoft.com",
+            "description": "Microsoft Teams"
+        },
+        "netflix-base": {
+            "domain": ".netflix.com",
+            "description": "Netflix video streaming"
+        },
+        "office365-base": {
+            "domain": ".office.com",
+            "description": "Microsoft Office 365"
+        },
+        "okta": {
+            "domain": ".okta.com",
+            "description": "Okta identity management"
+        },
+        "onedrive-base": {
+            "domain": ".onedrive.live.com",
+            "description": "Microsoft OneDrive file storage"
+        },
+        "pinterest-base": {
+            "domain": ".pinterest.com",
+            "description": "Pinterest social media platform"
+        },
+        "reddit-base": {
+            "domain": ".reddit.com",
+            "description": "Reddit discussion platform"
+        },
+        "salesforce-base": {
+            "domain": ".salesforce.com",
+            "description": "Salesforce CRM"
+        },
+        "servicenow-base": {
+            "domain": ".servicenow.com",
+            "description": "ServiceNow IT service management"
+        },
+        "signal": {
+            "domain": ".signal.org",
+            "description": "Signal encrypted messaging"
+        },
+        "skype-base": {
+            "domain": ".skype.com",
+            "description": "Skype communications"
+        },
+        "slack-base": {
+            "domain": ".slack.com",
+            "description": "Slack messaging platform"
+        },
+        "snapchat": {
+            "domain": ".snapchat.com",
+            "description": "Snapchat social media platform"
+        },
+        "spotify-base": {
+            "domain": ".spotify.com",
+            "description": "Spotify music streaming"
+        },
+        "telegram-base": {
+            "domain": ".telegram.org",
+            "description": "Telegram messaging platform"
+        },
+        "tiktok-base": {
+            "domain": ".tiktok.com",
+            "description": "TikTok video platform"
+        },
+        "tumblr-base": {
+            "domain": ".tumblr.com",
+            "description": "Tumblr blogging platform"
+        },
+        "twitch-base": {
+            "domain": ".twitch.tv",
+            "description": "Twitch live streaming platform"
+        },
+        "twitter-base": {
+            "domain": ".twitter.com",
+            "description": "Twitter/X social media platform"
+        },
+        "vimeo-base": {
+            "domain": ".vimeo.com",
+            "description": "Vimeo video platform"
+        },
+        "webex-base": {
+            "domain": ".webex.com",
+            "description": "Cisco Webex"
+        },
+        "whatsapp-base": {
+            "domain": ".whatsapp.com",
+            "description": "WhatsApp messaging"
+        },
+        "workday": {
+            "domain": ".workday.com",
+            "description": "Workday HR and finance platform"
+        },
+        "youtube-base": {
+            "domain": ".youtube.com",
+            "description": "YouTube video platform"
+        },
+        "zendesk-base": {
+            "domain": ".zendesk.com",
+            "description": "Zendesk customer service platform"
+        },
+        "zoom": {
+            "domain": ".zoom.us",
+            "description": "Zoom video conferencing"
+        }
+    },
+
+    "url_category_mappings": {
+        "_description": "PA URL filtering category to AWS Network Firewall domain category mapping. 'aws_category' is the value used in aws_domain_category keyword. 'confidence' indicates mapping quality (high=direct match, medium=close equivalent, low=loose approximation).",
+        "abortion": {
+            "aws_category": "Abortion",
+            "confidence": "high"
+        },
+        "abused-drugs": {
+            "aws_category": "Criminal and Illegal Activities",
+            "confidence": "medium"
+        },
+        "adult": {
+            "aws_category": "Adult and Mature Content",
+            "confidence": "high"
+        },
+        "artificial-intelligence": {
+            "aws_category": "Artificial Intelligence and Machine Learning",
+            "confidence": "high"
+        },
+        "auctions": {
+            "aws_category": "Shopping",
+            "confidence": "medium"
+        },
+        "business-and-economy": {
+            "aws_category": "Business and Economy",
+            "confidence": "high"
+        },
+        "command-and-control": {
+            "aws_category": "Command and Control",
+            "confidence": "high"
+        },
+        "computer-and-internet-info": {
+            "aws_category": "Technology and Internet",
+            "confidence": "medium"
+        },
+        "copyright-infringement": {
+            "aws_category": "Criminal and Illegal Activities",
+            "confidence": "medium"
+        },
+        "cryptocurrency": {
+            "aws_category": "Cryptocurrency",
+            "confidence": "high"
+        },
+        "dating": {
+            "aws_category": "Dating",
+            "confidence": "high"
+        },
+        "drugs": {
+            "aws_category": "Marijuana",
+            "confidence": "low"
+        },
+        "education": {
+            "aws_category": "Education",
+            "confidence": "high"
+        },
+        "educational-institutions": {
+            "aws_category": "Education",
+            "confidence": "high"
+        },
+        "entertainment-and-arts": {
+            "aws_category": "Entertainment",
+            "confidence": "high"
+        },
+        "extremism": {
+            "aws_category": "Violence and Hate Speech",
+            "confidence": "medium"
+        },
+        "financial-services": {
+            "aws_category": "Financial Services",
+            "confidence": "high"
+        },
+        "gambling": {
+            "aws_category": "Gambling",
+            "confidence": "high"
+        },
+        "games": {
+            "aws_category": "Entertainment",
+            "confidence": "medium"
+        },
+        "government": {
+            "aws_category": "Government and Legal",
+            "confidence": "high"
+        },
+        "grayware": {
+            "aws_category": "Malicious",
+            "confidence": "medium"
+        },
+        "hacking": {
+            "aws_category": "Hacking",
+            "confidence": "high"
+        },
+        "health-and-medicine": {
+            "aws_category": "Health",
+            "confidence": "high"
+        },
+        "high-risk": {
+            "aws_category": "Malicious",
+            "confidence": "medium"
+        },
+        "home-and-garden": {
+            "aws_category": "Home and Garden",
+            "confidence": "high"
+        },
+        "hunting-and-fishing": {
+            "aws_category": "Sports and Recreation",
+            "confidence": "medium"
+        },
+        "internet-portals": {
+            "aws_category": "Search Engines and Portals",
+            "confidence": "medium"
+        },
+        "job-search": {
+            "aws_category": "Career and Job Search",
+            "confidence": "high"
+        },
+        "legal": {
+            "aws_category": "Government and Legal",
+            "confidence": "medium"
+        },
+        "malware": {
+            "aws_category": "Malware",
+            "confidence": "high"
+        },
+        "military": {
+            "aws_category": "Military",
+            "confidence": "high"
+        },
+        "motor-vehicles": {
+            "aws_category": "Vehicles",
+            "confidence": "high"
+        },
+        "music": {
+            "aws_category": "Entertainment",
+            "confidence": "medium"
+        },
+        "newly-registered-domain": {
+            "aws_category": "Malicious",
+            "confidence": "medium"
+        },
+        "news": {
+            "aws_category": "News",
+            "confidence": "high"
+        },
+        "nudity": {
+            "aws_category": "Adult and Mature Content",
+            "confidence": "high"
+        },
+        "parked": {
+            "aws_category": "Parked Domains",
+            "confidence": "high"
+        },
+        "phishing": {
+            "aws_category": "Phishing",
+            "confidence": "high"
+        },
+        "private-ip-addresses": {
+            "aws_category": "Private IP Address",
+            "confidence": "high"
+        },
+        "proxy-avoidance-and-anonymizers": {
+            "aws_category": "Proxy Avoidance",
+            "confidence": "high"
+        },
+        "real-estate": {
+            "aws_category": "Real Estate",
+            "confidence": "high"
+        },
+        "recreation-and-hobbies": {
+            "aws_category": "Hobbies and Interest",
+            "confidence": "high"
+        },
+        "religion": {
+            "aws_category": "Religion",
+            "confidence": "high"
+        },
+        "search-engines": {
+            "aws_category": "Search Engines and Portals",
+            "confidence": "high"
+        },
+        "sex-education": {
+            "aws_category": "Education",
+            "confidence": "low"
+        },
+        "shopping": {
+            "aws_category": "Shopping",
+            "confidence": "high"
+        },
+        "social-networking": {
+            "aws_category": "Social Networking",
+            "confidence": "high"
+        },
+        "society": {
+            "aws_category": "Lifestyle",
+            "confidence": "medium"
+        },
+        "sports": {
+            "aws_category": "Sports and Recreation",
+            "confidence": "high"
+        },
+        "stock-advice-and-tools": {
+            "aws_category": "Financial Services",
+            "confidence": "medium"
+        },
+        "streaming-media": {
+            "aws_category": "Entertainment",
+            "confidence": "medium"
+        },
+        "swimsuits-and-intimate-apparel": {
+            "aws_category": "Fashion",
+            "confidence": "medium"
+        },
+        "training-and-tools": {
+            "aws_category": "Education",
+            "confidence": "medium"
+        },
+        "translation": {
+            "aws_category": "Translation",
+            "confidence": "high"
+        },
+        "travel": {
+            "aws_category": "Travel",
+            "confidence": "high"
+        },
+        "weapons": {
+            "aws_category": "Criminal and Illegal Activities",
+            "confidence": "medium"
+        },
+        "web-advertisements": {
+            "aws_category": "Online Ads",
+            "confidence": "high"
+        },
+        "web-based-email": {
+            "aws_category": "Email",
+            "confidence": "high"
+        }
+    },
+
+    "application_default_ports": {
+        "_description": "Default ports for PA applications when service is 'application-default'. Used to determine Suricata destination port. Format: 'protocol/port'. Multiple ports separated by commas.",
+        "ssl": "tcp/443",
+        "web-browsing": "tcp/80",
+        "dns": "udp/53",
+        "ssh": "tcp/22",
+        "ftp": "tcp/21",
+        "smtp": "tcp/25",
+        "imap": "tcp/143",
+        "ntp": "udp/123",
+        "dhcp": "udp/67",
+        "smb": "tcp/445",
+        "kerberos": "tcp/88",
+        "quic": "udp/443",
+        "icmp": "icmp/any",
+        "tftp": "udp/69",
+        "dcerpc": "tcp/135",
+        "ikev2": "udp/500",
+        "snmp": "udp/161",
+        "syslog": "udp/514",
+        "ms-rdp": "tcp/3389",
+        "mysql": "tcp/3306",
+        "ms-sql": "tcp/1433",
+        "postgresql": "tcp/5432",
+        "ldap": "tcp/389",
+        "http2": "tcp/443",
+        "amazon-base": "tcp/443",
+        "apple-base": "tcp/443",
+        "aws-console": "tcp/443",
+        "azure-base": "tcp/443",
+        "bitbucket-base": "tcp/443",
+        "box-base": "tcp/443",
+        "confluence": "tcp/443",
+        "discord-base": "tcp/443",
+        "docker-base": "tcp/443",
+        "dropbox-base": "tcp/443",
+        "facebook-base": "tcp/443",
+        "facebook": "tcp/443",
+        "github-base": "tcp/443",
+        "gitlab-base": "tcp/443",
+        "google-base": "tcp/443",
+        "google-cloud-base": "tcp/443",
+        "google-drive-base": "tcp/443",
+        "heroku": "tcp/443",
+        "icloud-base": "tcp/443",
+        "instagram": "tcp/443",
+        "jira": "tcp/443",
+        "linkedin-base": "tcp/443",
+        "ms-teams": "tcp/443",
+        "netflix-base": "tcp/443",
+        "office365-base": "tcp/443",
+        "okta": "tcp/443",
+        "onedrive-base": "tcp/443",
+        "pinterest-base": "tcp/443",
+        "reddit-base": "tcp/443",
+        "salesforce-base": "tcp/443",
+        "servicenow-base": "tcp/443",
+        "signal": "tcp/443",
+        "skype-base": "tcp/443",
+        "slack-base": "tcp/443",
+        "snapchat": "tcp/443",
+        "spotify-base": "tcp/443",
+        "telegram-base": "tcp/443",
+        "tiktok-base": "tcp/443",
+        "tumblr-base": "tcp/443",
+        "twitch-base": "tcp/443",
+        "twitter-base": "tcp/443",
+        "vimeo-base": "tcp/443",
+        "webex-base": "tcp/443",
+        "whatsapp-base": "tcp/443",
+        "workday": "tcp/443",
+        "youtube-base": "tcp/443",
+        "zendesk-base": "tcp/443",
+        "zoom": "tcp/443"
+    },
+
+    "builtin_services": {
+        "_description": "PAN-OS built-in service names that are NOT defined in the export's <service> section. Maps service name to protocol and port. These are predefined in PAN-OS and commonly referenced in security rules.",
+        "service-http": {
+            "protocol": "tcp",
+            "port": "80"
+        },
+        "service-https": {
+            "protocol": "tcp",
+            "port": "443"
+        },
+        "service-ssh": {
+            "protocol": "tcp",
+            "port": "22"
+        },
+        "service-ftp": {
+            "protocol": "tcp",
+            "port": "21"
+        },
+        "service-smtp": {
+            "protocol": "tcp",
+            "port": "25"
+        },
+        "service-dns-tcp": {
+            "protocol": "tcp",
+            "port": "53"
+        },
+        "service-dns-udp": {
+            "protocol": "udp",
+            "port": "53"
+        },
+        "service-ldap": {
+            "protocol": "tcp",
+            "port": "389"
+        },
+        "service-ldaps": {
+            "protocol": "tcp",
+            "port": "636"
+        },
+        "service-imap": {
+            "protocol": "tcp",
+            "port": "143"
+        },
+        "service-imaps": {
+            "protocol": "tcp",
+            "port": "993"
+        },
+        "service-pop3": {
+            "protocol": "tcp",
+            "port": "110"
+        },
+        "service-pop3s": {
+            "protocol": "tcp",
+            "port": "995"
+        },
+        "service-smtps": {
+            "protocol": "tcp",
+            "port": "465"
+        },
+        "service-snmp": {
+            "protocol": "udp",
+            "port": "161"
+        },
+        "service-snmptrap": {
+            "protocol": "udp",
+            "port": "162"
+        },
+        "service-syslog": {
+            "protocol": "udp",
+            "port": "514"
+        },
+        "service-ntp": {
+            "protocol": "udp",
+            "port": "123"
+        },
+        "service-rdp": {
+            "protocol": "tcp",
+            "port": "3389"
+        },
+        "service-telnet": {
+            "protocol": "tcp",
+            "port": "23"
+        },
+        "service-tftp": {
+            "protocol": "udp",
+            "port": "69"
+        },
+        "service-smb": {
+            "protocol": "tcp",
+            "port": "445"
+        },
+        "service-kerberos": {
+            "protocol": "tcp",
+            "port": "88"
+        },
+        "service-radius": {
+            "protocol": "udp",
+            "port": "1812"
+        },
+        "service-radius-acct": {
+            "protocol": "udp",
+            "port": "1813"
+        },
+        "service-sip": {
+            "protocol": "udp",
+            "port": "5060"
+        },
+        "service-sip-tls": {
+            "protocol": "tcp",
+            "port": "5061"
+        },
+        "service-dhcp": {
+            "protocol": "udp",
+            "port": "67"
+        },
+        "service-mysql": {
+            "protocol": "tcp",
+            "port": "3306"
+        },
+        "service-ms-sql": {
+            "protocol": "tcp",
+            "port": "1433"
+        },
+        "service-postgresql": {
+            "protocol": "tcp",
+            "port": "5432"
+        },
+        "service-http-proxy": {
+            "protocol": "tcp",
+            "port": "8080"
+        },
+        "service-https-proxy": {
+            "protocol": "tcp",
+            "port": "8443"
+        }
+    },
+
+    "country_codes": {
+        "_description": "Complete ISO 3166-1 alpha-2 country codes (249 codes) used for detecting GeoIP members in source/destination fields. Values are country names for reference only.",
+        "AF": "Afghanistan",
+        "AX": "Aland Islands",
+        "AL": "Albania",
+        "DZ": "Algeria",
+        "AS": "American Samoa",
+        "AD": "Andorra",
+        "AO": "Angola",
+        "AI": "Anguilla",
+        "AQ": "Antarctica",
+        "AG": "Antigua and Barbuda",
+        "AR": "Argentina",
+        "AM": "Armenia",
+        "AW": "Aruba",
+        "AU": "Australia",
+        "AT": "Austria",
+        "AZ": "Azerbaijan",
+        "BS": "Bahamas",
+        "BH": "Bahrain",
+        "BD": "Bangladesh",
+        "BB": "Barbados",
+        "BY": "Belarus",
+        "BE": "Belgium",
+        "BZ": "Belize",
+        "BJ": "Benin",
+        "BM": "Bermuda",
+        "BT": "Bhutan",
+        "BO": "Bolivia",
+        "BQ": "Bonaire, Sint Eustatius and Saba",
+        "BA": "Bosnia and Herzegovina",
+        "BW": "Botswana",
+        "BV": "Bouvet Island",
+        "BR": "Brazil",
+        "IO": "British Indian Ocean Territory",
+        "BN": "Brunei Darussalam",
+        "BG": "Bulgaria",
+        "BF": "Burkina Faso",
+        "BI": "Burundi",
+        "CV": "Cabo Verde",
+        "KH": "Cambodia",
+        "CM": "Cameroon",
+        "CA": "Canada",
+        "KY": "Cayman Islands",
+        "CF": "Central African Republic",
+        "TD": "Chad",
+        "CL": "Chile",
+        "CN": "China",
+        "CX": "Christmas Island",
+        "CC": "Cocos (Keeling) Islands",
+        "CO": "Colombia",
+        "KM": "Comoros",
+        "CG": "Congo",
+        "CD": "Congo, Democratic Republic of the",
+        "CK": "Cook Islands",
+        "CR": "Costa Rica",
+        "CI": "Cote d'Ivoire",
+        "HR": "Croatia",
+        "CU": "Cuba",
+        "CW": "Curacao",
+        "CY": "Cyprus",
+        "CZ": "Czechia",
+        "DK": "Denmark",
+        "DJ": "Djibouti",
+        "DM": "Dominica",
+        "DO": "Dominican Republic",
+        "EC": "Ecuador",
+        "EG": "Egypt",
+        "SV": "El Salvador",
+        "GQ": "Equatorial Guinea",
+        "ER": "Eritrea",
+        "EE": "Estonia",
+        "SZ": "Eswatini",
+        "ET": "Ethiopia",
+        "FK": "Falkland Islands (Malvinas)",
+        "FO": "Faroe Islands",
+        "FJ": "Fiji",
+        "FI": "Finland",
+        "FR": "France",
+        "GF": "French Guiana",
+        "PF": "French Polynesia",
+        "TF": "French Southern Territories",
+        "GA": "Gabon",
+        "GM": "Gambia",
+        "GE": "Georgia",
+        "DE": "Germany",
+        "GH": "Ghana",
+        "GI": "Gibraltar",
+        "GR": "Greece",
+        "GL": "Greenland",
+        "GD": "Grenada",
+        "GP": "Guadeloupe",
+        "GU": "Guam",
+        "GT": "Guatemala",
+        "GG": "Guernsey",
+        "GN": "Guinea",
+        "GW": "Guinea-Bissau",
+        "GY": "Guyana",
+        "HT": "Haiti",
+        "HM": "Heard Island and McDonald Islands",
+        "VA": "Holy See",
+        "HN": "Honduras",
+        "HK": "Hong Kong",
+        "HU": "Hungary",
+        "IS": "Iceland",
+        "IN": "India",
+        "ID": "Indonesia",
+        "IR": "Iran",
+        "IQ": "Iraq",
+        "IE": "Ireland",
+        "IM": "Isle of Man",
+        "IL": "Israel",
+        "IT": "Italy",
+        "JM": "Jamaica",
+        "JP": "Japan",
+        "JE": "Jersey",
+        "JO": "Jordan",
+        "KZ": "Kazakhstan",
+        "KE": "Kenya",
+        "KI": "Kiribati",
+        "KP": "Korea, Democratic People's Republic of",
+        "KR": "Korea, Republic of",
+        "KW": "Kuwait",
+        "KG": "Kyrgyzstan",
+        "LA": "Lao People's Democratic Republic",
+        "LV": "Latvia",
+        "LB": "Lebanon",
+        "LS": "Lesotho",
+        "LR": "Liberia",
+        "LY": "Libya",
+        "LI": "Liechtenstein",
+        "LT": "Lithuania",
+        "LU": "Luxembourg",
+        "MO": "Macao",
+        "MG": "Madagascar",
+        "MW": "Malawi",
+        "MY": "Malaysia",
+        "MV": "Maldives",
+        "ML": "Mali",
+        "MT": "Malta",
+        "MH": "Marshall Islands",
+        "MQ": "Martinique",
+        "MR": "Mauritania",
+        "MU": "Mauritius",
+        "YT": "Mayotte",
+        "MX": "Mexico",
+        "FM": "Micronesia",
+        "MD": "Moldova",
+        "MC": "Monaco",
+        "MN": "Mongolia",
+        "ME": "Montenegro",
+        "MS": "Montserrat",
+        "MA": "Morocco",
+        "MZ": "Mozambique",
+        "MM": "Myanmar",
+        "NA": "Namibia",
+        "NR": "Nauru",
+        "NP": "Nepal",
+        "NL": "Netherlands",
+        "NC": "New Caledonia",
+        "NZ": "New Zealand",
+        "NI": "Nicaragua",
+        "NE": "Niger",
+        "NG": "Nigeria",
+        "NU": "Niue",
+        "NF": "Norfolk Island",
+        "MK": "North Macedonia",
+        "MP": "Northern Mariana Islands",
+        "NO": "Norway",
+        "OM": "Oman",
+        "PK": "Pakistan",
+        "PW": "Palau",
+        "PS": "Palestine, State of",
+        "PA": "Panama",
+        "PG": "Papua New Guinea",
+        "PY": "Paraguay",
+        "PE": "Peru",
+        "PH": "Philippines",
+        "PN": "Pitcairn",
+        "PL": "Poland",
+        "PT": "Portugal",
+        "PR": "Puerto Rico",
+        "QA": "Qatar",
+        "RE": "Reunion",
+        "RO": "Romania",
+        "RU": "Russian Federation",
+        "RW": "Rwanda",
+        "BL": "Saint Barthelemy",
+        "SH": "Saint Helena, Ascension and Tristan da Cunha",
+        "KN": "Saint Kitts and Nevis",
+        "LC": "Saint Lucia",
+        "MF": "Saint Martin (French part)",
+        "PM": "Saint Pierre and Miquelon",
+        "VC": "Saint Vincent and the Grenadines",
+        "WS": "Samoa",
+        "SM": "San Marino",
+        "ST": "Sao Tome and Principe",
+        "SA": "Saudi Arabia",
+        "SN": "Senegal",
+        "RS": "Serbia",
+        "SC": "Seychelles",
+        "SL": "Sierra Leone",
+        "SG": "Singapore",
+        "SX": "Sint Maarten (Dutch part)",
+        "SK": "Slovakia",
+        "SI": "Slovenia",
+        "SB": "Solomon Islands",
+        "SO": "Somalia",
+        "ZA": "South Africa",
+        "GS": "South Georgia and the South Sandwich Islands",
+        "SS": "South Sudan",
+        "ES": "Spain",
+        "LK": "Sri Lanka",
+        "SD": "Sudan",
+        "SR": "Suriname",
+        "SJ": "Svalbard and Jan Mayen",
+        "SE": "Sweden",
+        "CH": "Switzerland",
+        "SY": "Syrian Arab Republic",
+        "TW": "Taiwan",
+        "TJ": "Tajikistan",
+        "TZ": "Tanzania",
+        "TH": "Thailand",
+        "TL": "Timor-Leste",
+        "TG": "Togo",
+        "TK": "Tokelau",
+        "TO": "Tonga",
+        "TT": "Trinidad and Tobago",
+        "TN": "Tunisia",
+        "TR": "Turkey",
+        "TM": "Turkmenistan",
+        "TC": "Turks and Caicos Islands",
+        "TV": "Tuvalu",
+        "UG": "Uganda",
+        "UA": "Ukraine",
+        "AE": "United Arab Emirates",
+        "GB": "United Kingdom",
+        "US": "United States of America",
+        "UM": "United States Minor Outlying Islands",
+        "UY": "Uruguay",
+        "UZ": "Uzbekistan",
+        "VU": "Vanuatu",
+        "VE": "Venezuela",
+        "VN": "Viet Nam",
+        "VG": "Virgin Islands (British)",
+        "VI": "Virgin Islands (U.S.)",
+        "WF": "Wallis and Futuna",
+        "EH": "Western Sahara",
+        "YE": "Yemen",
+        "ZM": "Zambia",
+        "ZW": "Zimbabwe"
+    }
+}

@@ -2593,7 +2593,7 @@ class PaloAltoImporter:
         dialog.geometry("500x320")
         dialog.transient(self.parent.root)
         dialog.grab_set()
-        dialog.resizable(False, False)
+        dialog.resizable(True, True)
 
         # Center dialog
         dialog.geometry("+%d+%d" % (
@@ -2655,10 +2655,10 @@ class PaloAltoImporter:
         """Show Step 1 dialog: file selection and import options."""
         dialog = tk.Toplevel(self.parent.root)
         dialog.title("Import Palo Alto Configuration - Step 1")
-        dialog.geometry("550x380")
+        dialog.geometry("600x400")
         dialog.transient(self.parent.root)
         dialog.grab_set()
-        dialog.resizable(False, False)
+        dialog.resizable(True, True)
 
         dialog.geometry("+%d+%d" % (
             self.parent.root.winfo_rootx() + 150,
@@ -2782,7 +2782,7 @@ class PaloAltoImporter:
         dialog.geometry("600x420")
         dialog.transient(self.parent.root)
         dialog.grab_set()
-        dialog.resizable(False, False)
+        dialog.resizable(True, True)
 
         dialog.geometry("+%d+%d" % (
             self.parent.root.winfo_rootx() + 130,

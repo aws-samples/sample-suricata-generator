@@ -1,5 +1,14 @@
 # Release Notes
 
+## Palo Alto Importer v1.0.1-beta - March 15, 2026
+
+### Bug Fix: macOS Dialog Resizability
+- **Made all import wizard dialogs resizable**: Beta warning, Step 1 (file selection), and Step 1.5 (zone mapping) dialogs changed from fixed-size to resizable, fixing a macOS issue where the Browse button was cut off on the Step 1 dialog
+  - Step 1 default width also increased from 550px to 600px for better cross-platform fit
+  - Steps 2 and 3 were already resizable (no change)
+
+---
+
 ## Version 2.0.0 - March 14, 2026
 
 ### Project Restructuring

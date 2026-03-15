@@ -15,7 +15,7 @@ ANALYZER_VERSION = "1.11.0"
 FLOW_TESTER_VERSION = "1.2.0"
 
 # Palo Alto importer version (managed separately)
-PALO_ALTO_IMPORTER_VERSION = "1.0.0-beta"
+PALO_ALTO_IMPORTER_VERSION = "1.0.1-beta"
 
 
 def get_main_version() -> str:

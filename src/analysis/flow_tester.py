@@ -96,6 +96,17 @@ class FlowTester:
                 # Check for partial allow: handshake succeeded but established failed
                 if not established_passed and results['final_action'] in ['DROP', 'REJECT']:
                     results['partial_allow'] = True
+                elif established_passed:
+                    # Check if established phase had NO matching action rules at all
+                    # This means the handshake passed (TCP SYN/SYN-ACK/ACK succeeds) but
+                    # no rule governs the established/application-layer traffic.
+                    # A port scanner would show the port as "open" but the actual
+                    # application-layer outcome is undetermined.
+                    established_details = results.get('scope_details', {}).get('established', {})
+                    if (established_details.get('flow_scope_action') is None and
+                            established_details.get('packet_scope_action') is None):
+                        results['partial_allow'] = True
+                        results['final_action'] = 'PARTIAL_ALLOW'
         else:
             # Non-TCP protocols: test in single phase
             self._test_flow_phase(classified_rules, src_ip, src_port, dst_ip, dst_port,
@@ -778,9 +789,17 @@ class FlowTester:
         return self._ip_in_network(ip, network_spec)
     
     def _ip_matches_group(self, ip, group_content):
-        """Check if IP matches any item in a network group"""
+        """Check if IP matches any item in a network group
+        
+        Handles groups with mixed positive and negated items, as well as
+        all-negated groups like [!10.0.0.0/8,!172.16.0.0/12,!192.168.0.0/16].
+        
+        In Suricata, an all-negated group means "everything EXCEPT these ranges."
+        If the IP is not in any of the excluded ranges, it is considered included.
+        """
         items = [item.strip() for item in group_content.split(',')]
         included = False
+        has_positive_item = False
         for item in items:
             if not item:
                 continue
@@ -789,8 +808,14 @@ class FlowTester:
                 if self._ip_matches_network(ip, excluded_item):
                     return False
             else:
+                has_positive_item = True
                 if self._ip_matches_network(ip, item):
                     included = True
+        # If all items are negated and none excluded this IP, it's included
+        # This handles definitions like [!10.0.0.0/8,!172.16.0.0/12,!192.168.0.0/16]
+        # which means "everything EXCEPT these ranges"
+        if not has_positive_item:
+            return True
         return included
     
     def _ip_in_network(self, ip, network):

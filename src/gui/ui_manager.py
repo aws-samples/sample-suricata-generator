@@ -8598,6 +8598,10 @@ Would you like to run a complete analysis?"""
                         foreground="#D32F2F")
                 else:
                     final_label.config(text="BLOCKED", foreground="#D32F2F")
+            elif final_action == 'PARTIAL_ALLOW':
+                final_label.config(
+                    text="PARTIAL ALLOW - Handshake passes but no rule governs established traffic (port appears OPEN, app-layer outcome undetermined)",
+                    foreground="#FF6600")
             elif final_action == 'NO_RULES':
                 final_label.config(text="NO RULES TO EVALUATE", foreground="#FF6600")
             elif 'no matching rules' in final_action.lower():

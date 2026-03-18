@@ -1,5 +1,22 @@
 # Release Notes
 
+## Flow Tester Bug Fixes (v1.2.1) - March 17, 2026
+
+### Bug Fix 1: All-Negated Network Groups Not Matching External IPs
+- **Fixed $EXTERNAL_NET matching failure**: Corrected critical bug in `_ip_matches_group()` where IP addresses were never matched against all-negated network groups like `[!10.0.0.0/8,!172.16.0.0/12,!192.168.0.0/16]`
+  - **Root Cause**: The method tracked whether any positive (non-negated) item matched via an `included` flag, but when all items in the group were negations, there were no positive items to set `included = True` — so the method always returned `False`
+  - **Impact**: Every rule referencing `$EXTERNAL_NET` (when defined as the negation of `$HOME_NET`) failed to match any destination IP. The flow tester reported "no rules match" and "undetermined" for all flows targeting external IPs
+  - **Solution**: Added a `has_positive_item` flag. When all items in a group are negated and no exclusion matched the IP, the method now correctly returns `True` — matching Suricata's semantics where an all-negated group means "everything EXCEPT these ranges"
+
+### Bug Fix 2: Partial Allow Not Detected When Handshake Passes but No Established Rule Matches
+- **Fixed missing PARTIAL_ALLOW detection**: Corrected bug where flows that passed the TCP handshake but had no rule governing the established/application-layer phase were incorrectly reported as "ALLOWED"
+  - **Root Cause**: The existing `partial_allow` check only detected cases where the established phase was actively blocked (DROP/REJECT). When the established phase had zero matching action rules (both `flow_scope_action` and `packet_scope_action` were `None`), `_test_flow_phase` returned `True` and the final action remained "PASS" from the handshake
+  - **Impact**: A flow like `tls 10.0.0.10:1234 -> 8.8.8.8:443 www.notamazon.com` against a ruleset with only a handshake pass rule and a domain-specific TLS pass rule (for `.amazon.com`) would show as "ALLOWED" instead of indicating the undetermined outcome
+  - **Solution**: After the established phase completes, the code now checks `scope_details['established']` — if both flow and packet scope actions are `None`, it sets `partial_allow = True` and `final_action = 'PARTIAL_ALLOW'`
+  - **UI**: Added `PARTIAL_ALLOW` display in the flow test results, shown in orange: "PARTIAL ALLOW - Handshake passes but no rule governs established traffic (port appears OPEN, app-layer outcome undetermined)"
+
+---
+
 ## Palo Alto Importer v1.0.1-beta - March 15, 2026
 
 ### Bug Fix: macOS Dialog Resizability

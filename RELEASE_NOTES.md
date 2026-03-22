@@ -1,5 +1,34 @@
 # Release Notes
 
+## Version 2.1.0 - March 22, 2026
+
+### New Feature: AWS Managed Rule Group Analysis
+- **Complete Firewall Visibility in Rule Usage Analyzer**: Enhanced the CloudWatch Rule Usage Analyzer to include AWS managed rule groups alongside your custom rule groups, giving you full visibility across your entire firewall policy
+  - **Browse and Select Managed Rule Groups**: New "Add Managed Rule Groups" button in the "Configure Rule Usage Analysis" dialog opens a browser where you can browse all AWS managed rule groups (e.g., ThreatSignaturesPhishingActionOrder, MalwareDomainListActionOrder, BotNetCommandAndControlActionOrder) and select which ones to include in the analysis
+    - Multi-select checkbox interface for selecting multiple managed rule groups at once
+    - Displays rule count per group with search filtering by name
+    - Region inherited from the parent configuration dialog
+    - Selections remembered during the session for easy re-analysis
+  - **Combined CloudWatch Analysis**: Selected managed rule group SIDs are extracted via lightweight regex parsing and included alongside your custom rule SIDs in the CloudWatch Logs Insights query, providing hit counts for ALL rules in your firewall policy
+    - Fast SID extraction handles managed rule groups with thousands of rules (e.g., 4,050+ rules) in milliseconds
+    - No additional CloudWatch query cost — the same query runs against the same log group; only post-processing is expanded
+  - **New "All Rules" Tab (Tab 10)**: Comprehensive view showing every rule (custom + managed) with hit counts in a sortable, filterable table
+    - Columns: SID, Hits, Hits/Day, % Traffic, Last Hit, Source, Action, Message
+    - Filter controls for Source (custom file or individual managed rule group), Action (drop/alert/pass/reject), and Hits (all/has hits/unused/low-frequency)
+    - Column sorting with default by Hits descending
+    - Color-coded rows: custom rules in black, managed rules in teal (#2E8B8B)
+    - Export support in text and HTML formats
+  - **Enhanced Summary Tab**: New "Analysis Scope" section showing custom rule count, managed rule group breakdown (per-group rule counts), and total rules analyzed
+    - Per-group effectiveness summary: total rules, rules with hits, total hits
+    - Color legend explaining teal (managed) vs black (custom) distinction
+  - **Search Tab Integration**: Searching for a managed rule SID shows the managed rule group name as the source with teal color styling
+  - **Reduced Untracked Noise**: Managed rule SIDs are now recognized as "known" and excluded from the Untracked tab, reducing noise from SIDs that were previously unidentifiable
+  - **Health Score Unchanged**: Health score calculation remains custom-rules-only — managed rules are not included to avoid distorting the score, since users don't control managed rule content
+  - **Persistent Cache**: All managed rule group data (metadata, SIDs, per-SID statistics) saved to `.stats` files for instant offline access on subsequent opens without re-querying AWS
+  - **No New Dependencies**: Uses existing boto3 and AWS session management; requires read-only `network-firewall:ListRuleGroups` and `network-firewall:DescribeRuleGroup` permissions (most users already have these from the import feature)
+
+---
+
 ## Flow Tester Bug Fixes (v1.2.1) - March 17, 2026
 
 ### Bug Fix 1: All-Negated Network Groups Not Matching External IPs

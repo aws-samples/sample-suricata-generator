@@ -1,6 +1,6 @@
 # Suricata Rule Generator for AWS Network Firewall
 
-**Current Version: 2.0.0**
+**Current Version: 2.1.0**
 
 A GUI application for creating, editing, and managing Suricata rules - specifically designed for AWS Network Firewall deployments using strict rule ordering.
 
@@ -39,7 +39,7 @@ A GUI application for creating, editing, and managing Suricata rules - specifica
 - [AWS Profile Support](#aws-profile-support)
 - [Category-Based Domain Analysis](#category-based-domain-analysis)
 - [Bulk Domain Import](#bulk-domain-import)
-- [Palo Alto Configuration Import](#palo-alto-configuration-import) ⭐ NEW
+- [Palo Alto Configuration Import](#palo-alto-configuration-import)
 - [AWS Rule Group Import](#aws-rule-group-import)
 - [Rule Filtering](#rule-filtering)
 - [Bulk SID Management](#bulk-sid-management)
@@ -1477,7 +1477,7 @@ Savings: 8 rules → 2 rules (75% reduction)
 
 ## Palo Alto Configuration Import
 
-> 🔥 **Migrate from Palo Alto Networks to AWS Network Firewall** — convert PA security policies to Suricata rules automatically! ⭐ NEW in v1.33.0 (Beta)
+> 🔥 **Migrate from Palo Alto Networks to AWS Network Firewall** — convert PA security policies to Suricata rules automatically! (Beta)
 
 ![Import Palo Alto](images/palo_import.png)
 
@@ -2059,6 +2059,61 @@ The CloudWatch Rule Usage Analyzer provides **eight comprehensive analytical vie
 - **AWS default policy rules**: Alert/drop defaults not in your rule group
 - Excluded from all analysis calculations
 - Helps identify rules removed from file or applied by AWS policy
+
+### AWS Managed Rule Group Analysis ⭐ NEW in v2.1.0
+
+![All Rules Analysis](images/all_rules_analysis.png)
+
+> 🔭 **Complete firewall visibility** — analyze hit counts for ALL rules in your firewall policy, not just your custom rule group!
+
+When your AWS Network Firewall policy includes AWS managed rule groups (e.g., ThreatSignaturesPhishingActionOrder, MalwareDomainListActionOrder, BotNetCommandAndControlActionOrder), the analyzer can now include those managed rule SIDs alongside your custom rules — giving you a complete picture of your firewall's effectiveness.
+
+**Adding Managed Rule Groups to Analysis:**
+1. Open **Tools > Analyze Rule Usage**
+2. Configure region, log group, and time range as usual
+3. Click **"Browse Managed Rule Groups..."** in the new optional section
+4. Browse all AWS managed rule groups available in your region
+5. Check the managed rule groups attached to your firewall policy
+6. Click **OK** — selected groups are fetched and SIDs extracted
+7. Click **Analyze** — the analysis now includes both custom and managed SIDs
+
+**Managed Rule Group Browser:**
+- Multi-select checkbox interface for selecting multiple groups
+- Displays rule count per group (e.g., ThreatSignaturesPhishing: 4,050 rules)
+- Client-side search filtering by name
+- Region inherited from the configuration dialog
+- Selections remembered during the session for easy re-analysis
+
+**New "All Rules" Tab (Tab 10):**
+- Complete inventory of every rule (custom + managed) with hit counts
+- Sortable columns: SID, Hits, Hits/Day, % Traffic, Last Hit, Source, Action, Message
+- Filter by Source (custom file or specific managed rule group), Action, or Hits
+- Color-coded: custom rules in black, managed rules in teal
+- Export to text or HTML format
+
+**Enhanced Summary Tab:**
+- New "Analysis Scope" section showing custom rule count + managed rule group breakdown
+- Per-group effectiveness summary: total rules, rules with hits, total hits
+- Color legend explaining teal (managed) vs black (custom) distinction
+
+**Search Tab Integration:**
+- Searching for a managed rule SID shows the managed rule group name as the source
+
+**Key Benefits:**
+- **Complete Visibility**: See hit counts for ALL rules in your firewall policy
+- **Managed Rule Group Effectiveness**: Determine which managed rule groups are actively triggering
+- **Cost Optimization**: Identify managed rule groups with zero hits that could be removed to save capacity
+- **Reduced Untracked Noise**: Managed SIDs no longer appear in the Untracked tab
+- **No Additional CloudWatch Cost**: Same query runs — only post-processing is expanded
+- **Persistent Cache**: Managed rule group data saved in `.stats` files for offline access
+
+**Health Score:**
+- Remains custom-rules-only to avoid distortion (users don't control managed rule content)
+- Managed rule group effectiveness shown separately in the Summary tab
+
+**IAM Permissions:**
+- Requires `network-firewall:ListRuleGroups` and `network-firewall:DescribeRuleGroup` (read-only)
+- Most users already have these from the Import feature
 
 ### Right-Click Quick Lookup
 ![right_click](images/right_click.png)
@@ -2913,9 +2968,10 @@ Suricata internally classifies rules by their keywords and protocol:
 
 ### Advanced Features
 - ✅ **URL and Domain Category Filtering** *(v1.30.0)*: AWS-maintained category blocking (51 categories)
-- ✅ **Palo Alto Configuration Import** *(v1.33.0)*: Convert PA firewall policies to Suricata ⭐ NEW
+- ✅ **Palo Alto Configuration Import** *(v1.33.0)*: Convert PA firewall policies to Suricata
 - ✅ **AWS Profile Support** *(v1.32.0)*: Multi-account profile selector in status bar
 - ✅ **Category-Based Domain Analysis** *(v1.31.0)*: See which domains triggered each category rule
+- ✅ **AWS Managed Rule Group Analysis** *(v2.1.0)*: Complete firewall visibility with managed rule groups ⭐ NEW
 - ✅ **CloudWatch Rule Usage Analysis** *(v1.27.0)*: Production rule effectiveness analytics
 - ✅ **Analyze Traffic Costs** *(v1.29.0)*: VPC endpoint recommendations and cost analysis
 - ✅ **AWS Direct Import** *(v1.27.3)*: Browse and import rule groups directly from AWS

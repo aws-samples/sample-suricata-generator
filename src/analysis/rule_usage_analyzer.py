@@ -9,12 +9,14 @@ comprehensive analytics including:
 - Overly-broad rule detection (security risks)
 - Rule effectiveness analysis (Pareto principle)
 - Efficiency tier classification
+- AWS managed rule group analysis (optional)
 
 Dependencies:
 - boto3 (optional) - AWS SDK for Python. Feature gracefully degrades if not installed.
 """
 
 import datetime
+import re
 from typing import Dict, List, Optional, Tuple, Set
 from datetime import datetime, timedelta
 import time
@@ -120,6 +122,80 @@ class RuleUsageAnalyzer:
         """
         return HAS_BOTO3
     
+    @staticmethod
+    def extract_sids_from_rules_string(rules_string: str) -> List[int]:
+        """Extract SIDs from a Suricata rules string without full parsing.
+        
+        Uses regex to find sid:N patterns, which is much faster than
+        full SuricataRule.from_string() parsing for large rule sets.
+        Designed for extracting SIDs from AWS managed rule groups which
+        can contain 4,000-10,000+ rules.
+        
+        Args:
+            rules_string: Raw Suricata rules string from RulesSource.RulesString
+            
+        Returns:
+            List of integer SIDs found in the rules
+        """
+        sids = []
+        if not rules_string:
+            return sids
+        for match in re.finditer(r'\bsid\s*:\s*(\d+)\s*;', rules_string):
+            try:
+                sids.append(int(match.group(1)))
+            except ValueError:
+                continue
+        return sids
+    
+    @staticmethod
+    def extract_rule_metadata_from_rules_string(rules_string: str) -> List[Dict]:
+        """Extract SID, action, and message from a Suricata rules string.
+        
+        Returns metadata for display in the All Rules tab without full parsing.
+        This is much faster than full SuricataRule.from_string() parsing because
+        it doesn't parse the full rule structure (networks, ports, all options).
+        For 10,000 rules it completes in well under a second.
+        
+        Args:
+            rules_string: Raw Suricata rules string from RulesSource.RulesString
+            
+        Returns:
+            List of dicts with 'sid' (int), 'action' (str), 'msg' (str) keys
+        """
+        rules_metadata = []
+        if not rules_string:
+            return rules_metadata
+        
+        for line in rules_string.split('\n'):
+            line = line.strip()
+            if not line or line.startswith('#'):
+                continue
+            
+            # Extract action (first word on the line)
+            action_match = re.match(r'^(\w+)\s', line)
+            action = action_match.group(1) if action_match else 'unknown'
+            
+            # Extract SID
+            sid_match = re.search(r'\bsid\s*:\s*(\d+)\s*;', line)
+            if not sid_match:
+                continue
+            try:
+                sid = int(sid_match.group(1))
+            except ValueError:
+                continue
+            
+            # Extract message
+            msg_match = re.search(r'\bmsg\s*:\s*"([^"]*)"', line)
+            msg = msg_match.group(1) if msg_match else ''
+            
+            rules_metadata.append({
+                'sid': sid,
+                'action': action,
+                'msg': msg
+            })
+        
+        return rules_metadata
+    
     def analyze_rules(
         self,
         rule_sids: List[int],
@@ -133,7 +209,10 @@ class RuleUsageAnalyzer:
         region: Optional[str] = None,
         start_date=None,
         end_date=None,
-        aws_session=None
+        aws_session=None,
+        managed_rule_sids: Optional[Dict[str, List[int]]] = None,
+        managed_rule_groups: Optional[List[Dict]] = None,
+        managed_rule_metadata: Optional[Dict[str, List[Dict]]] = None
     ) -> Optional[Dict]:
         """Analyze rule usage from CloudWatch Logs
         
@@ -150,6 +229,13 @@ class RuleUsageAnalyzer:
             start_date: Optional custom start date (datetime.date) for custom date range
             end_date: Optional custom end date (datetime.date) for custom date range
             aws_session: Optional AWSSessionManager instance for centralized credential management
+            managed_rule_sids: Optional dict mapping managed rule group name to list of SIDs.
+                Example: {"ThreatSignaturesPhishing": [1, 2, 3, ...]}
+            managed_rule_groups: Optional list of metadata dicts for each managed group.
+                Example: [{"name": "...", "arn": "...", "rule_count": N}, ...]
+            managed_rule_metadata: Optional dict mapping managed rule group name to list of
+                metadata dicts with 'sid', 'action', 'msg' keys (for All Rules tab display).
+                Example: {"ThreatSignaturesPhishing": [{"sid": 1, "action": "alert", "msg": "..."}, ...]}
             
         Returns:
             Dict with comprehensive analysis results, or None if cancelled/failed
@@ -242,6 +328,21 @@ class RuleUsageAnalyzer:
             # These rules don't write to CloudWatch, so they can't be tracked
             logged_file_sids = file_sids - unlogged_sids
             
+            # Build managed rule group SID sets (if any managed groups were selected)
+            all_managed_sids = set()
+            managed_sid_to_group = {}  # Maps SID → group name for display
+            if managed_rule_sids:
+                for group_name, sids in managed_rule_sids.items():
+                    for sid in sids:
+                        all_managed_sids.add(sid)
+                        # If SID appears in multiple groups, last one wins (rare edge case)
+                        # If SID also exists in custom rules, custom takes precedence in display
+                        if sid not in file_sids:
+                            managed_sid_to_group[sid] = group_name
+            
+            # Combined set of all known SIDs (custom + managed) for untracked calculation
+            all_known_sids = file_sids | all_managed_sids
+            
             # Check if we hit the 10,000 limit and may need pagination
             # Use 9999 threshold to detect when exactly at limit
             # OR debug mode enabled for testing
@@ -276,12 +377,14 @@ class RuleUsageAnalyzer:
             triggered_sids = set(sid_stats.keys())
             unused_sids = logged_file_sids - triggered_sids
             
-            # NEW: Identify untracked SIDs (in CloudWatch but not in file)
+            # Identify untracked SIDs (in CloudWatch but not in any known source)
             # These are rules that exist in CloudWatch logs but not in the current rule file
+            # AND not in any selected managed rule groups.
             # This can happen when:
             # - User recently deleted/commented out rules (still in CloudWatch during timeframe)
             # - AWS applies default firewall policy rules (not in user's rules file)
-            untracked_sids = triggered_sids - file_sids
+            # - Managed rule groups are attached but not selected for analysis
+            untracked_sids = triggered_sids - all_known_sids
             
             # Track if results are partial (for UI warning badge)
             # Check if choice is not None before comparing (user may have cancelled)
@@ -328,18 +431,22 @@ class RuleUsageAnalyzer:
                     'last_modified': None
                 }
             
-            # Calculate category counts (exclude untracked SIDs from all categories except 'untracked')
+            # Calculate category counts (exclude untracked AND managed SIDs from custom-only categories)
+            # Managed SIDs are excluded from category counts because the existing tabs
+            # (Unused, Low-Freq, Effectiveness, Tiers) show custom rules only
+            non_custom_sids = untracked_sids | all_managed_sids
             categories = {
                 'unused': len(unused_sids),
-                'low_freq': len([sid for sid, s in sid_stats.items() if s.get('category') == 'low_freq' and sid not in untracked_sids]),
-                'medium': len([sid for sid, s in sid_stats.items() if s.get('category') == 'medium' and sid not in untracked_sids]),
-                'high': len([sid for sid, s in sid_stats.items() if s.get('category') == 'high' and sid not in untracked_sids]),
+                'low_freq': len([sid for sid, s in sid_stats.items() if s.get('category') == 'low_freq' and sid not in non_custom_sids]),
+                'medium': len([sid for sid, s in sid_stats.items() if s.get('category') == 'medium' and sid not in non_custom_sids]),
+                'high': len([sid for sid, s in sid_stats.items() if s.get('category') == 'high' and sid not in non_custom_sids]),
                 'unlogged': len(unlogged_sids),
                 'untracked': len(untracked_sids)
             }
             
             # Count broad rules (rules handling >10% of traffic - security risks)
-            broad_rule_count = len([sid for sid, s in sid_stats.items() if s.get('percent', 0) > 10 and sid not in untracked_sids])
+            # Only count custom rules for this metric
+            broad_rule_count = len([sid for sid, s in sid_stats.items() if s.get('percent', 0) > 10 and sid not in non_custom_sids])
             
             # Calculate health score using only logged rules
             # Unlogged rules are excluded because they can't be tracked via CloudWatch
@@ -376,14 +483,20 @@ class RuleUsageAnalyzer:
                 'sid_stats': sid_stats,
                 'unused_sids': unused_sids,
                 'unlogged_sids': unlogged_sids,  # Track unlogged rules
-                'untracked_sids': untracked_sids,  # NEW: Track untracked rules (in CloudWatch but not in file)
+                'untracked_sids': untracked_sids,  # Track untracked rules (in CloudWatch but not in any known source)
                 'file_sids': list(file_sids),  # BUG FIX #3: Add file_sids for right-click menu
                 'categories': categories,
                 'health_score': health_score,
                 'low_freq_threshold': low_frequency_threshold,
                 'min_days_in_production': min_days_in_production,
                 'partial_results': partial_results,  # CloudWatch pagination: track if results are partial
-                'category_analysis': category_data  # Category domain analysis data
+                'category_analysis': category_data,  # Category domain analysis data
+                # Managed rule group data (empty defaults when no managed groups selected)
+                'managed_rule_groups': managed_rule_groups or [],
+                'managed_rule_sids': managed_rule_sids or {},
+                'managed_rule_metadata': managed_rule_metadata or {},
+                'managed_sid_to_group': managed_sid_to_group,
+                'total_managed_rules': len(all_managed_sids),
             }
             
             return self.last_analysis_results

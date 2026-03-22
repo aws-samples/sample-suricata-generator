@@ -299,7 +299,7 @@ class UIManager:
         """Show configuration dialog for CloudWatch analysis"""
         dialog = tk.Toplevel(self.parent.root)
         dialog.title("Configure Rule Usage Analysis")
-        dialog.geometry("550x700")
+        dialog.geometry("550x850")
         dialog.transient(self.parent.root)
         dialog.grab_set()
         
@@ -452,7 +452,78 @@ class UIManager:
                               font=("TkDefaultFont", 8), foreground="#666666",
                               justify=tk.LEFT)
         help_label.pack(anchor=tk.W)
-        
+
+        # --- AWS Managed Rule Groups (Optional) --- NEW SECTION
+        managed_frame = ttk.LabelFrame(main_frame, text="AWS Managed Rule Groups (Optional)")
+        managed_frame.pack(fill=tk.X, pady=(0, 15))
+
+        managed_content = ttk.Frame(managed_frame)
+        managed_content.pack(fill=tk.X, padx=10, pady=10)
+
+        ttk.Label(managed_content,
+                  text="Include managed rule groups in analysis to get complete\n"
+                       "visibility across your entire firewall policy.",
+                  font=("TkDefaultFont", 8), foreground="#666666",
+                  justify=tk.LEFT).pack(anchor=tk.W, pady=(0, 8))
+
+        managed_btn_frame = ttk.Frame(managed_content)
+        managed_btn_frame.pack(fill=tk.X)
+
+        def on_browse_managed():
+            """Open the managed rule group browser dialog"""
+            selected_region = region_var.get()
+            result = self._show_managed_rule_group_browser(dialog, selected_region)
+            if result is not None:
+                # result is a list of selected group dicts
+                self.parent._managed_rule_group_selections = result
+                _update_managed_summary()
+
+        ttk.Button(managed_btn_frame, text="Browse Managed Rule Groups...",
+                   command=on_browse_managed).pack(side=tk.LEFT)
+
+        def on_clear_managed():
+            """Clear managed rule group selections"""
+            self.parent._managed_rule_group_selections = []
+            _update_managed_summary()
+
+        clear_btn = ttk.Button(managed_btn_frame, text="Clear", command=on_clear_managed)
+
+        # Summary label showing current selections
+        managed_summary_label = ttk.Label(managed_content, text="Selected: (none)",
+                                          font=("TkDefaultFont", 8))
+        managed_summary_label.pack(anchor=tk.W, pady=(8, 0))
+
+        # Detail label for listing selected groups
+        managed_detail_label = ttk.Label(managed_content, text="",
+                                         font=("TkDefaultFont", 8), foreground="#555555",
+                                         justify=tk.LEFT)
+
+        def _update_managed_summary():
+            """Update the managed rule group summary display"""
+            selections = getattr(self.parent, '_managed_rule_group_selections', [])
+            if selections:
+                total_rules = sum(g.get('rule_count', 0) for g in selections)
+                managed_summary_label.config(
+                    text=f"✓ {len(selections)} managed rule group{'s' if len(selections) != 1 else ''} "
+                         f"selected ({total_rules:,} rules)",
+                    foreground="#2E7D32"
+                )
+                # Show detail list
+                detail_lines = []
+                for g in selections:
+                    detail_lines.append(f"  • {g['name']} ({g.get('rule_count', '?'):,} rules)")
+                managed_detail_label.config(text="\n".join(detail_lines))
+                managed_detail_label.pack(anchor=tk.W, pady=(2, 0))
+                # Show clear button
+                clear_btn.pack(side=tk.LEFT, padx=(10, 0))
+            else:
+                managed_summary_label.config(text="Selected: (none)", foreground="#333333")
+                managed_detail_label.pack_forget()
+                clear_btn.pack_forget()
+
+        # Initialize display from session memory
+        _update_managed_summary()
+
         # Time Range - remember last selected during session
         ttk.Label(main_frame, text="Analysis Time Range:").pack(anchor=tk.W, pady=(0, 5))
         time_frame = ttk.Frame(main_frame)
@@ -636,6 +707,435 @@ class UIManager:
         
         ttk.Button(button_frame, text="Analyze", command=on_analyze).pack(side=tk.LEFT, padx=5)
         ttk.Button(button_frame, text="Cancel", command=dialog.destroy).pack(side=tk.LEFT, padx=5)
+    
+    def _show_managed_rule_group_browser(self, parent_dialog, region):
+        """Show multi-select browser dialog for AWS managed rule groups
+        
+        Allows users to browse, search, and select AWS managed rule groups.
+        On OK, fetches rule details and extracts SIDs/metadata for analysis.
+        
+        Args:
+            parent_dialog: Parent configuration dialog (for positioning)
+            region: AWS region to query
+            
+        Returns:
+            List of dicts with keys: name, arn, sids, metadata, rule_count
+            or None if cancelled
+        """
+        from src.analysis.rule_usage_analyzer import RuleUsageAnalyzer, HAS_BOTO3
+        
+        if not HAS_BOTO3:
+            messagebox.showerror("boto3 Required", "boto3 is required for AWS managed rule group browsing.")
+            return None
+        
+        # Create browse dialog
+        dialog = tk.Toplevel(parent_dialog)
+        dialog.title("Select AWS Managed Rule Groups")
+        dialog.geometry("750x600")
+        dialog.transient(parent_dialog)
+        dialog.grab_set()
+        dialog.resizable(True, True)
+        
+        # Center dialog on parent
+        dialog.geometry("+%d+%d" % (
+            parent_dialog.winfo_rootx() + 50,
+            parent_dialog.winfo_rooty() + 30
+        ))
+        
+        main_frame = ttk.Frame(dialog)
+        main_frame.pack(fill=tk.BOTH, expand=True, padx=15, pady=15)
+        
+        # Title and region
+        header_frame = ttk.Frame(main_frame)
+        header_frame.pack(fill=tk.X, pady=(0, 10))
+        
+        ttk.Label(header_frame, text="Select AWS Managed Rule Groups",
+                 font=("TkDefaultFont", 11, "bold")).pack(side=tk.LEFT)
+        ttk.Label(header_frame, text=f"Region: {region}",
+                 font=("TkDefaultFont", 9), foreground="#666666").pack(side=tk.RIGHT)
+        
+        # Search bar
+        search_frame = ttk.Frame(main_frame)
+        search_frame.pack(fill=tk.X, pady=(0, 10))
+        
+        ttk.Label(search_frame, text="Search:").pack(side=tk.LEFT, padx=(0, 5))
+        search_var = tk.StringVar()
+        search_entry = ttk.Entry(search_frame, textvariable=search_var, width=40)
+        search_entry.pack(side=tk.LEFT, padx=(0, 10))
+        
+        def refresh_list():
+            """Re-fetch managed rule groups from AWS"""
+            load_managed_groups()
+        
+        ttk.Button(search_frame, text="↻ Refresh", command=refresh_list).pack(side=tk.RIGHT)
+        
+        # Treeview with checkboxes (multi-select)
+        tree_container = ttk.Frame(main_frame)
+        tree_container.pack(fill=tk.BOTH, expand=True, pady=(0, 10))
+        
+        columns = ("Name",)
+        tree = ttk.Treeview(tree_container, columns=columns, show="tree headings",
+                           selectmode="none")  # We handle selection via checkboxes
+        
+        tree.heading("#0", text="☐")
+        tree.heading("Name", text="Managed Rule Group Name")
+        
+        tree.column("#0", width=35, stretch=False)
+        tree.column("Name", width=650, stretch=True)
+        
+        # Scrollbars
+        v_scrollbar = ttk.Scrollbar(tree_container, orient=tk.VERTICAL, command=tree.yview)
+        h_scrollbar = ttk.Scrollbar(tree_container, orient=tk.HORIZONTAL, command=tree.xview)
+        tree.configure(yscrollcommand=v_scrollbar.set, xscrollcommand=h_scrollbar.set)
+        
+        tree.grid(row=0, column=0, sticky="nsew")
+        v_scrollbar.grid(row=0, column=1, sticky="ns")
+        h_scrollbar.grid(row=1, column=0, sticky="ew")
+        
+        tree_container.grid_rowconfigure(0, weight=1)
+        tree_container.grid_columnconfigure(0, weight=1)
+        
+        # Status bar
+        status_label = ttk.Label(main_frame, text="", font=("TkDefaultFont", 9))
+        status_label.pack(fill=tk.X, pady=(0, 5))
+        
+        # Info text
+        ttk.Label(main_frame,
+                  text="⚠️  Fetching rule details requires describe-rule-group API calls.\n"
+                       "Large rule groups may take a few seconds to process.",
+                  font=("TkDefaultFont", 8), foreground="#666666",
+                  justify=tk.LEFT).pack(anchor=tk.W, pady=(0, 10))
+        
+        # Data storage
+        all_groups = []       # Full list of {name, arn} from API
+        checked_arns = set()  # Set of ARNs currently checked
+        all_items = {}        # Map item_id -> group dict
+        result = [None]       # Mutable result container
+        
+        # Build initial checked set from session memory
+        previous_selections = getattr(self.parent, '_managed_rule_group_selections', [])
+        for g in previous_selections:
+            checked_arns.add(g.get('arn', ''))
+        
+        def update_status():
+            """Update status label with selection count"""
+            count = len(checked_arns)
+            if count > 0:
+                status_label.config(text=f"Selected: {count} managed rule group{'s' if count != 1 else ''}")
+            else:
+                status_label.config(text="Selected: (none)")
+        
+        def toggle_check(event):
+            """Toggle checkbox on click"""
+            item = tree.identify_row(event.y)
+            if not item:
+                return
+            
+            group = all_items.get(item)
+            if not group:
+                return
+            
+            arn = group['arn']
+            if arn in checked_arns:
+                checked_arns.discard(arn)
+                tree.item(item, text="☐")
+            else:
+                checked_arns.add(arn)
+                tree.item(item, text="☑")
+            
+            update_status()
+        
+        tree.bind("<Button-1>", toggle_check)
+        
+        def filter_tree(*args):
+            """Client-side filter by search text"""
+            search_text = search_var.get().lower()
+            
+            # Clear tree
+            tree.delete(*tree.get_children())
+            all_items.clear()
+            
+            # Re-populate with filtered items
+            for group in all_groups:
+                if search_text and search_text not in group['name'].lower():
+                    continue
+                
+                check = "☑" if group['arn'] in checked_arns else "☐"
+                item_id = tree.insert("", tk.END, text=check,
+                                     values=(group['name'],))
+                all_items[item_id] = group
+        
+        search_var.trace_add('write', filter_tree)
+        
+        def load_managed_groups():
+            """Fetch managed rule groups from AWS"""
+            # Show progress
+            progress = tk.Toplevel(dialog)
+            progress.title("Loading Managed Rule Groups")
+            progress.geometry("350x100")
+            progress.transient(dialog)
+            progress.grab_set()
+            progress.resizable(False, False)
+            progress.geometry("+%d+%d" % (
+                dialog.winfo_rootx() + 200,
+                dialog.winfo_rooty() + 200
+            ))
+            
+            ttk.Label(progress, text="Fetching managed rule groups from AWS...",
+                     font=("TkDefaultFont", 10)).pack(pady=20)
+            prog_bar = ttk.Progressbar(progress, mode='indeterminate', length=300)
+            prog_bar.pack(pady=10)
+            prog_bar.start(10)
+            
+            dialog.update()
+            progress.update()
+            
+            try:
+                client = self.parent.aws_session.get_client('network-firewall', region_name=region)
+                
+                managed_groups = []
+                # Fetch MANAGED STATEFUL rule groups
+                response = client.list_rule_groups(
+                    Scope='MANAGED',
+                    Type='STATEFUL',
+                    MaxResults=100
+                )
+                
+                for rg in response.get('RuleGroups', []):
+                    managed_groups.append({
+                        'name': rg['Name'],
+                        'arn': rg['Arn']
+                    })
+                
+                # Sort by name
+                managed_groups.sort(key=lambda x: x['name'])
+                
+                progress.destroy()
+                
+                # Store and populate tree
+                all_groups.clear()
+                all_groups.extend(managed_groups)
+                
+                # Clear and rebuild tree
+                tree.delete(*tree.get_children())
+                all_items.clear()
+                
+                if not managed_groups:
+                    status_label.config(
+                        text=f"No managed rule groups found in {region}. "
+                             "AWS managed rule groups may not be available in this region."
+                    )
+                    return
+                
+                for group in managed_groups:
+                    check = "☑" if group['arn'] in checked_arns else "☐"
+                    item_id = tree.insert("", tk.END, text=check,
+                                         values=(group['name'],))
+                    all_items[item_id] = group
+                
+                status_label.config(
+                    text=f"Showing {len(managed_groups)} managed rule groups in {region}"
+                )
+                update_status()
+                
+            except Exception as e:
+                progress.destroy()
+                error_msg = str(e)
+                
+                if "NoCredentials" in error_msg:
+                    profile_display = self.parent.aws_session.display_name if hasattr(self.parent.aws_session, 'display_name') else '(default)'
+                    messagebox.showerror(
+                        "AWS Credentials Not Found",
+                        f"AWS credentials are not configured for profile '{profile_display}'.\n\n"
+                        "Please configure credentials using:\n"
+                        f"• AWS CLI: aws configure" + (f" --profile {profile_display}" if profile_display != '(default)' else "") + "\n\n"
+                        "Or select a different profile from the status bar dropdown.",
+                        parent=dialog
+                    )
+                    dialog.destroy()
+                elif "AccessDenied" in error_msg:
+                    messagebox.showerror(
+                        "Insufficient AWS Permissions",
+                        "Your AWS credentials don't have permission to list managed rule groups.\n\n"
+                        "Required IAM permission:\n"
+                        "• network-firewall:ListRuleGroups\n\n"
+                        "Please contact your AWS administrator.",
+                        parent=dialog
+                    )
+                    dialog.destroy()
+                elif "timeout" in error_msg.lower():
+                    messagebox.showerror(
+                        "Connection Timeout",
+                        "Cannot connect to AWS Network Firewall service.\n\n"
+                        "Please check:\n"
+                        "• Internet connection is active\n"
+                        "• Firewall/proxy allows AWS API access\n"
+                        "• Selected region is correct",
+                        parent=dialog
+                    )
+                    dialog.destroy()
+                else:
+                    messagebox.showerror("Error",
+                        f"Failed to load managed rule groups:\n\n{error_msg}",
+                        parent=dialog
+                    )
+                    dialog.destroy()
+        
+        def on_select_all():
+            """Check all visible items"""
+            for item_id, group in all_items.items():
+                checked_arns.add(group['arn'])
+                tree.item(item_id, text="☑")
+            update_status()
+        
+        def on_clear_all():
+            """Uncheck all items"""
+            checked_arns.clear()
+            for item_id in all_items:
+                tree.item(item_id, text="☐")
+            update_status()
+        
+        def on_ok():
+            """Fetch details for selected groups and return results"""
+            # Build list of selected groups
+            selected = [g for g in all_groups if g['arn'] in checked_arns]
+            
+            if not selected:
+                # No selection — return empty list (clears any previous selections)
+                result[0] = []
+                dialog.destroy()
+                return
+            
+            # Show progress dialog for fetching details
+            fetch_dialog = tk.Toplevel(dialog)
+            fetch_dialog.title("Fetching Rule Group Details")
+            fetch_dialog.geometry("400x150")
+            fetch_dialog.transient(dialog)
+            fetch_dialog.grab_set()
+            fetch_dialog.resizable(False, False)
+            fetch_dialog.geometry("+%d+%d" % (
+                dialog.winfo_rootx() + 175,
+                dialog.winfo_rooty() + 200
+            ))
+            
+            fetch_frame = ttk.Frame(fetch_dialog)
+            fetch_frame.pack(fill=tk.BOTH, expand=True, padx=20, pady=20)
+            
+            fetch_status = ttk.Label(fetch_frame, text="Preparing...",
+                                    font=("TkDefaultFont", 10))
+            fetch_status.pack(pady=(0, 10))
+            
+            fetch_bar = ttk.Progressbar(fetch_frame, mode='determinate',
+                                       length=350, maximum=len(selected))
+            fetch_bar.pack(pady=5)
+            
+            fetch_count = ttk.Label(fetch_frame, text=f"0 / {len(selected)}",
+                                   font=("TkDefaultFont", 9))
+            fetch_count.pack(pady=5)
+            
+            dialog.update()
+            fetch_dialog.update()
+            
+            # Fetch details for each selected group
+            fetched_groups = []
+            try:
+                client = self.parent.aws_session.get_client('network-firewall', region_name=region)
+                
+                for i, group in enumerate(selected):
+                    fetch_status.config(text=f"Fetching {group['name']}...")
+                    fetch_bar['value'] = i
+                    fetch_count.config(text=f"{i} / {len(selected)}")
+                    fetch_dialog.update()
+                    
+                    try:
+                        response = client.describe_rule_group(
+                            RuleGroupArn=group['arn'],
+                            Type='STATEFUL'
+                        )
+                        
+                        rules_source = response.get('RuleGroup', {}).get('RulesSource', {})
+                        rules_string = rules_source.get('RulesString', '')
+                        
+                        # Extract full metadata (SID + action + msg)
+                        metadata = RuleUsageAnalyzer.extract_rule_metadata_from_rules_string(rules_string)
+                        sids = [r['sid'] for r in metadata]
+                        
+                        fetched_groups.append({
+                            'name': group['name'],
+                            'arn': group['arn'],
+                            'sids': sids,
+                            'metadata': metadata,
+                            'rule_count': len(sids)
+                        })
+                        
+                    except Exception as e:
+                        # Log error but continue with other groups
+                        error_str = str(e)
+                        if "AccessDenied" in error_str:
+                            messagebox.showwarning(
+                                "Access Denied",
+                                f"Cannot access rule group: {group['name']}\n\n"
+                                "Required permission: network-firewall:DescribeRuleGroup\n\n"
+                                "This group will be skipped.",
+                                parent=fetch_dialog
+                            )
+                        else:
+                            messagebox.showwarning(
+                                "Fetch Error",
+                                f"Failed to fetch {group['name']}:\n{error_str[:80]}\n\n"
+                                "This group will be skipped.",
+                                parent=fetch_dialog
+                            )
+                
+                # Final update
+                fetch_bar['value'] = len(selected)
+                fetch_count.config(text=f"{len(selected)} / {len(selected)}")
+                fetch_dialog.update()
+                
+                fetch_dialog.destroy()
+                
+                if fetched_groups:
+                    result[0] = fetched_groups
+                else:
+                    result[0] = []
+                    messagebox.showwarning(
+                        "No Groups Fetched",
+                        "Could not fetch details for any of the selected managed rule groups.",
+                        parent=dialog
+                    )
+                
+                dialog.destroy()
+                
+            except Exception as e:
+                fetch_dialog.destroy()
+                messagebox.showerror("Error",
+                    f"Failed to fetch managed rule group details:\n\n{str(e)}",
+                    parent=dialog
+                )
+        
+        def on_cancel():
+            """Cancel without changing selections"""
+            result[0] = None
+            dialog.destroy()
+        
+        # Buttons
+        button_frame = ttk.Frame(main_frame)
+        button_frame.pack(fill=tk.X)
+        
+        ttk.Button(button_frame, text="Select All", command=on_select_all).pack(side=tk.LEFT, padx=(0, 5))
+        ttk.Button(button_frame, text="Clear All", command=on_clear_all).pack(side=tk.LEFT, padx=(0, 5))
+        
+        ttk.Button(button_frame, text="Cancel", command=on_cancel).pack(side=tk.RIGHT, padx=(5, 0))
+        ttk.Button(button_frame, text="OK", command=on_ok).pack(side=tk.RIGHT)
+        
+        # Load managed rule groups
+        dialog.after(200, load_managed_groups)
+        
+        # Wait for dialog
+        if dialog.winfo_exists():
+            dialog.wait_window()
+        
+        return result[0]
     
     def _get_rule_age_days(self, sid):
         """Get the age of a rule in days based on revision history
@@ -931,6 +1431,21 @@ class UIManager:
                 # Inject the handler
                 self.parent.usage_analyzer._handle_potential_incompleteness = handle_incompleteness
                 
+                # Gather managed rule group data from session memory (Phase 2: Managed Rule Groups)
+                managed_selections = getattr(self.parent, '_managed_rule_group_selections', [])
+                managed_rule_sids = {}
+                managed_rule_groups_meta = []
+                managed_rule_metadata = {}
+                
+                for group in managed_selections:
+                    managed_rule_sids[group['name']] = group.get('sids', [])
+                    managed_rule_metadata[group['name']] = group.get('metadata', [])
+                    managed_rule_groups_meta.append({
+                        'name': group['name'],
+                        'arn': group.get('arn', ''),
+                        'rule_count': group.get('rule_count', 0)
+                    })
+                
                 # Run CloudWatch query with selected region
                 analysis_results = self.parent.usage_analyzer.analyze_rules(
                     rule_sids=rule_sids,
@@ -944,7 +1459,10 @@ class UIManager:
                     region=region,  # Pass selected region to analyzer
                     start_date=start_date,  # Custom date range (None for preset ranges)
                     end_date=end_date,
-                    aws_session=self.parent.aws_session  # Pass session manager for profile support
+                    aws_session=self.parent.aws_session,  # Pass session manager for profile support
+                    managed_rule_sids=managed_rule_sids if managed_rule_sids else None,
+                    managed_rule_groups=managed_rule_groups_meta if managed_rule_groups_meta else None,
+                    managed_rule_metadata=managed_rule_metadata if managed_rule_metadata else None
                 )
                 
                 # Check if analysis was cancelled (returns None)
@@ -1281,6 +1799,92 @@ Would you like to run a complete analysis?"""
         
         self._draw_health_gauge(gauge_canvas, health_score)
         
+        # Analysis Scope section (shows custom + managed breakdown when managed groups present)
+        managed_rule_groups = analysis_results.get('managed_rule_groups', [])
+        total_managed_rules = analysis_results.get('total_managed_rules', 0)
+        managed_sid_to_group = analysis_results.get('managed_sid_to_group', {})
+        
+        if managed_rule_groups:
+            scope_frame = ttk.LabelFrame(left_column, text="Analysis Scope")
+            scope_frame.pack(fill=tk.X, pady=(0, 10))
+            
+            scope_content = ttk.Frame(scope_frame)
+            scope_content.pack(padx=15, pady=10)
+            
+            # Custom rules count
+            custom_rule_count = analysis_results['total_rules']
+            custom_filename = os.path.basename(self.parent.current_file) if self.parent.current_file else "loaded file"
+            ttk.Label(scope_content, 
+                     text=f"Custom Rules: {custom_rule_count:,} rules (from {custom_filename})",
+                     font=("TkDefaultFont", 9)).pack(anchor=tk.W, pady=2)
+            
+            # Managed rule groups breakdown
+            ttk.Label(scope_content, 
+                     text=f"Managed Rule Groups: {len(managed_rule_groups)} groups, {total_managed_rules:,} rules",
+                     font=("TkDefaultFont", 9)).pack(anchor=tk.W, pady=2)
+            
+            for mg in managed_rule_groups:
+                ttk.Label(scope_content,
+                         text=f"  • {mg['name']}  ({mg.get('rule_count', 0):,} rules)",
+                         font=("TkDefaultFont", 8), foreground="#2E8B8B").pack(anchor=tk.W, pady=1)
+            
+            # Separator and total
+            ttk.Separator(scope_content, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=5)
+            total_all = custom_rule_count + total_managed_rules
+            ttk.Label(scope_content,
+                     text=f"Total Rules Analyzed: {total_all:,}",
+                     font=("TkDefaultFont", 9, "bold")).pack(anchor=tk.W, pady=2)
+            
+            # Managed Rule Group Effectiveness Summary
+            managed_rule_sids_dict = analysis_results.get('managed_rule_sids', {})
+            sid_stats = analysis_results.get('sid_stats', {})
+            
+            eff_frame = ttk.LabelFrame(left_column, text="Managed Rule Group Effectiveness")
+            eff_frame.pack(fill=tk.X, pady=(0, 10))
+            
+            eff_content = ttk.Frame(eff_frame)
+            eff_content.pack(padx=15, pady=10)
+            
+            # Table header
+            eff_header = ttk.Frame(eff_content)
+            eff_header.pack(fill=tk.X, pady=(0, 5))
+            ttk.Label(eff_header, text="Group", width=35, font=("TkDefaultFont", 8, "bold")).pack(side=tk.LEFT)
+            ttk.Label(eff_header, text="Total", width=8, font=("TkDefaultFont", 8, "bold")).pack(side=tk.LEFT)
+            ttk.Label(eff_header, text="w/Hits", width=8, font=("TkDefaultFont", 8, "bold")).pack(side=tk.LEFT)
+            ttk.Label(eff_header, text="Unused", width=8, font=("TkDefaultFont", 8, "bold")).pack(side=tk.LEFT)
+            ttk.Label(eff_header, text="Total Hits", width=10, font=("TkDefaultFont", 8, "bold")).pack(side=tk.LEFT)
+            
+            for mg in managed_rule_groups:
+                group_name = mg['name']
+                group_sids = managed_rule_sids_dict.get(group_name, [])
+                group_total = len(group_sids)
+                group_with_hits = sum(1 for sid in group_sids if sid in sid_stats and sid_stats[sid].get('hits', 0) > 0)
+                group_unused = group_total - group_with_hits
+                group_total_hits = sum(sid_stats.get(sid, {}).get('hits', 0) for sid in group_sids)
+                
+                row = ttk.Frame(eff_content)
+                row.pack(fill=tk.X, pady=1)
+                
+                # Truncate long group names
+                display_name = group_name[:33] + ".." if len(group_name) > 35 else group_name
+                ttk.Label(row, text=display_name, width=35, font=("TkDefaultFont", 8),
+                         foreground="#2E8B8B").pack(side=tk.LEFT)
+                ttk.Label(row, text=f"{group_total:,}", width=8, font=("TkDefaultFont", 8)).pack(side=tk.LEFT)
+                ttk.Label(row, text=f"{group_with_hits:,}", width=8, font=("TkDefaultFont", 8),
+                         foreground="#2E7D32").pack(side=tk.LEFT)
+                ttk.Label(row, text=f"{group_unused:,}", width=8, font=("TkDefaultFont", 8),
+                         foreground="#999999").pack(side=tk.LEFT)
+                ttk.Label(row, text=f"{group_total_hits:,}", width=10, font=("TkDefaultFont", 8)).pack(side=tk.LEFT)
+            
+            # Color legend
+            legend_frame = ttk.Frame(left_column)
+            legend_frame.pack(fill=tk.X, pady=(0, 10))
+            ttk.Label(legend_frame, text="Legend:", font=("TkDefaultFont", 8, "bold")).pack(side=tk.LEFT, padx=(0, 5))
+            ttk.Label(legend_frame, text="■ Custom rules", font=("TkDefaultFont", 8),
+                     foreground="#000000").pack(side=tk.LEFT, padx=(0, 10))
+            ttk.Label(legend_frame, text="■ Managed rules", font=("TkDefaultFont", 8),
+                     foreground="#2E8B8B").pack(side=tk.LEFT)
+        
         # Get categories early for use in Quick Stats
         categories = analysis_results['categories']
         
@@ -1393,7 +1997,17 @@ Would you like to run a complete analysis?"""
         # Add scoring explanation content
         self._populate_scoring_explanation(scoring_content, analysis_results)
         
-        # Tab 2: Unused Rules (Phase 5)
+        # Tab 2: All Rules (complete view of custom + managed rules)
+        managed_rule_groups_data = analysis_results.get('managed_rule_groups', [])
+        total_managed = analysis_results.get('total_managed_rules', 0)
+        total_all_rules = analysis_results['total_rules'] + total_managed
+        
+        all_rules_tab = ttk.Frame(notebook)
+        notebook.add(all_rules_tab, text=f"All Rules ({total_all_rules:,})")
+        
+        self._create_all_rules_tab(all_rules_tab, analysis_results, results_window)
+        
+        # Tab 3: Unused Rules (Phase 5)
         unused_tab = ttk.Frame(notebook)
         notebook.add(unused_tab, text="Unused Rules")
         
@@ -2588,11 +3202,11 @@ Would you like to run a complete analysis?"""
                  font=("TkDefaultFont", 10, "bold")).pack(side=tk.LEFT, padx=(0, 10))
         
         ttk.Button(nav_frame, text="View Unused Rules",
-                  command=lambda: notebook.select(1)).pack(side=tk.LEFT, padx=5)
-        ttk.Button(nav_frame, text="View Low-Frequency",
                   command=lambda: notebook.select(2)).pack(side=tk.LEFT, padx=5)
-        ttk.Button(nav_frame, text="View Top Rules",
+        ttk.Button(nav_frame, text="View Low-Frequency",
                   command=lambda: notebook.select(3)).pack(side=tk.LEFT, padx=5)
+        ttk.Button(nav_frame, text="View Top Rules",
+                  command=lambda: notebook.select(4)).pack(side=tk.LEFT, padx=5)
         
         # Export button (Phase 12)
         export_tiers_frame = ttk.Frame(tiers_content)
@@ -2732,173 +3346,315 @@ Would you like to run a complete analysis?"""
                 rule = next((r for r in self.parent.rules 
                            if hasattr(r, 'sid') and r.sid == sid), None)
                 
-                if not rule:
+                # Check if this SID belongs to a managed rule group
+                managed_sid_to_group = analysis_results.get('managed_sid_to_group', {})
+                managed_rule_metadata = analysis_results.get('managed_rule_metadata', {})
+
+                if not rule and sid in managed_sid_to_group:
+                    # --- Managed rule SID: show managed rule details with stats ---
+                    group_name = managed_sid_to_group[sid]
+
+                    # Look up metadata (action, msg) for this SID
+                    managed_action = 'unknown'
+                    managed_msg = ''
+                    meta_list = managed_rule_metadata.get(group_name, [])
+                    for meta in meta_list:
+                        if meta.get('sid') == sid:
+                            managed_action = meta.get('action', 'unknown')
+                            managed_msg = meta.get('msg', '')
+                            break
+
+                    # Create results display
+                    result_panel = ttk.Frame(results_content)
+                    result_panel.pack(fill=tk.BOTH, expand=True, padx=15, pady=15)
+
+                    # SID header in teal for managed rules
+                    ttk.Label(result_panel, text=f"SID {sid}",
+                             font=("TkDefaultFont", 12, "bold"),
+                             foreground="#2E8B8B").pack(anchor=tk.W, pady=(0, 5))
+
+                    # Source indicator
+                    ttk.Label(result_panel, text=f"Source: {group_name}",
+                             font=("TkDefaultFont", 10), foreground="#2E8B8B").pack(anchor=tk.W, pady=(0, 10))
+
+                    # Usage Statistics section
+                    ttk.Label(result_panel, text=f"Usage Statistics (Last {analysis_results['time_range_days']} days):",
+                             font=("TkDefaultFont", 10, "bold")).pack(anchor=tk.W, pady=(0, 5))
+
+                    stats_grid = ttk.Frame(result_panel)
+                    stats_grid.pack(fill=tk.X, pady=(0, 10))
+
+                    stat_items = [
+                        ("Total hits:", f"{stats.get('hits', 0):,}"),
+                        ("Percentage of traffic:", f"{stats.get('percent', 0.0):.2f}%"),
+                        ("Hits per day:", f"{stats.get('hits_per_day', 0.0):.1f} avg"),
+                    ]
+
+                    if stats.get('last_hit_days') is not None:
+                        stat_items.append(("Last hit:", f"{stats['last_hit_days']} days ago"))
+
+                    for label, value in stat_items:
+                        row = ttk.Frame(stats_grid)
+                        row.pack(fill=tk.X, pady=2)
+                        ttk.Label(row, text=f"• {label}", width=25).pack(side=tk.LEFT)
+                        ttk.Label(row, text=value, font=("TkDefaultFont", 9, "bold")).pack(side=tk.LEFT)
+
+                    # Managed Rule Information section
+                    ttk.Label(result_panel, text="Managed Rule Information:",
+                             font=("TkDefaultFont", 10, "bold")).pack(anchor=tk.W, pady=(15, 5))
+
+                    rule_info_grid = ttk.Frame(result_panel)
+                    rule_info_grid.pack(fill=tk.X, pady=(0, 10))
+
+                    rule_items = [
+                        ("Source:", group_name),
+                        ("Action:", managed_action.upper()),
+                        ("Message:", managed_msg[:80] + "..." if len(managed_msg) > 80 else managed_msg),
+                    ]
+
+                    for label, value in rule_items:
+                        row = ttk.Frame(rule_info_grid)
+                        row.pack(fill=tk.X, pady=2)
+                        ttk.Label(row, text=f"• {label}", width=25).pack(side=tk.LEFT)
+                        ttk.Label(row, text=value).pack(side=tk.LEFT)
+
+                    # Full message in scrollable text widget (managed msgs can be long)
+                    if managed_msg:
+                        ttk.Label(result_panel, text="Full Message:",
+                                 font=("TkDefaultFont", 10, "bold")).pack(anchor=tk.W, pady=(15, 5))
+                        msg_text = tk.Text(result_panel, height=3, wrap=tk.WORD,
+                                          font=("Consolas", 9), bg="#F5F5F5")
+                        msg_text.pack(fill=tk.X, pady=(0, 10))
+                        msg_text.insert(tk.END, managed_msg)
+                        msg_text.config(state=tk.DISABLED)
+
+                    # Navigation to All Rules tab
+                    nav_frame = ttk.Frame(result_panel)
+                    nav_frame.pack(fill=tk.X, pady=(10, 0))
+
+                    ttk.Button(nav_frame, text="View in All Rules Tab",
+                              command=lambda: notebook.select(1)).pack(side=tk.LEFT, padx=5)
+
+                    # Export button
+                    ttk.Button(nav_frame, text="Export This Result",
+                              command=lambda: self._export_search_result(sid, stats, analysis_results)).pack(side=tk.LEFT, padx=5)
+
+                elif not rule:
                     ttk.Label(results_content, text=f"SID {sid} found in analysis but not in current rule file",
                              foreground="orange").pack(padx=10, pady=20)
                     return
-                
-                # Create results display
-                result_panel = ttk.Frame(results_content)
-                result_panel.pack(fill=tk.BOTH, expand=True, padx=15, pady=15)
-                
-                # SID header
-                ttk.Label(result_panel, text=f"SID {sid}",
-                         font=("TkDefaultFont", 12, "bold")).pack(anchor=tk.W, pady=(0, 10))
-                
-                # Usage Statistics section
-                ttk.Label(result_panel, text=f"Usage Statistics (Last {analysis_results['time_range_days']} days):",
-                         font=("TkDefaultFont", 10, "bold")).pack(anchor=tk.W, pady=(0, 5))
-                
-                stats_grid = ttk.Frame(result_panel)
-                stats_grid.pack(fill=tk.X, pady=(0, 10))
-                
-                # Display statistics
-                stat_items = [
-                    ("Total hits:", f"{stats.get('hits', 0):,}"),
-                    ("Percentage of traffic:", f"{stats.get('percent', 0.0):.2f}%"),
-                    ("Hits per day:", f"{stats.get('hits_per_day', 0.0):.1f} avg"),
-                ]
-                
-                if stats.get('last_hit_days') is not None:
-                    last_hit_days = stats['last_hit_days']
-                    stat_items.append(("Last hit:", f"{last_hit_days} days ago"))
-                
-                if stats.get('days_in_production') is not None:
-                    stat_items.append(("Age of rule:", f"{stats['days_in_production']} days"))
-                
-                for label, value in stat_items:
-                    row = ttk.Frame(stats_grid)
-                    row.pack(fill=tk.X, pady=2)
-                    ttk.Label(row, text=f"• {label}", width=25).pack(side=tk.LEFT)
-                    ttk.Label(row, text=value, font=("TkDefaultFont", 9, "bold")).pack(side=tk.LEFT)
-                
-                # Rule Information section
-                ttk.Label(result_panel, text="Rule Information:",
-                         font=("TkDefaultFont", 10, "bold")).pack(anchor=tk.W, pady=(15, 5))
-                
-                rule_info_grid = ttk.Frame(result_panel)
-                rule_info_grid.pack(fill=tk.X, pady=(0, 10))
-                
-                line_num = self.parent.rules.index(rule) + 1
-                
-                rule_items = [
-                    ("Line #:", str(line_num)),
-                    ("Action:", rule.action.upper()),
-                    ("Protocol:", rule.protocol.upper()),
-                    ("Message:", rule.message[:60] + "..." if len(rule.message) > 60 else rule.message),
-                ]
-                
-                if hasattr(rule, 'rev'):
-                    rule_items.append(("Current revision:", str(rule.rev)))
-                
-                for label, value in rule_items:
-                    row = ttk.Frame(rule_info_grid)
-                    row.pack(fill=tk.X, pady=2)
-                    ttk.Label(row, text=f"• {label}", width=25).pack(side=tk.LEFT)
-                    ttk.Label(row, text=value).pack(side=tk.LEFT)
-                
-                # Category
-                category = stats.get('category', 'Unknown')
-                ttk.Label(result_panel, text=f"Category: {category}",
-                         font=("TkDefaultFont", 10, "bold")).pack(anchor=tk.W, pady=(15, 10))
-                
-                # Full Rule
-                ttk.Label(result_panel, text="Full Rule:",
-                         font=("TkDefaultFont", 10, "bold")).pack(anchor=tk.W, pady=(15, 5))
-                
-                rule_text = tk.Text(result_panel, height=3, wrap=tk.WORD,
-                                   font=("Consolas", 9), bg="#F5F5F5")
-                rule_text.pack(fill=tk.X, pady=(0, 10))
-                rule_text.insert(tk.END, rule.to_string())
-                rule_text.config(state=tk.DISABLED)
-                
-                # Analysis/Interpretation
-                ttk.Label(result_panel, text="Analysis:",
-                         font=("TkDefaultFont", 10, "bold")).pack(anchor=tk.W, pady=(15, 5))
-                
-                # Generate interpretation based on category and stats
-                interpretation = self._generate_sid_interpretation(stats, category, analysis_results)
-                
-                interp_label = ttk.Label(result_panel, text=interpretation,
-                                        font=("TkDefaultFont", 9), wraplength=750, justify=tk.LEFT)
-                interp_label.pack(anchor=tk.W, pady=(0, 15))
-                
-                # Navigation buttons
-                nav_frame = ttk.Frame(result_panel)
-                nav_frame.pack(fill=tk.X, pady=(10, 0))
-                
-                # Determine which tab to link to based on category
-                tab_index = None
-                if 'unused' in category.lower():
-                    tab_index = 1  # Unused tab
-                elif 'low-frequency' in category.lower() or 'low_freq' in category.lower():
-                    tab_index = 2  # Low-Frequency tab
-                elif 'high' in category.lower() or 'critical' in category.lower():
-                    tab_index = 3  # Effectiveness tab
-                
-                if tab_index is not None:
-                    ttk.Button(nav_frame, text="View in Analysis Tab",
-                              command=lambda: notebook.select(tab_index)).pack(side=tk.LEFT, padx=5)
-                
-                def jump_to_line():
-                    """Jump to the rule in main editor and close results window"""
-                    # Close results window
-                    results_window.destroy()
-                    
-                    # Jump to line in main editor
-                    all_items = self.parent.tree.get_children()
-                    if line_num - 1 < len(all_items):
-                        target_item = all_items[line_num - 1]
-                        self.parent.tree.selection_set(target_item)
-                        self.parent.tree.focus(target_item)
-                        self.parent.tree.see(target_item)
-                
-                ttk.Button(nav_frame, text=f"Jump to Line {line_num}",
-                          command=jump_to_line).pack(side=tk.LEFT, padx=5)
-                
-                # Export button (Phase 12)
-                ttk.Button(nav_frame, text="Export This Result",
-                          command=lambda: self._export_search_result(sid, stats, analysis_results)).pack(side=tk.LEFT, padx=5)
-                
+
+                else:
+                    # Custom rule — show full custom rule details
+                    # Create results display
+                    result_panel = ttk.Frame(results_content)
+                    result_panel.pack(fill=tk.BOTH, expand=True, padx=15, pady=15)
+
+                    # SID header
+                    ttk.Label(result_panel, text=f"SID {sid}",
+                             font=("TkDefaultFont", 12, "bold")).pack(anchor=tk.W, pady=(0, 10))
+
+                    # Usage Statistics section
+                    ttk.Label(result_panel, text=f"Usage Statistics (Last {analysis_results['time_range_days']} days):",
+                             font=("TkDefaultFont", 10, "bold")).pack(anchor=tk.W, pady=(0, 5))
+
+                    stats_grid = ttk.Frame(result_panel)
+                    stats_grid.pack(fill=tk.X, pady=(0, 10))
+
+                    # Display statistics
+                    stat_items = [
+                        ("Total hits:", f"{stats.get('hits', 0):,}"),
+                        ("Percentage of traffic:", f"{stats.get('percent', 0.0):.2f}%"),
+                        ("Hits per day:", f"{stats.get('hits_per_day', 0.0):.1f} avg"),
+                    ]
+
+                    if stats.get('last_hit_days') is not None:
+                        last_hit_days = stats['last_hit_days']
+                        stat_items.append(("Last hit:", f"{last_hit_days} days ago"))
+
+                    if stats.get('days_in_production') is not None:
+                        stat_items.append(("Age of rule:", f"{stats['days_in_production']} days"))
+
+                    for label, value in stat_items:
+                        row = ttk.Frame(stats_grid)
+                        row.pack(fill=tk.X, pady=2)
+                        ttk.Label(row, text=f"• {label}", width=25).pack(side=tk.LEFT)
+                        ttk.Label(row, text=value, font=("TkDefaultFont", 9, "bold")).pack(side=tk.LEFT)
+
+                    # Rule Information section
+                    ttk.Label(result_panel, text="Rule Information:",
+                             font=("TkDefaultFont", 10, "bold")).pack(anchor=tk.W, pady=(15, 5))
+
+                    rule_info_grid = ttk.Frame(result_panel)
+                    rule_info_grid.pack(fill=tk.X, pady=(0, 10))
+
+                    line_num = self.parent.rules.index(rule) + 1
+
+                    rule_items = [
+                        ("Line #:", str(line_num)),
+                        ("Action:", rule.action.upper()),
+                        ("Protocol:", rule.protocol.upper()),
+                        ("Message:", rule.message[:60] + "..." if len(rule.message) > 60 else rule.message),
+                    ]
+
+                    if hasattr(rule, 'rev'):
+                        rule_items.append(("Current revision:", str(rule.rev)))
+
+                    for label, value in rule_items:
+                        row = ttk.Frame(rule_info_grid)
+                        row.pack(fill=tk.X, pady=2)
+                        ttk.Label(row, text=f"• {label}", width=25).pack(side=tk.LEFT)
+                        ttk.Label(row, text=value).pack(side=tk.LEFT)
+
+                    # Category
+                    category = stats.get('category', 'Unknown')
+                    ttk.Label(result_panel, text=f"Category: {category}",
+                             font=("TkDefaultFont", 10, "bold")).pack(anchor=tk.W, pady=(15, 10))
+
+                    # Full Rule
+                    ttk.Label(result_panel, text="Full Rule:",
+                             font=("TkDefaultFont", 10, "bold")).pack(anchor=tk.W, pady=(15, 5))
+
+                    rule_text = tk.Text(result_panel, height=3, wrap=tk.WORD,
+                                       font=("Consolas", 9), bg="#F5F5F5")
+                    rule_text.pack(fill=tk.X, pady=(0, 10))
+                    rule_text.insert(tk.END, rule.to_string())
+                    rule_text.config(state=tk.DISABLED)
+
+                    # Analysis/Interpretation
+                    ttk.Label(result_panel, text="Analysis:",
+                             font=("TkDefaultFont", 10, "bold")).pack(anchor=tk.W, pady=(15, 5))
+
+                    # Generate interpretation based on category and stats
+                    interpretation = self._generate_sid_interpretation(stats, category, analysis_results)
+
+                    interp_label = ttk.Label(result_panel, text=interpretation,
+                                            font=("TkDefaultFont", 9), wraplength=750, justify=tk.LEFT)
+                    interp_label.pack(anchor=tk.W, pady=(0, 15))
+
+                    # Navigation buttons
+                    nav_frame = ttk.Frame(result_panel)
+                    nav_frame.pack(fill=tk.X, pady=(10, 0))
+
+                    # Determine which tab to link to based on category
+                    tab_index = None
+                    if 'unused' in category.lower():
+                        tab_index = 2  # Unused tab
+                    elif 'low-frequency' in category.lower() or 'low_freq' in category.lower():
+                        tab_index = 3  # Low-Frequency tab
+                    elif 'high' in category.lower() or 'critical' in category.lower():
+                        tab_index = 4  # Effectiveness tab
+
+                    if tab_index is not None:
+                        ttk.Button(nav_frame, text="View in Analysis Tab",
+                                  command=lambda: notebook.select(tab_index)).pack(side=tk.LEFT, padx=5)
+
+                    def jump_to_line():
+                        """Jump to the rule in main editor and close results window"""
+                        # Close results window
+                        results_window.destroy()
+
+                        # Jump to line in main editor
+                        all_items = self.parent.tree.get_children()
+                        if line_num - 1 < len(all_items):
+                            target_item = all_items[line_num - 1]
+                            self.parent.tree.selection_set(target_item)
+                            self.parent.tree.focus(target_item)
+                            self.parent.tree.see(target_item)
+
+                    ttk.Button(nav_frame, text=f"Jump to Line {line_num}",
+                              command=jump_to_line).pack(side=tk.LEFT, padx=5)
+
+                    # Export button (Phase 12)
+                    ttk.Button(nav_frame, text="Export This Result",
+                              command=lambda: self._export_search_result(sid, stats, analysis_results)).pack(side=tk.LEFT, padx=5)
+
             else:
-                # SID not found - check if it's in the rule file
-                rule_exists = any(hasattr(r, 'sid') and r.sid == sid 
-                                for r in self.parent.rules 
+                # SID not found in sid_stats — check custom rules, then managed rules
+                rule_exists = any(hasattr(r, 'sid') and r.sid == sid
+                                for r in self.parent.rules
                                 if not getattr(r, 'is_comment', False))
-                
+
+                # Check managed rule groups for this SID (0 hits case)
+                managed_sid_to_group = analysis_results.get('managed_sid_to_group', {})
+                managed_rule_metadata = analysis_results.get('managed_rule_metadata', {})
+
                 if rule_exists:
                     # SID exists in file but has 0 hits
                     ttk.Label(results_content, text=f"SID {sid} - No hits recorded",
                              font=("TkDefaultFont", 11, "bold"), foreground="#FF6600").pack(anchor=tk.W, padx=10, pady=(10, 5))
-                    
-                    ttk.Label(results_content, 
+
+                    ttk.Label(results_content,
                              text=f"This rule exists in your file but had 0 hits during the\n"
                                   f"{analysis_results['time_range_days']}-day analysis period.\n\n"
                                   f"It may be an unused rule. Check the Unused Rules tab for more details.",
                              font=("TkDefaultFont", 9), justify=tk.LEFT).pack(anchor=tk.W, padx=10, pady=5)
-                    
+
                     # Show link to Unused tab
                     link_label = ttk.Label(results_content, text="→ View in Unused Rules Tab",
                                           foreground="blue", cursor="hand2",
                                           font=("TkDefaultFont", 9, "underline"))
                     link_label.pack(anchor=tk.W, padx=10, pady=5)
+                    link_label.bind('<Button-1>', lambda e: notebook.select(2))
+
+                elif sid in managed_sid_to_group:
+                    # SID belongs to a managed rule group but had 0 hits
+                    group_name = managed_sid_to_group[sid]
+
+                    # Look up metadata (action, msg) for this SID
+                    managed_action = 'unknown'
+                    managed_msg = ''
+                    meta_list = managed_rule_metadata.get(group_name, [])
+                    for meta in meta_list:
+                        if meta.get('sid') == sid:
+                            managed_action = meta.get('action', 'unknown')
+                            managed_msg = meta.get('msg', '')
+                            break
+
+                    ttk.Label(results_content, text=f"SID {sid} - No hits recorded",
+                             font=("TkDefaultFont", 11, "bold"), foreground="#2E8B8B").pack(anchor=tk.W, padx=10, pady=(10, 5))
+
+                    ttk.Label(results_content, text=f"Source: {group_name}",
+                             font=("TkDefaultFont", 10), foreground="#2E8B8B").pack(anchor=tk.W, padx=10, pady=(0, 5))
+
+                    info_text = (
+                        f"This managed rule had 0 hits during the "
+                        f"{analysis_results['time_range_days']}-day analysis period.\n\n"
+                        f"Action: {managed_action.upper()}\n"
+                    )
+                    if managed_msg:
+                        info_text += f"Message: {managed_msg}\n\n"
+                    info_text += (
+                        "This is expected for many managed rules — it simply means\n"
+                        "your network didn't see traffic matching this signature."
+                    )
+
+                    ttk.Label(results_content, text=info_text,
+                             font=("TkDefaultFont", 9), justify=tk.LEFT).pack(anchor=tk.W, padx=10, pady=5)
+
+                    # Show link to All Rules tab
+                    link_label = ttk.Label(results_content, text="→ View in All Rules Tab",
+                                          foreground="blue", cursor="hand2",
+                                          font=("TkDefaultFont", 9, "underline"))
+                    link_label.pack(anchor=tk.W, padx=10, pady=5)
                     link_label.bind('<Button-1>', lambda e: notebook.select(1))
+
                 else:
                     # SID not in file at all
                     ttk.Label(results_content, text=f"SID {sid} not found",
                              font=("TkDefaultFont", 11, "bold"), foreground="red").pack(anchor=tk.W, padx=10, pady=(10, 5))
-                    
+
                     # Troubleshooting tips
                     tips_frame = ttk.LabelFrame(results_content, text="SID not found? Try:")
                     tips_frame.pack(fill=tk.X, padx=10, pady=10)
-                    
+
                     tips = [
                         "• Check if SID is correct",
                         "• Verify rule is not commented out",
                         "• Confirm analysis includes this rule",
                         "• Rule may have been added after analysis was run"
                     ]
-                    
+
                     for tip in tips:
                         ttk.Label(tips_frame, text=tip, font=("TkDefaultFont", 9)).pack(anchor=tk.W, padx=10, pady=2)
         
@@ -3446,7 +4202,7 @@ Would you like to run a complete analysis?"""
                 'priority': 'HIGH',
                 'text': f"{categories['unused']} unused rules detected.",
                 'link_text': '[View Details]',
-                'tab_index': 1  # Unused tab (will be added in Phase 5)
+                'tab_index': 2  # Unused Rules tab
             })
         
         # Medium priority: Low-frequency rules
@@ -3455,7 +4211,7 @@ Would you like to run a complete analysis?"""
                 'priority': 'MEDIUM',
                 'text': f"{categories['low_freq']} low-frequency rules may be shadow rules.",
                 'link_text': '[Analyze]',
-                'tab_index': 2  # Low-frequency tab (will be added in Phase 6)
+                'tab_index': 3  # Low-Frequency tab
             })
         
         # Medium priority: Unlogged rules detected
@@ -3465,7 +4221,7 @@ Would you like to run a complete analysis?"""
                 'priority': 'MEDIUM',
                 'text': f"{unlogged_count} unlogged rule{'s' if unlogged_count != 1 else ''} cannot be tracked via CloudWatch.",
                 'link_text': '[View Details]',
-                'tab_index': 6  # Unlogged tab (will be tab 7, but 0-indexed so index 6)
+                'tab_index': 7  # Unlogged tab
             })
         
         # Info priority: Untracked rules detected
@@ -3475,7 +4231,7 @@ Would you like to run a complete analysis?"""
                 'priority': 'LOW',
                 'text': f"{untracked_count} untracked SID{'s' if untracked_count != 1 else ''} in CloudWatch (not in your file).",
                 'link_text': '[View Details]',
-                'tab_index': 7  # Untracked tab (tab 8, but 0-indexed so index 7)
+                'tab_index': 8  # Untracked tab
             })
         
         # Health score recommendations
@@ -5249,13 +6005,13 @@ Would you like to run a complete analysis?"""
         
         # Bind click events to navigate to tabs
         canvas.tag_bind('tier_unused', '<Button-1>', 
-                       lambda e: notebook.select(1))  # Unused tab
+                       lambda e: notebook.select(2))  # Unused tab
         canvas.tag_bind('tier_low_freq', '<Button-1>', 
-                       lambda e: notebook.select(2))  # Low-Frequency tab
+                       lambda e: notebook.select(3))  # Low-Frequency tab
         canvas.tag_bind('tier_medium', '<Button-1>', 
-                       lambda e: notebook.select(3))  # Effectiveness tab (shows high-traffic)
+                       lambda e: notebook.select(4))  # Effectiveness tab (shows high-traffic)
         canvas.tag_bind('tier_high', '<Button-1>', 
-                       lambda e: notebook.select(3))  # Effectiveness tab (shows high-traffic)
+                       lambda e: notebook.select(4))  # Effectiveness tab (shows high-traffic)
         
         # Hover effect - change cursor to hand when over clickable sections
         def on_hover(event):
@@ -10754,6 +11510,15 @@ Would you like to run a complete analysis?"""
         # Serialize category analysis data (already JSON-serializable)
         serialized['category_analysis'] = results.get('category_analysis', {})
 
+        # Serialize managed rule group data (Phase 4 - managed rule group analysis)
+        serialized['managed_rule_groups'] = results.get('managed_rule_groups', [])
+        serialized['managed_rule_sids'] = results.get('managed_rule_sids', {})
+        serialized['managed_rule_metadata'] = results.get('managed_rule_metadata', {})
+        serialized['total_managed_rules'] = results.get('total_managed_rules', 0)
+        # managed_sid_to_group has int keys - convert to str for JSON serialization
+        managed_sid_to_group = results.get('managed_sid_to_group', {})
+        serialized['managed_sid_to_group'] = {str(k): v for k, v in managed_sid_to_group.items()}
+
         return serialized
     
     def load_stats_from_file(self, stats_filename):
@@ -10861,7 +11626,28 @@ Would you like to run a complete analysis?"""
 
         # Deserialize category analysis data (already in correct format)
         results['category_analysis'] = stats_data.get('category_analysis', {})
-        
+
+        # Deserialize managed rule group data (Phase 4 - managed rule group analysis)
+        results['managed_rule_groups'] = stats_data.get('managed_rule_groups', [])
+        results['managed_rule_sids'] = stats_data.get('managed_rule_sids', {})
+        results['managed_rule_metadata'] = stats_data.get('managed_rule_metadata', {})
+        results['total_managed_rules'] = stats_data.get('total_managed_rules', 0)
+
+        # Rebuild managed_sid_to_group mapping from managed_rule_sids
+        # (managed_sid_to_group was serialized with str keys - convert back to int)
+        serialized_sid_to_group = stats_data.get('managed_sid_to_group', {})
+        managed_sid_to_group = {}
+        if serialized_sid_to_group:
+            # Prefer the explicit mapping if it was saved
+            for sid_str, group_name in serialized_sid_to_group.items():
+                managed_sid_to_group[int(sid_str)] = group_name
+        else:
+            # Rebuild from managed_rule_sids if mapping wasn't saved (backward compat)
+            for group_name, sids in results['managed_rule_sids'].items():
+                for sid in sids:
+                    managed_sid_to_group[sid] = group_name
+        results['managed_sid_to_group'] = managed_sid_to_group
+
         return results
     
     # Phase 11: Help Menu - AWS Setup Guide (covers Rule Usage Analyzer + Rule Group Import)
@@ -11034,7 +11820,8 @@ Would you like to run a complete analysis?"""
     ],
     "Resource": [
       "arn:aws:logs:*:*:log-group:/aws/network-firewall/*",
-      "arn:aws:network-firewall:*:*:stateful-rulegroup/*"
+      "arn:aws:network-firewall:*:*:stateful-rulegroup/*",
+      "arn:aws:network-firewall:*:aws-managed:stateful-rulegroup/*"
     ]
   }]
 }'''
@@ -11070,7 +11857,8 @@ Would you like to run a complete analysis?"""
     ],
     "Resource": [
       "arn:aws:logs:*:*:log-group:/aws/network-firewall/*",
-      "arn:aws:network-firewall:*:*:stateful-rulegroup/*"
+      "arn:aws:network-firewall:*:*:stateful-rulegroup/*",
+      "arn:aws:network-firewall:*:aws-managed:stateful-rulegroup/*"
     ]
   }]
 }'''
@@ -11088,10 +11876,10 @@ Would you like to run a complete analysis?"""
             "• logs:GetQueryResults - Retrieves query results\n"
             "• logs:StopQuery - Cancels running queries\n"
             "• Resource: /aws/network-firewall/* log groups only\n\n"
-            "Network Firewall (Rule Group Import):\n"
-            "• network-firewall:ListRuleGroups - Browse available rule groups\n"
-            "• network-firewall:DescribeRuleGroup - View rule group details\n"
-            "• Resource: All Network Firewall stateful rule groups in account\n\n"
+            "Network Firewall (Rule Group Import & Managed Rule Analysis):\n"
+            "• network-firewall:ListRuleGroups - Browse account and managed rule groups\n"
+            "• network-firewall:DescribeRuleGroup - View rule group details and rules\n"
+            "• Resource: Account rule groups + AWS managed rule groups\n\n"
             "Network Firewall (Rule Group Export):\n"
             "• network-firewall:CreateRuleGroup - Deploy new rule groups\n"
             "• network-firewall:UpdateRuleGroup - Overwrite existing rule groups\n"
@@ -11106,6 +11894,7 @@ Would you like to run a complete analysis?"""
         
         security_text = (
             "• Read permissions for CloudWatch Logs and Rule Group browsing\n"
+            "• Read access to AWS managed rule groups (for analysis only)\n"
             "• Write permissions for Rule Group deployment (CreateRuleGroup, UpdateRuleGroup)\n"
             "• Minimal scope (CloudWatch Logs + Network Firewall rule groups)\n"
             "• No access to firewalls, policies, EC2, VPC, or other services\n"
@@ -11418,6 +12207,22 @@ Would you like to run a complete analysis?"""
                 results.append(("✓", "network-firewall:DescribeRuleGroup - Verified"))
             else:
                 results.append(("ℹ️", "No rule groups to test DescribeRuleGroup (0 in account)"))
+            
+            # Test ListRuleGroups with MANAGED scope (for managed rule group analysis)
+            try:
+                managed_response = nfw_client.list_rule_groups(
+                    Scope='MANAGED',
+                    Type='STATEFUL',
+                    MaxResults=5
+                )
+                managed_count = len(managed_response.get('RuleGroups', []))
+                results.append(("✓", f"network-firewall:ListRuleGroups (MANAGED) - Verified ({managed_count} groups)"))
+            except Exception as managed_e:
+                managed_err = str(managed_e)
+                if "AccessDenied" in managed_err:
+                    results.append(("✗", "network-firewall:ListRuleGroups (MANAGED) - Permission missing"))
+                else:
+                    results.append(("⚠️", f"Managed rule groups: {managed_err[:50]}"))
                 
         except Exception as e:
             error_str = str(e)
@@ -11457,6 +12262,7 @@ Would you like to run a complete analysis?"""
         results.append(("", ""))
         results.append(("", "Ready to use:"))
         results.append(("", "• Tools > Analyze Rule Usage"))
+        results.append(("", "• Tools > Analyze Rule Usage > Managed Rule Groups"))
         results.append(("", "• File > Import Rule Group"))
         results.append(("", "• File > Export Rule Group"))
         
@@ -13219,6 +14025,327 @@ Would you like to run a complete analysis?"""
             ttk.Button(hf, text="Close", command=help_dialog.destroy).pack(pady=(10, 0))
         
         ttk.Button(button_row, text="Help", command=show_category_help).pack(side=tk.LEFT)
+    
+    def _create_all_rules_tab(self, parent_tab, analysis_results, results_window):
+        """Create the All Rules tab (Tab 10) showing complete view of custom + managed rules
+        
+        Args:
+            parent_tab: Parent frame for the tab
+            analysis_results: Full analysis results dict
+            results_window: Reference to results window for jump-to-rule
+        """
+        content = ttk.Frame(parent_tab)
+        content.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+        
+        sid_stats = analysis_results.get('sid_stats', {})
+        managed_sid_to_group = analysis_results.get('managed_sid_to_group', {})
+        managed_rule_metadata = analysis_results.get('managed_rule_metadata', {})
+        managed_rule_sids_dict = analysis_results.get('managed_rule_sids', {})
+        total_managed = analysis_results.get('total_managed_rules', 0)
+        time_range_days = analysis_results.get('time_range_days', 30)
+        total_hits = sum(s.get('hits', 0) for s in sid_stats.values()) if sid_stats else 0
+        
+        # Title
+        custom_count = analysis_results['total_rules']
+        total_all = custom_count + total_managed
+        ttk.Label(content, text=f"📋 COMPLETE RULE HIT COUNT",
+                 font=("TkDefaultFont", 11, "bold")).pack(anchor=tk.W, pady=(0, 5))
+        
+        showing_label = ttk.Label(content, text=f"Showing {total_all:,} rules ({custom_count:,} custom + {total_managed:,} managed)",
+                                 font=("TkDefaultFont", 9), foreground="#666666")
+        showing_label.pack(anchor=tk.W, pady=(0, 10))
+        
+        # Filter controls row
+        filter_frame = ttk.Frame(content)
+        filter_frame.pack(fill=tk.X, pady=(0, 10))
+        
+        # Source dropdown
+        ttk.Label(filter_frame, text="Source:").pack(side=tk.LEFT, padx=(0, 5))
+        source_values = ["All Sources"]
+        custom_filename = os.path.basename(self.parent.current_file) if self.parent.current_file else "Custom Rules"
+        source_values.append(custom_filename)
+        for mg in analysis_results.get('managed_rule_groups', []):
+            source_values.append(mg['name'])
+        
+        source_var = tk.StringVar(value="All Sources")
+        source_combo = ttk.Combobox(filter_frame, textvariable=source_var,
+                                   values=source_values, state="readonly", width=30)
+        source_combo.pack(side=tk.LEFT, padx=(0, 15))
+        
+        # Action dropdown
+        ttk.Label(filter_frame, text="Action:").pack(side=tk.LEFT, padx=(0, 5))
+        action_filter_var = tk.StringVar(value="All")
+        action_combo = ttk.Combobox(filter_frame, textvariable=action_filter_var,
+                                   values=["All", "drop", "alert", "pass", "reject"],
+                                   state="readonly", width=8)
+        action_combo.pack(side=tk.LEFT, padx=(0, 15))
+        
+        # Hits filter
+        ttk.Label(filter_frame, text="Hits:").pack(side=tk.LEFT, padx=(0, 5))
+        hits_filter_var = tk.StringVar(value="All")
+        hits_combo = ttk.Combobox(filter_frame, textvariable=hits_filter_var,
+                                 values=["All", "Has hits (>0)", "Unused (0)"],
+                                 state="readonly", width=14)
+        hits_combo.pack(side=tk.LEFT, padx=(0, 15))
+        
+        # Treeview
+        tree_container = ttk.Frame(content)
+        tree_container.pack(fill=tk.BOTH, expand=True, pady=(0, 10))
+        
+        columns = ("SID", "Hits", "Hits/Day", "% Traffic", "Source", "Action", "Message")
+        ar_tree = ttk.Treeview(tree_container, columns=columns, show="headings", height=18)
+        
+        ar_tree.heading("SID", text="SID", command=lambda: self._sort_treeview(ar_tree, "SID", False))
+        ar_tree.heading("Hits", text="Hits", command=lambda: self._sort_treeview(ar_tree, "Hits", False))
+        ar_tree.heading("Hits/Day", text="Hits/Day", command=lambda: self._sort_treeview(ar_tree, "Hits/Day", False))
+        ar_tree.heading("% Traffic", text="% Traffic", command=lambda: self._sort_treeview(ar_tree, "% Traffic", False))
+        ar_tree.heading("Source", text="Source")
+        ar_tree.heading("Action", text="Action")
+        ar_tree.heading("Message", text="Message")
+        
+        ar_tree.column("SID", width=80, stretch=False)
+        ar_tree.column("Hits", width=80, stretch=False)
+        ar_tree.column("Hits/Day", width=80, stretch=False)
+        ar_tree.column("% Traffic", width=80, stretch=False)
+        ar_tree.column("Source", width=250, stretch=False)
+        ar_tree.column("Action", width=70, stretch=False)
+        ar_tree.column("Message", width=350, stretch=True)
+        
+        # Scrollbars
+        v_sb = ttk.Scrollbar(tree_container, orient=tk.VERTICAL, command=ar_tree.yview)
+        h_sb = ttk.Scrollbar(tree_container, orient=tk.HORIZONTAL, command=ar_tree.xview)
+        ar_tree.configure(yscrollcommand=v_sb.set, xscrollcommand=h_sb.set)
+        
+        ar_tree.grid(row=0, column=0, sticky="nsew")
+        v_sb.grid(row=0, column=1, sticky="ns")
+        h_sb.grid(row=1, column=0, sticky="ew")
+        tree_container.grid_rowconfigure(0, weight=1)
+        tree_container.grid_columnconfigure(0, weight=1)
+        
+        # Color tags
+        ar_tree.tag_configure("managed_rule", foreground="#2E8B8B")
+        ar_tree.tag_configure("custom_rule", foreground="#000000")
+        
+        # Double-click handler: custom rules jump to editor, managed rules show detail
+        def on_all_rules_double_click(event):
+            item = ar_tree.identify_row(event.y)
+            if not item:
+                return
+            
+            values = ar_tree.item(item, 'values')
+            if not values:
+                return
+            
+            tags = ar_tree.item(item, 'tags')
+            
+            if 'managed_rule' in tags:
+                # Managed rule — show detail window with full message
+                try:
+                    sid = int(str(values[0]).replace(',', ''))
+                except (ValueError, TypeError):
+                    return
+                
+                # Look up full metadata from managed_rule_metadata
+                full_msg = ''
+                source_group = str(values[4]) if len(values) > 4 else ''
+                action = str(values[5]) if len(values) > 5 else ''
+                
+                meta_list = managed_rule_metadata.get(source_group, [])
+                for meta in meta_list:
+                    if meta.get('sid') == sid:
+                        full_msg = meta.get('msg', '')
+                        action = meta.get('action', action)
+                        break
+                
+                # Show detail dialog
+                detail = tk.Toplevel(results_window)
+                detail.title(f"Managed Rule Detail — SID {sid}")
+                detail.geometry("650x300")
+                detail.transient(results_window)
+                detail.grab_set()
+                detail.resizable(True, True)
+                detail.geometry("+%d+%d" % (
+                    results_window.winfo_rootx() + 100,
+                    results_window.winfo_rooty() + 150
+                ))
+                
+                df = ttk.Frame(detail)
+                df.pack(fill=tk.BOTH, expand=True, padx=20, pady=20)
+                
+                ttk.Label(df, text=f"SID: {sid}", font=("TkDefaultFont", 11, "bold"),
+                         foreground="#2E8B8B").pack(anchor=tk.W, pady=(0, 5))
+                ttk.Label(df, text=f"Source: {source_group}",
+                         font=("TkDefaultFont", 9), foreground="#666666").pack(anchor=tk.W, pady=(0, 5))
+                ttk.Label(df, text=f"Action: {action}",
+                         font=("TkDefaultFont", 9)).pack(anchor=tk.W, pady=(0, 10))
+                
+                # Stats from analysis
+                rule_stats = sid_stats.get(sid, {})
+                hits = rule_stats.get('hits', 0)
+                hits_per_day = rule_stats.get('hits_per_day', 0.0)
+                ttk.Label(df, text=f"Hits: {hits:,}  |  Hits/Day: {hits_per_day:.1f}",
+                         font=("TkDefaultFont", 9)).pack(anchor=tk.W, pady=(0, 10))
+                
+                ttk.Label(df, text="Full Message:",
+                         font=("TkDefaultFont", 10, "bold")).pack(anchor=tk.W, pady=(0, 5))
+                
+                msg_text = tk.Text(df, height=5, wrap=tk.WORD,
+                                  font=("Consolas", 10), bg="#F5F5F5")
+                msg_text.pack(fill=tk.BOTH, expand=True, pady=(0, 10))
+                msg_text.insert(tk.END, full_msg if full_msg else "(no message available)")
+                msg_text.config(state=tk.DISABLED)
+                
+                ttk.Button(df, text="Close", command=detail.destroy).pack()
+                return
+            
+            # Custom rule — jump to line in main editor
+            try:
+                sid = int(str(values[0]).replace(',', ''))
+            except (ValueError, TypeError):
+                return
+            
+            rule = next((r for r in self.parent.rules
+                       if hasattr(r, 'sid') and r.sid == sid
+                       and not getattr(r, 'is_comment', False)
+                       and not getattr(r, 'is_blank', False)), None)
+            if not rule:
+                return
+            
+            line_num = self.parent.rules.index(rule) + 1
+            self._jump_to_rule_in_main_editor(line_num, results_window)
+        
+        ar_tree.bind("<Double-1>", on_all_rules_double_click)
+        
+        # Build complete data list (custom + managed)
+        all_rules_data = []
+        unlogged_sids = analysis_results.get('unlogged_sids', set())
+
+        # Custom rules from loaded file
+        for rule in self.parent.rules:
+            if getattr(rule, 'is_comment', False) or getattr(rule, 'is_blank', False):
+                continue
+            sid = rule.sid
+            is_unlogged = sid in unlogged_sids
+            stats = sid_stats.get(sid, {})
+            hits = stats.get('hits', 0)
+            hits_per_day = stats.get('hits_per_day', 0.0)
+            percent = stats.get('percent', 0.0)
+            all_rules_data.append({
+                'sid': sid, 'hits': hits, 'hits_per_day': hits_per_day,
+                'percent': percent, 'source': custom_filename,
+                'action': rule.action, 'msg': rule.message,
+                'is_managed': False, 'is_unlogged': is_unlogged
+            })
+        
+        # Managed rules from metadata
+        for group_name, metadata_list in managed_rule_metadata.items():
+            for meta in metadata_list:
+                sid = meta['sid']
+                stats = sid_stats.get(sid, {})
+                hits = stats.get('hits', 0)
+                hits_per_day = stats.get('hits_per_day', 0.0)
+                percent = stats.get('percent', 0.0)
+                all_rules_data.append({
+                    'sid': sid, 'hits': hits, 'hits_per_day': hits_per_day,
+                    'percent': percent, 'source': group_name,
+                    'action': meta.get('action', ''), 'msg': meta.get('msg', ''),
+                    'is_managed': True
+                })
+        
+        def populate_tree(*args):
+            """Populate/filter the treeview"""
+            ar_tree.delete(*ar_tree.get_children())
+            
+            source_filter = source_var.get()
+            action_filter = action_filter_var.get()
+            hits_filter = hits_filter_var.get()
+            
+            visible_count = 0
+            for rd in sorted(all_rules_data, key=lambda x: x['hits'], reverse=True):
+                # Apply source filter
+                if source_filter != "All Sources" and rd['source'] != source_filter:
+                    continue
+                # Apply action filter
+                if action_filter != "All" and rd['action'].lower() != action_filter.lower():
+                    continue
+                # Apply hits filter (unlogged rules are excluded from hits filters
+                # since their hit count is unknown, not zero)
+                is_unlogged = rd.get('is_unlogged', False)
+                if hits_filter == "Has hits (>0)":
+                    if is_unlogged or rd['hits'] == 0:
+                        continue
+                if hits_filter == "Unused (0)":
+                    if is_unlogged or rd['hits'] > 0:
+                        continue
+                
+                tag = "managed_rule" if rd['is_managed'] else "custom_rule"
+                msg_display = rd['msg'][:60] + "..." if len(rd['msg']) > 60 else rd['msg']
+                
+                # Show "—" for unlogged rules since we can't determine their hit count
+                if is_unlogged:
+                    hits_display = "—"
+                    hpd_display = "—"
+                    pct_display = "—"
+                else:
+                    hits_display = f"{rd['hits']:,}"
+                    hpd_display = f"{rd['hits_per_day']:.1f}"
+                    pct_display = f"{rd['percent']:.1f}%"
+                
+                ar_tree.insert("", tk.END,
+                              values=(rd['sid'], hits_display, hpd_display,
+                                     pct_display, rd['source'],
+                                     rd['action'], msg_display),
+                              tags=(tag,))
+                visible_count += 1
+            
+            showing_label.config(text=f"Showing {visible_count:,} of {total_all:,} rules")
+        
+        # Bind filter changes
+        source_combo.bind('<<ComboboxSelected>>', populate_tree)
+        action_combo.bind('<<ComboboxSelected>>', populate_tree)
+        hits_combo.bind('<<ComboboxSelected>>', populate_tree)
+        
+        # Initial population
+        populate_tree()
+        
+        # Bottom bar: legend + export
+        bottom_frame = ttk.Frame(content)
+        bottom_frame.pack(fill=tk.X, pady=(5, 0))
+        
+        # Color legend
+        if total_managed > 0:
+            ttk.Label(bottom_frame, text="■ Custom rules", font=("TkDefaultFont", 8),
+                     foreground="#000000").pack(side=tk.LEFT, padx=(0, 10))
+            ttk.Label(bottom_frame, text="■ Managed rules", font=("TkDefaultFont", 8),
+                     foreground="#2E8B8B").pack(side=tk.LEFT, padx=(0, 20))
+        
+        # Export button
+        def export_all_rules():
+            filename = filedialog.asksaveasfilename(
+                title="Export All Rules Hit Count",
+                defaultextension=".txt",
+                filetypes=[("Text files", "*.txt"), ("All files", "*.*")],
+                initialfile="all_rules_hit_count"
+            )
+            if not filename:
+                return
+            try:
+                with open(filename, 'w', encoding='utf-8') as f:
+                    f.write("COMPLETE RULE HIT COUNT\n")
+                    f.write("=" * 100 + "\n")
+                    f.write(f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+                    f.write(f"Analysis Period: {time_range_days} days\n")
+                    f.write(f"Total Rules: {total_all:,} ({custom_count:,} custom + {total_managed:,} managed)\n\n")
+                    f.write(f"{'SID':<10} {'Hits':>10} {'Hits/Day':>10} {'% Traffic':>10} {'Source':<35} {'Action':<8} {'Message'}\n")
+                    f.write("-" * 100 + "\n")
+                    for rd in sorted(all_rules_data, key=lambda x: x['hits'], reverse=True):
+                        f.write(f"{rd['sid']:<10} {rd['hits']:>10,} {rd['hits_per_day']:>10.1f} {rd['percent']:>9.1f}% "
+                               f"{rd['source'][:33]:<35} {rd['action']:<8} {rd['msg'][:50]}\n")
+                messagebox.showinfo("Export Complete", f"All rules exported to:\n{filename}")
+            except Exception as e:
+                messagebox.showerror("Export Error", f"Failed to export:\n{str(e)}")
+        
+        ttk.Button(bottom_frame, text="Export", command=export_all_rules).pack(side=tk.RIGHT)
     
     def _export_categories_report(self, category_data, analysis_results, rule_defined_categories):
         """Export all categories to a text report file

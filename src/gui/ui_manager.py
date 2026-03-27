@@ -128,16 +128,25 @@ class UIManager:
         
         help_menu.add_command(label="About", command=self.parent.show_about)
         
-        # Keyboard shortcuts
+        # Keyboard shortcuts (bind both lowercase and uppercase for Ctrl+letter combos
+        # so shortcuts work regardless of Caps Lock state)
         self.parent.root.bind('<Control-n>', lambda e: self.parent.new_file())
+        self.parent.root.bind('<Control-N>', lambda e: self.parent.new_file())
         self.parent.root.bind('<Control-o>', lambda e: self.parent.open_file())
+        self.parent.root.bind('<Control-O>', lambda e: self.parent.open_file())
         self.parent.root.bind('<Control-s>', lambda e: self.parent.save_file())
+        self.parent.root.bind('<Control-S>', lambda e: self.parent.save_file())
         self.parent.root.bind('<Control-z>', lambda e: self.parent.undo_last_change())
+        self.parent.root.bind('<Control-Z>', lambda e: self.parent.undo_last_change())
         self.parent.root.bind('<Control-e>', lambda e: self.parent.show_advanced_editor())
+        self.parent.root.bind('<Control-E>', lambda e: self.parent.show_advanced_editor())
         self.parent.root.bind('<Delete>', self.on_delete_key)
         self.parent.root.bind('<Control-c>', lambda e: self.handle_ctrl_c())
+        self.parent.root.bind('<Control-C>', lambda e: self.handle_ctrl_c())
         self.parent.root.bind('<Control-a>', lambda e: self.select_all_rules())
+        self.parent.root.bind('<Control-A>', lambda e: self.select_all_rules())
         self.parent.root.bind('<Control-f>', lambda e: self.parent.search_manager.show_find_dialog())
+        self.parent.root.bind('<Control-F>', lambda e: self.parent.search_manager.show_find_dialog())
         self.parent.root.bind('<F3>', lambda e: self.parent.search_manager.find_next())
         self.parent.root.bind('<Escape>', lambda e: self.parent.search_manager.close_search())
         self.parent.root.bind('<Down>', self.on_key_down)
@@ -145,6 +154,7 @@ class UIManager:
         self.parent.root.bind('<Home>', self.on_key_home)
         self.parent.root.bind('<space>', self.on_space_key)
         self.parent.root.bind('<Control-g>', self.on_ctrl_g_key)
+        self.parent.root.bind('<Control-G>', self.on_ctrl_g_key)
         self.parent.root.bind('<Return>', self.on_enter_key)
         
         # Main frame
@@ -6389,6 +6399,7 @@ Would you like to run a complete analysis?"""
         self.tree.bind("<ButtonRelease-1>", self.on_column_resize)
         # Bind Ctrl-V specifically to tree for pasting rules
         self.tree.bind("<Control-v>", lambda e: self.parent.paste_rules())
+        self.tree.bind("<Control-V>", lambda e: self.parent.paste_rules())
         
         # Store reference in parent for access by other components
         self.parent.tree = self.tree

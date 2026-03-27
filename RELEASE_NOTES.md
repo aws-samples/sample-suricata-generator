@@ -1,5 +1,23 @@
 # Release Notes
 
+## Version 2.1.1 - March 26, 2026
+
+### Bug Fix: Comment Toggle (Spacebar) Error with Legitimate Comments
+- **Fixed "Toggle Completed with Errors" popup when toggling mixed selections**: Corrected bug where pressing spacebar to comment/uncomment rules would show an error dialog when the selection included legitimate comments (not commented-out rules)
+  - **Root Cause**: The toggle logic attempted to parse every comment line back into a valid Suricata rule. Legitimate comments (e.g., `# This is a note`) failed parsing and triggered validation error popups
+  - **New Behavior**: Uses a simple `#` toggle approach:
+    - If **any** selected non-blank line is an active rule → **add `#`** to all selected lines (rules become commented, existing comments get an additional `#`)
+    - If **all** selected non-blank lines are comments → **remove one `#`** from each line. If the result is a valid rule, it becomes active. If not, it stays as a comment with one fewer `#`
+  - **Impact**: Mixed selections of rules and comments no longer produce error popups. The spacebar toggle works predictably in all cases
+
+### Enhancement: Case-Insensitive Keyboard Shortcuts
+- **Fixed keyboard shortcuts not working with Caps Lock enabled**: All Ctrl+letter shortcuts now work regardless of Caps Lock state
+  - Added uppercase bindings for all Ctrl+letter combinations: Ctrl+N, Ctrl+O, Ctrl+S, Ctrl+Z, Ctrl+E, Ctrl+C, Ctrl+A, Ctrl+F, Ctrl+G, and Ctrl+V
+  - Previously, shortcuts like Ctrl+F (Find) only responded to lowercase `f`, so pressing Ctrl+F with Caps Lock on had no effect
+  - Applies to both the main window bindings and the tree-specific Ctrl+V paste binding
+
+---
+
 ## Version 2.1.0 - March 22, 2026
 
 ### New Feature: AWS Managed Rule Group Analysis

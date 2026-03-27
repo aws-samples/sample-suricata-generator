@@ -5176,15 +5176,24 @@ class SuricataRuleGenerator:
         # If focus is elsewhere, let the default behavior handle it
     
     def toggle_rule_disabled(self):
-        """Toggle selected rules between enabled (rule) and disabled (comment) state"""
+        """Toggle selected rules between enabled (rule) and disabled (comment) state.
+
+        Uses a simple # toggle approach:
+        - If ALL selected non-blank lines are comments: remove one # from each (uncomment one level)
+        - If ANY selected non-blank line is a rule: add # to all selected lines (comment one level)
+
+        This handles mixed selections (rules + legitimate comments) gracefully by
+        blindly adding/removing a single # character without attempting to parse
+        comment text back into rules.
+        """
         selection = self.tree.selection()
         if not selection:
             messagebox.showwarning("Warning", "Please select one or more rules to toggle.")
             return
-        
+
         # Save state for undo
         self.save_undo_state()
-        
+
         # Get ACTUAL indices using line numbers from tree (critical when filters active)
         indices = []
         for item in selection:
@@ -5193,31 +5202,50 @@ class SuricataRuleGenerator:
                 # Convert 1-based line number to 0-based index
                 actual_index = int(values[0]) - 1
                 indices.append(actual_index)
-        
+
+        # Determine toggle direction: check if ALL non-blank selected lines are comments
+        all_comments = True
+        for index in indices:
+            if index < len(self.rules):
+                rule = self.rules[index]
+                if getattr(rule, 'is_blank', False):
+                    continue  # Skip blank lines for this determination
+                if not getattr(rule, 'is_comment', False):
+                    all_comments = False
+                    break
+
         # Track changes for history
         enabled_rules = []
         disabled_rules = []
-        failed_to_parse = []
-        
+        commented_count = 0
+        uncommented_count = 0
+
         # Process each selected rule
         for index in indices:
             if index < len(self.rules):
                 rule = self.rules[index]
-                
-                if getattr(rule, 'is_comment', False):
-                    # Try to convert comment back to rule
-                    comment_text = rule.comment_text.strip()
-                    if comment_text.startswith('# '):
-                        potential_rule_text = comment_text[2:]  # Remove "# "
-                        
-                        # Try to parse it back into a rule
-                        restored_rule = SuricataRule.from_string(potential_rule_text)
+
+                if getattr(rule, 'is_blank', False):
+                    # Skip blank lines
+                    continue
+
+                if all_comments:
+                    # UNCOMMENT: Remove one # from the beginning of each comment line
+                    if getattr(rule, 'is_comment', False):
+                        comment_text = rule.comment_text
+                        if comment_text.startswith('# '):
+                            new_text = comment_text[2:]  # Remove "# "
+                        elif comment_text.startswith('#'):
+                            new_text = comment_text[1:]  # Remove "#"
+                        else:
+                            continue  # Nothing to remove
+
+                        # Try to parse the result as a rule
+                        restored_rule = SuricataRule.from_string(new_text.strip())
                         if restored_rule:
-                            # Successfully parsed - validate the rule
+                            # Successfully parsed as a valid rule
                             validation_errors = self._validate_parsed_rule(restored_rule)
-                            
                             if not validation_errors:
-                                # Valid rule - restore it
                                 self.rules[index] = restored_rule
                                 enabled_rules.append({
                                     'line': index + 1,
@@ -5225,68 +5253,70 @@ class SuricataRuleGenerator:
                                     'sid': restored_rule.sid,
                                     'message': restored_rule.message
                                 })
+                                uncommented_count += 1
+                                continue
+
+                        # Not a valid rule - keep as a comment with one fewer #
+                        if new_text.strip():
+                            # Still has content - check if it's still a comment (starts with #)
+                            if new_text.strip().startswith('#'):
+                                rule.comment_text = new_text.strip()
                             else:
-                                # Invalid rule - keep as comment but update text to show errors
-                                error_summary = ', '.join(validation_errors)
-                                rule.comment_text = f"# [VALIDATION ERROR: {error_summary}] {potential_rule_text}"
-                                failed_to_parse.append({
-                                    'line': index + 1,
-                                    'text': potential_rule_text[:50] + '...' if len(potential_rule_text) > 50 else potential_rule_text,
-                                    'errors': validation_errors
-                                })
+                                # Content doesn't start with # but isn't a valid rule
+                                # Keep it as a comment with the original text
+                                rule.comment_text = f"# {new_text.strip()}"
                         else:
-                            # Failed to parse - keep as comment but mark it
-                            rule.comment_text = f"# [PARSE ERROR] {potential_rule_text}"
-                            failed_to_parse.append({
-                                'line': index + 1,
-                                'text': potential_rule_text[:50] + '...' if len(potential_rule_text) > 50 else potential_rule_text,
-                                'errors': ['Failed to parse as Suricata rule']
-                            })
-                elif getattr(rule, 'is_blank', False):
-                    # Skip blank lines
-                    continue
+                            # Empty after removing # - convert to blank line
+                            rule.comment_text = ""
+                            rule.is_blank = True
+                            rule.is_comment = False
+                        uncommented_count += 1
                 else:
-                    # Convert rule to comment (disable)
-                    comment_rule = SuricataRule()
-                    comment_rule.is_comment = True
-                    comment_rule.comment_text = f"# {rule.to_string()}"
-                    self.rules[index] = comment_rule
-                    disabled_rules.append({
-                        'line': index + 1,
-                        'action': rule.action,
-                        'sid': rule.sid,
-                        'message': rule.message
-                    })
-        
+                    # COMMENT: Add # to the beginning of each line
+                    if getattr(rule, 'is_comment', False):
+                        # Already a comment - add another # to the beginning
+                        comment_text = rule.comment_text
+                        if comment_text.startswith('#'):
+                            rule.comment_text = f"#{comment_text}"
+                        else:
+                            rule.comment_text = f"# {comment_text}"
+                        commented_count += 1
+                    else:
+                        # Convert rule to comment (disable)
+                        comment_rule = SuricataRule()
+                        comment_rule.is_comment = True
+                        comment_rule.comment_text = f"# {rule.to_string()}"
+                        self.rules[index] = comment_rule
+                        disabled_rules.append({
+                            'line': index + 1,
+                            'action': rule.action,
+                            'sid': rule.sid,
+                            'message': rule.message
+                        })
+                        commented_count += 1
+
         # Add history entries for tracking
         if enabled_rules:
             self.add_history_entry('rules_enabled', {'count': len(enabled_rules), 'rules': enabled_rules})
         if disabled_rules:
             self.add_history_entry('rules_disabled', {'count': len(disabled_rules), 'rules': disabled_rules})
-        
+
         # Refresh table and update status
         self.refresh_table()
         self.modified = True
         self.update_status_bar()
-        
+
         # Show feedback message
-        success_count = len(enabled_rules) + len(disabled_rules)
-        if failed_to_parse:
-            # Show detailed error message
-            error_details = []
-            for failure in failed_to_parse[:3]:  # Show first 3
-                error_details.append(f"Line {failure['line']}: {', '.join(failure['errors'])}")
-            
-            error_msg = f"Toggled {success_count} rule(s) successfully.\n\n"
-            error_msg += f"Failed to uncomment {len(failed_to_parse)} rule(s) due to validation errors:\n\n"
-            error_msg += '\n'.join(error_details)
-            if len(failed_to_parse) > 3:
-                error_msg += f"\n... and {len(failed_to_parse) - 3} more"
-            error_msg += "\n\nInvalid rules remain commented with [VALIDATION ERROR] or [PARSE ERROR] prefix."
-            messagebox.showwarning("Toggle Completed with Errors", error_msg)
-        else:
-            rule_text = "rule" if success_count == 1 else "rules"
-            messagebox.showinfo("Toggle Complete", f"Toggled {success_count} {rule_text} between enabled/disabled state.")
+        total_toggled = len(enabled_rules) + len(disabled_rules) + commented_count - len(disabled_rules) + uncommented_count - len(enabled_rules)
+        # Simplify: total is commented_count + uncommented_count
+        total_toggled = commented_count + uncommented_count
+        if total_toggled > 0:
+            if all_comments:
+                line_text = "line" if total_toggled == 1 else "lines"
+                messagebox.showinfo("Toggle Complete", f"Uncommented {total_toggled} {line_text} (removed one # level).")
+            else:
+                line_text = "line" if total_toggled == 1 else "lines"
+                messagebox.showinfo("Toggle Complete", f"Commented {total_toggled} {line_text} (added # prefix).")
     
     def _validate_parsed_rule(self, rule: SuricataRule) -> list:
         """Validate a parsed rule for common syntax errors

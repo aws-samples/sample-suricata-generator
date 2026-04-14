@@ -1,5 +1,15 @@
 # Release Notes
 
+## Version 2.1.2 - April 14, 2026
+
+### Bug Fix: Load AWS Best Practices Template Broken
+- **Fixed "Load AWS Best Practices Template" failing to extract rules**: The AWS best practices page updated its introductory text before the Suricata rules template, causing the parser to fail with "Could not find Suricata rules in the AWS best practices page"
+  - **Root Cause**: The `extract_rules_from_html()` method in `file_manager.py` used a hardcoded marker string (`"Below we have also included a custom template for an egress security use case"`) to locate the rules section in the HTML. The AWS page changed this text to `"Here is a custom Suricata template that customer find helpful"`, so the marker was never found and the method returned an empty string
+  - **Solution**: Updated the marker to match the current page text, with the old marker retained as a fallback for resilience against future changes
+  - **Impact**: File > Load AWS Best Practices Template now works again, correctly fetching and parsing all rules from the AWS best practices page
+
+---
+
 ## Version 2.1.1 - March 26, 2026
 
 ### Bug Fix: Comment Toggle (Spacebar) Error with Legitimate Comments

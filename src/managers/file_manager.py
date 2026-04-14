@@ -846,8 +846,16 @@ EOF
     def extract_rules_from_html(self, html_content: str) -> str:
         """Extract Suricata rules from AWS best practices HTML content"""
         try:
-            start_marker = "Below we have also included a custom template for an egress security use case"
-            start_pos = html_content.find(start_marker)
+            # Try current marker first, fall back to legacy marker
+            start_markers = [
+                "Here is a custom Suricata template that customer find helpful",
+                "Below we have also included a custom template for an egress security use case",
+            ]
+            start_pos = -1
+            for marker in start_markers:
+                start_pos = html_content.find(marker)
+                if start_pos != -1:
+                    break
             
             if start_pos == -1:
                 return ""

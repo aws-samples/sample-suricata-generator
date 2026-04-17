@@ -2,6 +2,31 @@
 
 ## Version 2.1.2 - April 14, 2026
 
+### Flow Tester v1.3.0 - April 17, 2026
+
+#### New Protocol Support
+- **Added 14 new protocols to Test Flow**: dns, ssh, smtp, ftp, imap, dcerpc, smb, krb5, msn, ikev2, http2, ntp, dhcp, tftp
+  - **TCP-based protocols** (ssh, smtp, ftp, imap, dcerpc, smb, krb5, msn, ikev2, http2): Full TCP handshake + established phase testing with protocol-specific flow diagram steps (e.g., "SSH Key Exchange", "SMB Negotiate Request")
+  - **UDP-based protocols** (dns, ntp, dhcp, tftp): Request/response flow diagrams with correct protocol matching against `udp` rules
+  - **DNS query matching**: Rules using `dns.query; content:".example.com";` are now evaluated against the query name input, using the same pattern matching logic as `tls.sni` and `http.host`
+  - Protocol dropdown expanded from 6 to 20 protocols with sensible default ports for each (SSH→22, SMTP→25, DNS→53, SMB→445, etc.)
+
+#### Contextual Query Name Field for DNS
+- **DNS flows show a "Query Name:" input field**: Similar to the URL/Domain field for HTTP/TLS, selecting DNS reveals a query name input (default: `example.com`) used to evaluate `dns.query` content matching in rules
+
+#### Bug Fix: dotprefix Modifier Matching
+- **Fixed `dotprefix` content matching for domain rules**: Rules using `content:".example.com"; dotprefix;` now correctly match both `example.com` and `sub.example.com`
+  - Previously, `dotprefix` matching failed for exact domain matches (e.g., `example.com` against `.example.com`)
+  - Now simulates Suricata's actual behavior of prepending `.` to the inspected buffer before matching
+
+#### Wording Change: No Matching Rules
+- **Changed "ALLOWED (no matching rules)" to "UNKNOWN (no matching rules)"**: When no rules match a test flow, the result now reflects that the outcome depends on the firewall policy's default action, which is external to the rule group
+
+#### Improvement: Overridden Rules Hidden from Results
+- **FLOW-scope PASS rules removed from results when overridden by PACKET-scope DROP/REJECT**: When a scope conflict occurs and the PACKET-scope action is the actual final behavior, the overridden FLOW-scope PASS rule is no longer displayed in the Matched Rules table or Flow Diagram, reducing user confusion.
+
+---
+
 ### Bug Fix: Load AWS Best Practices Template Broken
 - **Fixed "Load AWS Best Practices Template" failing to extract rules**: The AWS best practices page updated its introductory text before the Suricata rules template, causing the parser to fail with "Could not find Suricata rules in the AWS best practices page"
   - **Root Cause**: The `extract_rules_from_html()` method in `file_manager.py` used a hardcoded marker string (`"Below we have also included a custom template for an egress security use case"`) to locate the rules section in the HTML. The AWS page changed this text to `"Here is a custom Suricata template that customer find helpful"`, so the marker was never found and the method returned an empty string

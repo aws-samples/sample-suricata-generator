@@ -67,10 +67,6 @@ class FlowTester:
         actual_rules = [r for r in self.rules if not getattr(r, 'is_comment', False) 
                        and not getattr(r, 'is_blank', False)]
         
-        if not actual_rules:
-            results['final_action'] = 'NO_RULES'
-            return results
-        
         # Build flowbits mapping for inference
         self._flowbits_map = self._build_flowbits_map(actual_rules)
         
@@ -81,9 +77,11 @@ class FlowTester:
         results['flow_steps'] = self._generate_flow_steps(protocol, src_ip, src_port, 
                                                           dst_ip, dst_port, direction, url)
         
-        # For TCP and application layer protocols over TCP, test both handshake and established phases
-        # For other protocols, test as a single phase
-        if protocol.lower() in ['tcp', 'http', 'tls', 'https']:
+        # TCP-based protocols use handshake + established phases
+        tcp_protocols = {'tcp', 'http', 'tls', 'https', 'ssh', 'smtp', 'ftp', 'http2',
+                        'imap', 'dcerpc', 'smb', 'krb5', 'msn', 'ikev2'}
+        
+        if protocol.lower() in tcp_protocols:
             # Phase 1: Test handshake (flow:not_established rules)
             handshake_passed = self._test_flow_phase(classified_rules, src_ip, src_port, dst_ip, dst_port,
                                                      protocol, direction, 'handshake', results, url)
@@ -114,7 +112,7 @@ class FlowTester:
         
         # If no action rule matched, flow is implicitly allowed
         if results['final_action'] is None:
-            results['final_action'] = 'ALLOWED (no matching rules)'
+            results['final_action'] = 'UNKNOWN (no matching rules)'
         
         return results
     
@@ -284,7 +282,7 @@ class FlowTester:
             return False
         
         # For application layer protocols, check app layer keywords
-        if protocol.lower() in ['http', 'tls', 'https'] and url:
+        if protocol.lower() in ['http', 'tls', 'https', 'dns'] and url:
             if not self._check_application_layer_match(setter_rule, protocol, url):
                 return False
         
@@ -352,6 +350,24 @@ class FlowTester:
         protocol = protocol.lower()
         parsed_url = self._parse_url(url) if url else None
         
+        # TCP-based application layer protocols that use the standard TCP handshake
+        tcp_app_protocols = {'ssh', 'smtp', 'ftp', 'imap', 'dcerpc', 'smb',
+                            'krb5', 'msn', 'ikev2', 'http2'}
+        
+        # Protocol-specific application layer step descriptions
+        tcp_app_descriptions = {
+            'ssh': ('SSH Key Exchange', 'SSH Server Response'),
+            'smtp': ('SMTP EHLO/MAIL', 'SMTP Response'),
+            'ftp': ('FTP Command', 'FTP Response'),
+            'imap': ('IMAP Command', 'IMAP Response'),
+            'dcerpc': ('DCERPC Bind Request', 'DCERPC Bind Ack'),
+            'smb': ('SMB Negotiate Request', 'SMB Negotiate Response'),
+            'krb5': ('Kerberos AS-REQ', 'Kerberos AS-REP'),
+            'msn': ('MSN Message', 'MSN Response'),
+            'ikev2': ('IKEv2 SA_INIT Request', 'IKEv2 SA_INIT Response'),
+            'http2': ('HTTP/2 Request (HEADERS frame)', 'HTTP/2 Response (HEADERS frame)'),
+        }
+        
         if protocol in ['http', 'tls', 'https']:
             steps.append({'step': 1, 'description': 'TCP SYN', 'from': f"{src_ip}:{src_port}",
                          'to': f"{dst_ip}:{dst_port}", 'direction': '->', 'flags': '[SYN]'})
@@ -380,6 +396,22 @@ class FlowTester:
                 steps.append({'step': 5, 'description': 'HTTP Response',
                              'from': f"{dst_ip}:{dst_port}", 'to': f"{src_ip}:{src_port}",
                              'direction': '<-', 'flags': '', 'app_layer': True})
+        elif protocol in tcp_app_protocols:
+            # TCP handshake for all TCP-based app protocols
+            steps.append({'step': 1, 'description': 'TCP SYN', 'from': f"{src_ip}:{src_port}",
+                         'to': f"{dst_ip}:{dst_port}", 'direction': '->', 'flags': '[SYN]'})
+            steps.append({'step': 2, 'description': 'TCP SYN-ACK', 'from': f"{dst_ip}:{dst_port}",
+                         'to': f"{src_ip}:{src_port}", 'direction': '<-', 'flags': '[SYN,ACK]'})
+            steps.append({'step': 3, 'description': 'TCP ACK', 'from': f"{src_ip}:{src_port}",
+                         'to': f"{dst_ip}:{dst_port}", 'direction': '->', 'flags': '[ACK]'})
+            # Protocol-specific application data steps
+            req_desc, resp_desc = tcp_app_descriptions.get(protocol, (f'{protocol.upper()} Request', f'{protocol.upper()} Response'))
+            steps.append({'step': 4, 'description': req_desc,
+                         'from': f"{src_ip}:{src_port}", 'to': f"{dst_ip}:{dst_port}",
+                         'direction': '->', 'flags': '', 'app_layer': True})
+            steps.append({'step': 5, 'description': resp_desc,
+                         'from': f"{dst_ip}:{dst_port}", 'to': f"{src_ip}:{src_port}",
+                         'direction': '<-', 'flags': '', 'app_layer': True})
         elif protocol == 'tcp':
             steps.append({'step': 1, 'description': 'TCP SYN', 'from': f"{src_ip}:{src_port}",
                          'to': f"{dst_ip}:{dst_port}", 'direction': '->', 'flags': '[SYN]'})
@@ -390,6 +422,27 @@ class FlowTester:
             steps.append({'step': 4, 'description': 'Connection Established',
                          'from': f"{src_ip}:{src_port}", 'to': f"{dst_ip}:{dst_port}",
                          'direction': direction, 'flags': ''})
+        elif protocol == 'dns':
+            query_name = parsed_url['domain'] if parsed_url else 'example.com'
+            steps.append({'step': 1, 'description': f'DNS Query ({query_name})',
+                         'from': f"{src_ip}:{src_port}", 'to': f"{dst_ip}:{dst_port}",
+                         'direction': '->', 'flags': '', 'app_layer': True})
+            steps.append({'step': 2, 'description': 'DNS Response',
+                         'from': f"{dst_ip}:{dst_port}", 'to': f"{src_ip}:{src_port}",
+                         'direction': '<-', 'flags': '', 'app_layer': True})
+        elif protocol in ['ntp', 'dhcp', 'tftp']:
+            udp_app_descriptions = {
+                'ntp': ('NTP Request', 'NTP Response'),
+                'dhcp': ('DHCP Discover/Request', 'DHCP Offer/Ack'),
+                'tftp': ('TFTP Read/Write Request', 'TFTP Data/Ack'),
+            }
+            req_desc, resp_desc = udp_app_descriptions[protocol]
+            steps.append({'step': 1, 'description': req_desc,
+                         'from': f"{src_ip}:{src_port}", 'to': f"{dst_ip}:{dst_port}",
+                         'direction': '->', 'flags': '', 'app_layer': True})
+            steps.append({'step': 2, 'description': resp_desc,
+                         'from': f"{dst_ip}:{dst_port}", 'to': f"{src_ip}:{src_port}",
+                         'direction': '<-', 'flags': '', 'app_layer': True})
         elif protocol == 'udp':
             steps.append({'step': 1, 'description': 'UDP Packet', 'from': f"{src_ip}:{src_port}",
                          'to': f"{dst_ip}:{dst_port}", 'direction': direction, 'flags': ''})
@@ -462,7 +515,7 @@ class FlowTester:
         if not self._check_app_layer_protocol(rule, protocol):
             return (False, 'no_match', [])
         
-        if protocol.lower() in ['http', 'tls', 'https'] and url:
+        if protocol.lower() in ['http', 'tls', 'https', 'dns'] and url:
             if not self._check_application_layer_match(rule, protocol, url):
                 return (False, 'no_match', [])
         
@@ -649,6 +702,13 @@ class FlowTester:
             final_action = packet_scope_action
             final_rule = packet_scope_rule
             results["scope_conflict"] = True
+            # Remove the overridden FLOW-scope PASS rule from results since
+            # the PACKET-scope action is the actual final behavior
+            if flow_scope_rule and flow_scope_rule in results["matched_rules"]:
+                results["matched_rules"].remove(flow_scope_rule)
+            for key in list(results["step_rule_mapping"].keys()):
+                if flow_scope_rule in results["step_rule_mapping"][key]:
+                    results["step_rule_mapping"][key].remove(flow_scope_rule)
         elif packet_scope_action == "pass" and flow_scope_action in ["drop", "reject"]:
             final_action = flow_scope_action
             final_rule = flow_scope_rule
@@ -735,8 +795,17 @@ class FlowTester:
             return True
         if rule_proto == 'ip':
             return True
-        if rule_proto == 'tcp' and flow_proto in ['http', 'tls', 'https', 'smtp', 'ftp', 'ssh']:
+        # TCP-based application layer protocols
+        tcp_app_protocols = {'http', 'http2', 'https', 'tls', 'ssh', 'smtp', 'ftp',
+                            'imap', 'dcerpc', 'smb', 'krb5', 'msn', 'ikev2'}
+        if rule_proto == 'tcp' and flow_proto in tcp_app_protocols:
             return True
+        
+        # UDP-based application layer protocols
+        udp_app_protocols = {'dns', 'dhcp', 'ntp', 'tftp'}
+        if rule_proto == 'udp' and flow_proto in udp_app_protocols:
+            return True
+        
         return False
     
     def _direction_matches(self, rule_direction, flow_direction):
@@ -934,6 +1003,13 @@ class FlowTester:
                 if method_match and method_match.lower() != 'get':
                     return False
         
+        if protocol == 'dns':
+            if 'dns.query' in content:
+                query_match = self._extract_keyword_value(content, 'dns.query')
+                if query_match:
+                    if not self._matches_pattern(parsed_url['domain'], query_match):
+                        return False
+        
         return True
     
     def _check_ip_proto_keyword(self, rule, protocol):
@@ -945,9 +1021,12 @@ class FlowTester:
         protocol = protocol.lower()
         ip_proto_map = {
             'tcp': 'tcp', 'udp': 'udp', 'icmp': 'icmp',
-            'http': 'tcp', 'tls': 'tcp', 'https': 'tcp',
-            'ssh': 'tcp', 'ftp': 'tcp', 'smtp': 'tcp',
-            'dns': 'udp', 'quic': 'udp',
+            'http': 'tcp', 'http2': 'tcp', 'tls': 'tcp', 'https': 'tcp',
+            'ssh': 'tcp', 'ftp': 'tcp', 'smtp': 'tcp', 'imap': 'tcp',
+            'dcerpc': 'tcp', 'smb': 'tcp', 'krb5': 'tcp', 'msn': 'tcp',
+            'ikev2': 'tcp',
+            'dns': 'udp', 'ntp': 'udp', 'dhcp': 'udp', 'tftp': 'udp',
+            'quic': 'udp',
         }
         flow_ip_proto = ip_proto_map.get(protocol, protocol)
         
@@ -1010,6 +1089,8 @@ class FlowTester:
         if protocol == 'http':
             return any(kw in content for kw in ['http.host', 'http.uri', 'http.method',
                        'http.user_agent', 'http.header', 'http.cookie'])
+        if protocol == 'dns':
+            return 'dns.query' in content
         return False
     
     def _is_ip_address(self, value):
@@ -1106,13 +1187,11 @@ class FlowTester:
         elif 'endswith' in modifiers:
             return value.endswith(pattern)
         elif 'dotprefix' in modifiers:
-            if value.endswith(pattern):
-                if value == pattern:
-                    return True
-                prefix_len = len(value) - len(pattern)
-                if prefix_len > 0 and value[prefix_len - 1] == '.':
-                    return True
-            return False
+            # Suricata's dotprefix prepends a '.' to the inspected buffer before matching.
+            # So content:".example.com"; dotprefix; matches both "example.com" and "sub.example.com"
+            # because the buffer becomes ".example.com" or ".sub.example.com".
+            dotted_value = '.' + value
+            return dotted_value.endswith(pattern)
         else:
             if value == pattern:
                 return True

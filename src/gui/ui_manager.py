@@ -9066,9 +9066,10 @@ Would you like to run a complete analysis?"""
         
         # Add tooltip for dest IP when testing HTTP/TLS
         self.create_tooltip(dst_ip_entry,
-            "Note: For HTTP/TLS testing, the destination IP is used only for \n" +
-            "network/port matching. Domain matching is done via the URL/Domain field.\n" +
-            "You can use any IP (e.g., 8.8.8.8) when testing domain-based rules.")
+            "Note: For HTTP/TLS/DNS testing, the destination IP is used only for \n" +
+            "network/port matching. Domain/query matching is done via the URL/Domain\n" +
+            "or Query Name field. You can use any IP (e.g., 8.8.8.8) when testing\n" +
+            "domain-based rules.")
         
         ttk.Label(fields, text="Dest Port:").grid(row=row, column=2, sticky=tk.W, padx=(20, 5), pady=5)
         dst_port_var = tk.StringVar(value="443")
@@ -9080,7 +9081,9 @@ Would you like to run a complete analysis?"""
         ttk.Label(fields, text="Protocol:").grid(row=row, column=0, sticky=tk.W, padx=5, pady=5)
         protocol_var = tk.StringVar(value="tcp")
         protocol_combo = ttk.Combobox(fields, textvariable=protocol_var, 
-                                     values=["ip", "icmp", "udp", "tcp", "http", "tls"], 
+                                     values=["ip", "icmp", "udp", "tcp", "dns", "dhcp", "ntp", "tftp",
+                                             "http", "http2", "tls", "ssh", "smtp", "ftp", "imap",
+                                             "dcerpc", "smb", "krb5", "msn", "ikev2"], 
                                      state="readonly", width=10)
         protocol_combo.grid(row=row, column=1, sticky=tk.W, padx=5, pady=5)
         
@@ -9100,8 +9103,8 @@ Would you like to run a complete analysis?"""
         def on_test_protocol_change(event):
             protocol = protocol_var.get().lower()
             
-            # Handle ICMP - disable ports
-            if protocol == 'icmp':
+            # Handle ICMP/IP - disable ports (no port concept)
+            if protocol in ('icmp', 'ip'):
                 src_port_var.set("any")
                 dst_port_var.set("any")
                 src_port_entry.config(state="disabled")
@@ -9110,29 +9113,36 @@ Would you like to run a complete analysis?"""
                 src_port_entry.config(state="normal")
                 dst_port_entry.config(state="normal")
             
-            # Show URL field for HTTP/TLS protocols (on same row as protocol/direction)
+            # Show URL/Query field for protocols with app-layer matching
             if protocol in ['http', 'tls', 'https']:
+                url_label.config(text="URL/Domain:")
                 url_label.grid(row=2, column=4, sticky=tk.W, padx=(20, 5), pady=5)
                 url_entry.grid(row=2, column=5, columnspan=2, sticky=tk.W+tk.E, padx=5, pady=5)
-                
-                # Set default port based on protocol
                 if protocol == 'http':
                     dst_port_var.set("80")
                     url_var.set("www.example.com/path")
-                elif protocol in ['tls', 'https']:
+                else:
                     dst_port_var.set("443")
                     url_var.set("www.example.com")
+            elif protocol == 'dns':
+                url_label.config(text="Query Name:")
+                url_label.grid(row=2, column=4, sticky=tk.W, padx=(20, 5), pady=5)
+                url_entry.grid(row=2, column=5, columnspan=2, sticky=tk.W+tk.E, padx=5, pady=5)
+                dst_port_var.set("53")
+                url_var.set("example.com")
             else:
-                # Hide URL field for other protocols
                 url_label.grid_remove()
                 url_entry.grid_remove()
                 url_var.set("")
-                
-                # Reset to default values for non-HTTP/TLS
-                if protocol == 'tcp':
-                    dst_port_var.set("443")
-                elif protocol == 'udp':
-                    dst_port_var.set("53")
+                # Set default ports for known protocols
+                default_ports = {
+                    'tcp': '443', 'udp': '53', 'ssh': '22', 'smtp': '25',
+                    'ftp': '21', 'imap': '143', 'http2': '443', 'ntp': '123',
+                    'dhcp': '67', 'tftp': '69', 'smb': '445', 'dcerpc': '135',
+                    'krb5': '88', 'ikev2': '500', 'msn': '1863',
+                }
+                if protocol in default_ports:
+                    dst_port_var.set(default_ports[protocol])
         
         protocol_combo.bind('<<ComboboxSelected>>', on_test_protocol_change)
         

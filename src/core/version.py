@@ -12,7 +12,7 @@ MAIN_VERSION = "2.1.2"
 ANALYZER_VERSION = "1.11.0"
 
 # Flow tester version (managed separately)
-FLOW_TESTER_VERSION = "1.2.1"
+FLOW_TESTER_VERSION = "1.3.0"
 
 # Palo Alto importer version (managed separately)
 PALO_ALTO_IMPORTER_VERSION = "1.0.1-beta"

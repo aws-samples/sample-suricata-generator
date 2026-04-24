@@ -24,6 +24,15 @@ import re
 import datetime
 import logging
 import xml.etree.ElementTree as ET
+
+# Prefer defusedxml for XXE protection when parsing untrusted XML files.
+# Falls back gracefully — the check is enforced at parse time, not import time.
+HAS_DEFUSEDXML = False
+try:
+    import defusedxml.ElementTree as SafeET
+    HAS_DEFUSEDXML = True
+except ImportError:
+    SafeET = None
 from typing import Dict, List, Optional, Tuple, Any
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
@@ -273,9 +282,18 @@ class PaloAltoParser:
         except OSError as e:
             raise FileNotFoundError(f"Cannot access configuration file: {e}")
         
-        # Parse XML with enhanced error handling
+        # Parse XML with enhanced error handling (using defusedxml for XXE protection)
+        if not HAS_DEFUSEDXML:
+            raise ImportError(
+                "defusedxml is required for Palo Alto configuration import.\n\n"
+                "This package protects against XML External Entity (XXE) attacks\n"
+                "when parsing firewall configuration exports.\n\n"
+                "Install it with:\n"
+                "    pip install defusedxml"
+            )
+
         try:
-            tree = ET.parse(xml_path)
+            tree = SafeET.parse(xml_path)
             root = tree.getroot()
         except ET.ParseError as e:
             # Provide helpful error messages for common XML issues
@@ -2755,6 +2773,9 @@ class PaloAltoImporter:
             return
         except FileNotFoundError as e:
             messagebox.showerror("File Error", str(e))
+            return
+        except ImportError as e:
+            messagebox.showwarning("Missing Dependency", str(e))
             return
         except Exception as e:
             messagebox.showerror("Error", f"An unexpected error occurred:\n\n{str(e)}")

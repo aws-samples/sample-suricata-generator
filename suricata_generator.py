@@ -23,6 +23,7 @@ from src.aws.aws_session_manager import AWSSessionManager
 from src.core.constants import SuricataConstants
 from src.core.version import get_main_version, get_analyzer_version, get_flow_tester_version, get_palo_alto_importer_version
 from src.core.security_validator import security_validator, validate_rule_input, validate_file_operation
+from src.gui.ai_assistant_panel import AIAssistantPanel, HAS_BOTO3 as HAS_BOTO3_AI
 
 class SuricataRuleGenerator:
     """Main application class for the Suricata Rule Generator GUI"""
@@ -40,6 +41,9 @@ class SuricataRuleGenerator:
         
         self.root.title("Suricata Rule Generator for AWS Network Firewall")
         self.root.geometry("1220x900")
+
+        # macOS dark mode theme fix — ensure readable colors regardless of system theme
+        self._apply_theme_colors()
         
         # Application state variables
         self.rules: List[SuricataRule] = []  # List of all rules
@@ -80,6 +84,9 @@ class SuricataRuleGenerator:
         except ImportError:
             self.traffic_analyzer_ui = None  # Dependencies not installed
         
+        # AI Rule Assistant panel (optional - requires boto3)
+        self.ai_panel = None
+        
         # Load user configuration
         self.load_config()
         
@@ -97,6 +104,59 @@ class SuricataRuleGenerator:
         
         # Refresh tags table to show default tags on initial load
         self.refresh_tags_table()
+
+    def _apply_theme_colors(self):
+        """Apply theme colors that work on both macOS dark mode and Windows/Linux.
+        
+        Detects macOS dark mode and sets explicit foreground/background colors
+        on ttk widgets so text is always readable.
+        """
+        import platform
+        import subprocess
+        
+        is_dark = False
+        if platform.system() == 'Darwin':
+            try:
+                result = subprocess.run(
+                    ['defaults', 'read', '-g', 'AppleInterfaceStyle'],
+                    capture_output=True, text=True
+                )
+                is_dark = 'Dark' in result.stdout
+            except Exception:
+                pass
+        
+        if is_dark:
+            style = ttk.Style()
+            # Treeview (rule tables, analysis results)
+            style.configure("Treeview",
+                background="#2d2d2d",
+                foreground="#ffffff",
+                fieldbackground="#2d2d2d",
+                selectbackground="#ff9900",
+                selectforeground="#000000",
+            )
+            style.configure("Treeview.Heading",
+                background="#3d3d3d",
+                foreground="#ffffff",
+            )
+            style.map("Treeview",
+                background=[("selected", "#ff9900")],
+                foreground=[("selected", "#000000")],
+            )
+            # Store colors for child windows to use
+            self._theme_colors = {
+                'bg': '#1e1e1e', 'fg': '#ffffff',
+                'field_bg': '#2d2d2d', 'heading_bg': '#3d3d3d',
+                'select_bg': '#ff9900', 'select_fg': '#000000',
+                'is_dark': True,
+            }
+        else:
+            self._theme_colors = {
+                'bg': '#ffffff', 'fg': '#000000',
+                'field_bg': '#ffffff', 'heading_bg': '#e0e0e0',
+                'select_bg': '#0078d4', 'select_fg': '#ffffff',
+                'is_dark': False,
+            }
     
     def auto_detect_variables(self):
         """Auto-detect variables from current rules and populate Variables tab
@@ -394,8 +454,16 @@ class SuricataRuleGenerator:
         except ValueError:
             pass
         
+        # Check if this is a single negated port (e.g., !22) — valid without brackets
+        if port_spec.startswith('!') and len(port_spec) > 1:
+            try:
+                port_num = int(port_spec[1:])
+                return 1 <= port_num <= 65535
+            except ValueError:
+                pass
+        
         # Check if this contains range operators or commas (requires brackets)
-        if ':' in port_spec or ',' in port_spec or '!' in port_spec:
+        if ':' in port_spec or ',' in port_spec:
             return False  # Ranges and complex specs require brackets
         
         # If we get here, it's an invalid specification
@@ -6317,6 +6385,22 @@ class SuricataRuleGenerator:
         
         text_widget.insert(tk.END, ")\n")
         
+        # Insert Chaitanya's author line with bolded name and hyperlink
+        chaitanya_name_start = text_widget.index(tk.INSERT)
+        text_widget.insert(tk.END, "Chaitanya C")
+        chaitanya_name_end = text_widget.index(tk.INSERT)
+        text_widget.tag_add("bold", chaitanya_name_start, chaitanya_name_end)
+        
+        text_widget.insert(tk.END, " (")
+        
+        chaitanya_linkedin_start = text_widget.index(tk.INSERT)
+        text_widget.insert(tk.END, "LinkedIn")
+        chaitanya_linkedin_end = text_widget.index(tk.INSERT)
+        text_widget.tag_add("hyperlink", chaitanya_linkedin_start, chaitanya_linkedin_end)
+        text_widget.tag_add("chaitanya_linkedin", chaitanya_linkedin_start, chaitanya_linkedin_end)
+        
+        text_widget.insert(tk.END, ")\n")
+        
         # Insert version (unbolded)
         text_widget.insert(tk.END, f"\nVersion {self.get_version_number()}")
         text_widget.insert(tk.END, f"\n  Rule Analyzer v{get_analyzer_version()}")
@@ -6346,6 +6430,11 @@ class SuricataRuleGenerator:
             import webbrowser
             webbrowser.open("https://www.linkedin.com/in/jesselepich/")
         
+        # Configure hyperlink behavior for Chaitanya's LinkedIn
+        def on_chaitanya_hyperlink_click(event):
+            import webbrowser
+            webbrowser.open("https://www.linkedin.com/in/chaitanya-c-681a6a166/")
+        
         def on_hyperlink_enter(event):
             text_widget.config(cursor="hand2")
             text_widget.tag_configure("hyperlink", foreground="purple", underline=True)
@@ -6363,6 +6452,11 @@ class SuricataRuleGenerator:
         text_widget.tag_bind("jesse_linkedin", "<Button-1>", on_jesse_hyperlink_click)
         text_widget.tag_bind("jesse_linkedin", "<Enter>", on_hyperlink_enter)
         text_widget.tag_bind("jesse_linkedin", "<Leave>", on_hyperlink_leave)
+        
+        # Bind hyperlink events for Chaitanya's LinkedIn
+        text_widget.tag_bind("chaitanya_linkedin", "<Button-1>", on_chaitanya_hyperlink_click)
+        text_widget.tag_bind("chaitanya_linkedin", "<Enter>", on_hyperlink_enter)
+        text_widget.tag_bind("chaitanya_linkedin", "<Leave>", on_hyperlink_leave)
         
         text_widget.config(state=tk.DISABLED)
         
@@ -8383,6 +8477,90 @@ class SuricataRuleGenerator:
         
         self.root.destroy()
     
+    def show_ai_assistant(self):
+        """Open or bring to front the AI Rule Assistant panel."""
+        if not HAS_BOTO3_AI:
+            messagebox.showinfo(
+                "AI Rule Assistant",
+                "AI Rule Assistant requires boto3.\n\nInstall with: pip install boto3"
+            )
+            return
+        
+        if self.ai_panel is None:
+            self.ai_panel = AIAssistantPanel(self)
+        self.ai_panel.show()
+    
+    def show_pcap_tester(self):
+        """Open a file dialog to select rules and a PCAP file, then test."""
+        from src.agent.pcap_tester import PcapTester
+        from src.agent.models import PcapTestResult
+        import threading
+
+        # Build a string of all current rules (skip comments and blanks)
+        rule_strings = []
+        for rule in self.rules:
+            if not getattr(rule, "is_comment", False) and not getattr(rule, "is_blank", False):
+                rule_strings.append(rule.to_string())
+
+        if not rule_strings:
+            messagebox.showinfo("Test Rules with PCAP", "No rules to test. Add rules first.")
+            return
+
+        # Ask user to select a PCAP file
+        pcap_path = filedialog.askopenfilename(
+            title="Select PCAP File",
+            filetypes=[
+                ("PCAP files", "*.pcap *.pcapng"),
+                ("All files", "*.*"),
+            ],
+        )
+        if not pcap_path:
+            return
+
+        combined_rules = "\n".join(rule_strings)
+
+        def _run():
+            tester = PcapTester()
+            result = tester.test_rule(combined_rules, pcap_path)
+            self.root.after(0, lambda: self._show_pcap_results(result, pcap_path))
+
+        threading.Thread(target=_run, daemon=True).start()
+        self.update_status_bar("Testing rules with PCAP…")
+
+    def _show_pcap_results(self, result, pcap_path):
+        """Display PCAP test results in a dialog."""
+        import os
+        filename = os.path.basename(pcap_path)
+
+        if result.error:
+            if "not found" in result.error.lower():
+                messagebox.showinfo(
+                    "PCAP Test",
+                    "PCAP testing requires Suricata to be installed.\n\n"
+                    "Install with:\n"
+                    "  brew install suricata (macOS)\n"
+                    "  apt install suricata (Linux)"
+                )
+            else:
+                messagebox.showerror("PCAP Test Error", result.error)
+        elif result.triggered:
+            details = f"File: {filename}\n"
+            details += f"Alerts: {result.alert_count}\n\n"
+            for alert in result.alerts[:20]:
+                src = alert.get("src_ip", "?")
+                dst = alert.get("dest_ip", "?")
+                sig = alert.get("alert", {}).get("signature", "")
+                details += f"  {src} → {dst}  {sig}\n"
+            if result.alert_count > 20:
+                details += f"\n  … and {result.alert_count - 20} more."
+            messagebox.showinfo("PCAP Test Results", details)
+        else:
+            messagebox.showinfo(
+                "PCAP Test Results",
+                f"File: {filename}\n\nNo matches — no rules triggered on this PCAP file."
+            )
+        self.update_status_bar("PCAP test complete.")
+
     def run(self):
         """Start the application"""
         self.root.mainloop()

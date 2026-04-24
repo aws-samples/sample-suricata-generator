@@ -1,0 +1,780 @@
+{
+  "version": "1.2.0",
+  "last_updated": "2026-04-23",
+  "description": "Curated Suricata rule examples from official AWS and Suricata documentation",
+  "source": "https://docs.aws.amazon.com/network-firewall/latest/developerguide/suricata-examples.html",
+  "examples": [
+    {
+      "name": "Allow SSM endpoints via TLS SNI",
+      "category": "allow",
+      "rule": "pass tls $HOME_NET any -> $EXTERNAL_NET any (ssl_state:client_hello; tls.sni; content:\"ssm.\"; startswith; content:\".amazonaws.com\"; endswith; nocase; flow:to_server; sid:202308311;)",
+      "description": "Allow access to any domain beginning with ssm. and ending with .amazonaws.com"
+    },
+    {
+      "name": "Allow specific JA3 hash (Curl 7.79.1)",
+      "category": "allow",
+      "rule": "pass tls $HOME_NET any -> $EXTERNAL_NET any (msg:\"Only allow Curl 7.79.1 JA3\"; ja3.hash; content:\"27e9c7cc45ae47dc50f51400db8a4099\"; sid:12820009;)",
+      "description": "Allow outbound access using a specific JA3 client fingerprint hash"
+    },
+    {
+      "name": "Allow DNS queries for amazonaws.com",
+      "category": "allow",
+      "rule": "pass dns $HOME_NET any -> $EXTERNAL_NET any (dns.query; dotprefix; content:\".amazonaws.com\"; endswith; nocase; msg:\"Pass rules do not alert\"; sid:118947;)",
+      "description": "Allow DNS queries for domain names ending in .amazonaws.com"
+    },
+    {
+      "name": "Allow AWS SFTP banner only",
+      "category": "allow",
+      "rule": "pass ssh $EXTERNAL_NET 22 -> $HOME_NET any (ssh.software; content:\"AWS_SFTP\"; flow:from_server; sid:217872;)",
+      "description": "Allow only SSH/SFTP servers with AWS_SFTP banner"
+    },
+    {
+      "name": "Block old TLS versions",
+      "category": "block",
+      "rule": "reject tls any any -> any any (msg:\"TLS 1.0 or 1.1\"; ssl_version:tls1.0,tls1.1; sid:2023070518;)",
+      "description": "Block connections using TLS version 1.0 or 1.1"
+    },
+    {
+      "name": "Block multiple CIDR ranges",
+      "category": "block",
+      "rule": "drop ip $HOME_NET any -> [10.10.0.0/16,10.11.0.0/16,10.12.0.0/16] any (msg:\"Block traffic to multiple CIDRs\"; sid:278970;)",
+      "description": "Block outbound access to multiple CIDR ranges in a single rule"
+    },
+    {
+      "name": "Block multiple SNIs via PCRE",
+      "category": "block",
+      "rule": "reject tls $HOME_NET any -> $EXTERNAL_NET any (ssl_state:client_hello; tls.sni; pcre:\"/(example1\\.com|example2\\.com)$/i\"; flow:to_server; msg:\"Domain blocked\"; sid:1457;)",
+      "description": "Block multiple SNIs with a single rule using PCRE"
+    },
+    {
+      "name": "Block high-risk destination ports",
+      "category": "block",
+      "rule": "drop ip $HOME_NET any -> $EXTERNAL_NET [1389,53,4444,445,135,139,389,3389] (msg:\"Deny List High Risk Destination Ports\"; sid:278670;)",
+      "description": "Block multiple high-risk destination outbound ports"
+    },
+    {
+      "name": "Block HTTP direct-to-IP",
+      "category": "block",
+      "rule": "reject http $HOME_NET any -> $EXTERNAL_NET any (http.host; content:\".\"; pcre:\"/^(?:[0-9]{1,3}\\\\.){3}[0-9]{1,3}$/\"; msg:\"IP in HTTP HOST Header\"; flow:to_server; sid:1239847;)",
+      "description": "Block outbound HTTP connections with IP address in HOST header"
+    },
+    {
+      "name": "Block TLS direct-to-IP via SNI",
+      "category": "block",
+      "rule": "reject tls $HOME_NET any -> $EXTERNAL_NET any (ssl_state:client_hello; tls.sni; content:\".\"; pcre:\"/^(?:[0-9]{1,3}\\\\.){3}[0-9]{1,3}$/\"; msg:\"IP in TLS SNI\"; flow:to_server; sid:1239848;)",
+      "description": "Block outbound TLS connections with IP address in SNI"
+    },
+    {
+      "name": "Block non-TCP/UDP/ICMP protocols",
+      "category": "block",
+      "rule": "drop ip any any -> any any (noalert; ip_proto:!TCP; ip_proto:!UDP; ip_proto:!ICMP; sid:21801620;)",
+      "description": "Silently block any IP protocols other than TCP, UDP, and ICMP"
+    },
+    {
+      "name": "Block SSH on non-standard ports",
+      "category": "block",
+      "rule": "reject ssh $HOME_NET any -> $EXTERNAL_NET !22 (msg:\"Block use of SSH protocol on non-standard port\"; flow:to_server; sid:2171010;)",
+      "description": "Block SSH protocol on non-standard ports"
+    },
+    {
+      "name": "Block non-SSH on port 22",
+      "category": "block",
+      "rule": "reject tcp $HOME_NET any -> $EXTERNAL_NET 22 (msg:\"Block TCP/22 servers that are not SSH protocol\"; flow:to_server; app-layer-protocol:!ssh; sid:2171009;)",
+      "description": "Block TCP/22 servers not using SSH protocol"
+    },
+    {
+      "name": "Log allowed SNI with alert",
+      "category": "log",
+      "rule": "pass tls $HOME_NET any -> $EXTERNAL_NET any (ssl_state:client_hello; tls.sni; content:\".example.com\"; dotprefix; endswith; nocase; alert; sid:202307052;)",
+      "description": "Log all passed traffic to an allowed SNI using alert keyword in pass rule"
+    },
+    {
+      "name": "Default egress TCP block with logging",
+      "category": "log",
+      "rule": "reject tcp $HOME_NET any -> $EXTERNAL_NET any (msg:\"Default Egress TCP block to server\"; flow:to_server; sid:202308171;)",
+      "description": "Log direction of denied traffic in default-deny policy"
+    },
+    {
+      "name": "SNI allowlist with cert issuer check (xbits)",
+      "category": "advanced",
+      "rule": "alert tls $HOME_NET any -> $EXTERNAL_NET 443 (ssl_state:client_hello; tls.sni; content:\"checkip.amazonaws.com\"; endswith; nocase; xbits:set,allowed_sni_destination_ips,track ip_dst,expire 3600; noalert; sid:238745;)",
+      "description": "Set xbit on allowed SNI for subsequent cert issuer verification"
+    },
+    {
+      "name": "HTTP Content-Length check (large POST >1MB)",
+      "category": "detection",
+      "rule": "alert http $HOME_NET any -> $EXTERNAL_NET any (msg:\"HTTP Content-Length Request Byte Test Example\"; flow:established,to_server; http.method; content:\"POST\"; http.content_len; byte_test:0,>=,1048576,0,string,dec; sid:99; rev:1;)",
+      "description": "Alert on HTTP POST requests with Content-Length >= 1MB using byte_test for numeric comparison"
+    },
+    {
+      "name": "HTTP request with full header matching",
+      "category": "detection",
+      "rule": "alert http $HOME_NET any -> $EXTERNAL_NET any (msg:\"HTTP Request Example\"; flow:established,to_server; http.method; content:\"GET\"; http.uri; content:\"/index.html\"; bsize:11; http.protocol; content:\"HTTP/1.1\"; bsize:8; http.user_agent; content:\"Mozilla/5.0\"; bsize:11; http.host; content:\"suricata.io\"; bsize:11; sid:25; rev:1;)",
+      "description": "Full HTTP request matching with method, URI, protocol, user-agent, and host"
+    },
+    {
+      "name": "HTTP anomaly detection with flowint",
+      "rule": "alert http any any -> any any (msg:\"SURICATA HTTP unknown error\"; flow:established; app-layer-event:http.unknown_error; flowint:http.anomaly.count,+,1; classtype:protocol-command-decode; sid:2221000; rev:1;)",
+      "description": "Built-in Suricata rule using app-layer-event and flowint for HTTP anomaly counting",
+      "source": "suricata-main/rules/http-events.rules"
+    },
+    {
+      "name": "TLS heartbleed detection",
+      "rule": "alert tls any any -> any any (msg:\"SURICATA TLS overflow heartbeat encountered, possible exploit attempt (heartbleed)\"; flow:established; app-layer-event:tls.overflow_heartbeat_message; flowint:tls.anomaly.count,+,1; classtype:protocol-command-decode; reference:cve,2014-0160; sid:2230012; rev:1;)",
+      "description": "Built-in Suricata rule detecting TLS heartbleed exploit using CVE reference",
+      "source": "suricata-main/rules/tls-events.rules"
+    },
+    {
+      "name": "DNS domain matching with dotprefix transform",
+      "rule": "alert dns any any -> any any (dns.query; dotprefix; content:\".microsoft.com\"; endswith; sid:1;)",
+      "description": "Use dotprefix transform to match subdomains of microsoft.com without false positives",
+      "source": "suricata docs - transforms"
+    },
+    {
+      "name": "SSH software version detection",
+      "rule": "alert ssh any any -> any any (msg:\"match SSH software string\"; ssh.software; content:\"openssh\"; nocase; sid:1000020;)",
+      "description": "Match SSH connections by software banner using ssh.software sticky buffer",
+      "source": "suricata docs - ssh-keywords"
+    },
+    {
+      "name": "TLS SNI domain blocking",
+      "rule": "alert tls any any -> any any (msg:\"Block malicious TLS domain\"; flow:established,to_server; tls.sni; content:\"malware.com\"; nocase; isdataat:!1,relative; sid:1000030; rev:1;)",
+      "description": "Block TLS connections to specific domain using tls.sni with exact match (isdataat:!1,relative ensures no trailing data)",
+      "source": "suricata docs - tls-keywords"
+    },
+    {
+      "name": "DNS query detection",
+      "rule": "alert dns any any -> any any (msg:\"DNS query for suspicious domain\"; dns.query; content:\"malware\"; nocase; sid:1000040; rev:1;)",
+      "description": "Detect DNS queries containing suspicious keywords using dns.query sticky buffer",
+      "source": "suricata docs - dns-keywords"
+    },
+    {
+      "name": "File type detection by extension",
+      "rule": "alert http any any -> any any (msg:\"Executable file download detected\"; flow:established,to_client; file.name; content:\".exe\"; nocase; endswith; sid:1000050; rev:1;)",
+      "description": "Detect executable file downloads using file.name sticky buffer with endswith",
+      "source": "suricata docs - file-keywords"
+    },
+    {
+      "name": "Large file transfer detection",
+      "rule": "alert http any any -> any any (msg:\"Large file upload over 100MB\"; flow:established,to_server; filesize:>100MB; sid:1000060; rev:1;)",
+      "description": "Detect large file uploads using filesize keyword with MB unit",
+      "source": "suricata docs - file-keywords"
+    },
+    {
+      "name": "Rate limiting with threshold",
+      "rule": "alert tcp !$HOME_NET any -> $HOME_NET 25 (msg:\"Possible spambot - frequent emails\"; flow:established; content:\"mail from|3a|\"; nocase; threshold: type threshold, track by_src, count 10, seconds 60; classtype:misc-activity; sid:2002087; rev:10;)",
+      "description": "Alert after 10+ inbound emails from same source within 60 seconds using threshold keyword",
+      "source": "suricata docs - thresholding"
+    },
+    {
+      "name": "SSH blacklist with xbits",
+      "rule": "drop ssh any any -> any 22 (msg:\"DROP libssh incoming\"; flow:to_server,established; ssh.software; content:\"libssh\"; xbits:set, badssh, track ip_src, expire 3600; sid:4000000005;)",
+      "description": "Drop SSH connections from bots using libssh and set xbit for IP blacklisting",
+      "source": "suricata docs - xbits"
+    },
+    {
+      "name": "AWS: Port/protocol enforcement - TLS on 443 only",
+      "rule": "reject tcp $HOME_NET any -> any 443 (msg:\"Egress Port TCP/443 but not TLS\"; app-layer-protocol:!tls; flow:to_server; sid:202501030;)",
+      "description": "Reject non-TLS traffic on port 443 using app-layer-protocol negation",
+      "source": "AWS Network Firewall Best Practices"
+    },
+    {
+      "name": "AWS: Block direct-to-IP HTTP connections",
+      "rule": "reject http $HOME_NET any -> any any (http.host; content:\".\"; pcre:\"/^(?:[0-9]{1,3}\\.){3}[0-9]{1,3}$/\"; msg:\"HTTP direct to IP\"; flow:to_server; sid:202501026;)",
+      "description": "Block HTTP requests where host header is an IP address (common malware technique)",
+      "source": "AWS Network Firewall Best Practices"
+    },
+    {
+      "name": "AWS: GeoIP blocking - Russia",
+      "rule": "drop ip $HOME_NET any -> any any (msg:\"Egress traffic to RU IP\"; geoip:dst,RU; metadata:geo RU; flow:to_server; sid:202501028;)",
+      "description": "Block all egress traffic to Russian IP addresses using geoip keyword",
+      "source": "AWS Network Firewall Best Practices"
+    },
+    {
+      "name": "AWS: Block high-risk ccTLD via TLS SNI",
+      "rule": "reject tls $HOME_NET any -> any any (tls.sni; content:\".ru\"; nocase; endswith; msg:\"Egress traffic to RU ccTLD\"; flow:to_server; sid:202501036;)",
+      "description": "Block TLS connections to .ru domains using SNI endswith matching",
+      "source": "AWS Network Firewall Best Practices"
+    },
+    {
+      "name": "AWS: Allow AWS service endpoint via TLS SNI",
+      "rule": "pass tls $HOME_NET any -> any any (tls.sni; content:\"ssm.\"; startswith; nocase; content:\".amazonaws.com\"; endswith; nocase; flow:to_server; sid:202501048;)",
+      "description": "Allow SSM service endpoint using startswith/endswith content matching on TLS SNI",
+      "source": "AWS Network Firewall Best Practices"
+    },
+    {
+      "name": "AWS: Allow domain and all subdomains with dotprefix",
+      "rule": "pass tls $HOME_NET any -> any any (tls.sni; dotprefix; content:\".amazon.com\"; nocase; endswith; flow:to_server; sid:202501078;)",
+      "description": "Allow amazon.com and all subdomains using dotprefix transform (note leading dot)",
+      "source": "AWS Network Firewall Best Practices"
+    },
+    {
+      "name": "AWS: Alert before pass for logging allowed traffic",
+      "rule": "alert tls $HOME_NET any -> any any (tls.sni; content:\".amazonaws.com\"; nocase; endswith; msg:\"*.amazonaws.com allowed\"; flow:to_server; sid:021420241;)",
+      "description": "Alert rule placed before pass rule to log allowed traffic (pass rules don't log)",
+      "source": "AWS Network Firewall Best Practices"
+    },
+    {
+      "name": "AWS: Block QUIC traffic",
+      "rule": "drop quic $HOME_NET any -> any any (msg:\"QUIC traffic blocked\"; flow:to_server; sid:3898932;)",
+      "description": "Block all QUIC/HTTP3 traffic to force TLS inspection on TCP",
+      "source": "AWS Network Firewall Best Practices"
+    },
+    {
+      "name": "AWS: Cost-optimized SSH alert with threshold",
+      "rule": "alert ssh $HOME_NET any -> any any (msg:\"Egress SSH - alert only once every ten minutes\"; threshold: type limit, track by_both, seconds 600, count 1; flow:to_server; sid:898233;)",
+      "description": "Rate-limited SSH alert to reduce logging costs using threshold type limit",
+      "source": "AWS Network Firewall Best Practices"
+    },
+    {
+      "name": "AWS: Block malicious domain category",
+      "rule": "reject tls $HOME_NET any -> any any (msg:\"Category:Malware\"; aws_domain_category:Malware; ja4.hash; content:\"_\"; flow:to_server; sid:202602064;)",
+      "description": "Block TLS connections to AWS-categorized malware domains using managed domain categories",
+      "source": "AWS Network Firewall Best Practices"
+    },
+    {
+      "name": "AWS: TCP 3-way handshake pass for domain filtering",
+      "rule": "pass tcp $HOME_NET any -> any any (flow:not_established, to_server; sid:202501021;)",
+      "description": "Allow TCP handshake setup so domain filtering rules can inspect application layer",
+      "source": "AWS Network Firewall Best Practices"
+    },
+    {
+      "name": "AWS: Default egress HTTPS reject",
+      "rule": "reject tls $HOME_NET any -> any any (msg:\"Default Egress HTTPS Reject\"; ssl_state:client_hello; ja4.hash; content:\"_\"; flowbits:set,blocked; flow:to_server; sid:999991;)",
+      "description": "Default block rule for egress HTTPS using ssl_state and flowbits coordination",
+      "source": "AWS Network Firewall Best Practices"
+    },
+    {
+      "name": "AWS: High risk port monitoring",
+      "rule": "alert ip $HOME_NET any -> any [4444,666,3389] (msg:\"Egress traffic to high risk port!\"; flow:to_server; sid:202501058;)",
+      "description": "Alert on egress traffic to commonly abused ports (Metasploit, RDP, etc.)",
+      "source": "AWS Network Firewall Best Practices"
+    },
+    {
+      "name": "AWS: JA4 No-SNI reject",
+      "category": "block",
+      "rule": "reject tls $HOME_NET any -> any any (ja4.hash; content:\"_\"; startswith; content:!\"d\"; offset:3; depth:1; msg:\"JA4 No SNI Reject\"; sid:1297713;)",
+      "description": "Reject TLS connections with no SNI set. The JA4 hash encodes whether SNI is present — this rule detects its absence using byte-level matching on the JA4 hash structure.",
+      "source": "AWS Network Firewall Best Practices"
+    },
+    {
+      "name": "DNS tunneling - excessive query volume",
+      "rule": "alert udp $HOME_NET any -> any 53 (msg:\"Excessive DNS queries - possible DNS tunneling\"; flow:to_server; threshold:type threshold, track by_src, count 50, seconds 120; sid:2000001; rev:1;)",
+      "description": "Detect high DNS query rate from single host using threshold with track by_src (not by_both)",
+      "source": "DNS tunneling detection pattern"
+    },
+    {
+      "name": "DNS tunneling - long subdomain exfiltration",
+      "rule": "alert dns $HOME_NET any -> any 53 (msg:\"Abnormally long DNS subdomain - potential data exfiltration\"; flow:to_server; dns.query; pcre:\"/^[^.]{40,}/\"; sid:2000002; rev:1;)",
+      "description": "Detect DNS queries with subdomain labels exceeding 40 chars using pcre (not isdataat for subdomain length)",
+      "source": "DNS tunneling detection pattern"
+    },
+    {
+      "name": "DNS tunneling - large TXT response C2",
+      "rule": "alert dns any 53 -> $HOME_NET any (msg:\"Large DNS TXT response - possible C2 communication\"; flow:established,to_client; dsize:>200; content:\"|00 10|\"; sid:2000003; rev:1;)",
+      "description": "Detect large DNS TXT record responses. Source is DNS server on port 53 (responses come FROM port 53). Uses dsize for payload size and content match for TXT record type 16",
+      "source": "DNS tunneling detection pattern"
+    },
+    {
+      "name": "TLS C2 - suspicious certificate issuer (not well-known CA)",
+      "rule": "alert tls $HOME_NET any -> $EXTERNAL_NET 443 (msg:\"Suspicious TLS certificate issuer - possible C2\"; flow:established,to_server; tls.cert_issuer; pcre:\"/^(?!.*(?:DigiCert|Let's Encrypt|Comodo|GlobalSign|Sectigo|Amazon|Google Trust|Microsoft|IdenTrust|Baltimore|Entrust|GeoTrust|Thawte|VeriSign|Go Daddy|Starfield|USERTrust|Buypass|QuoVadis|SwissSign|ISRG Root))/i\"; sid:3000010; rev:1;)",
+      "description": "Detect TLS certificates NOT from well-known CAs using negative PCRE lookahead on tls.cert_issuer. Suricata CANNOT compare subject==issuer natively. Do NOT use both tls.cert_subject and tls.cert_issuer in the same rule — the second sticky buffer overrides the first.",
+      "source": "TLS C2 detection pattern (validated)"
+    },
+    {
+      "name": "TLS C2 - uncommon issuer with short CN (ephemeral C2 cert)",
+      "rule": "alert tls $HOME_NET any -> $EXTERNAL_NET 443 (msg:\"Suspicious TLS cert from uncommon issuer with short CN - possible ephemeral C2\"; flow:established,to_server; tls.cert_issuer; content:\"CN=\"; pcre:\"/^CN=[a-zA-Z0-9\\\\-\\\\.]{1,30}(,\\\\s*O=[^,]{1,30})?$/\"; pcre:\"/^(?!.*(?:DigiCert|Let's Encrypt|Comodo|GlobalSign|Sectigo|Amazon|Google Trust|Microsoft|IdenTrust))/i\"; sid:3000014; rev:1;)",
+      "description": "Detect certs from non-well-known issuers with short CN values typical of auto-generated C2 certificates. Approximation for short-lived cert detection since tls_cert_notbefore/tls_cert_notafter are NOT valid rule keywords.",
+      "source": "TLS C2 detection pattern (validated)"
+    },
+    {
+      "name": "TLS C2 - weak cipher suite NULL encryption",
+      "rule": "alert tls $HOME_NET any -> $EXTERNAL_NET 443 (msg:\"Weak TLS cipher suite detected - NULL encryption\"; flow:to_server; ssl_state:client_hello; tls.ciphersuites; content:\"|00 00|\"; sid:3000011; rev:1;)",
+      "description": "Detect TLS ClientHello offering NULL cipher suite (0x0000). Uses ssl_state:client_hello then tls.ciphersuites sticky buffer before content match.",
+      "source": "TLS C2 detection pattern (validated)"
+    },
+    {
+      "name": "TLS C2 - weak cipher suite with PCRE alternation",
+      "rule": "alert tls $HOME_NET any -> $EXTERNAL_NET 443 (msg:\"Weak or uncommon TLS cipher suite - possible C2 evasion\"; flow:to_server; ssl_state:client_hello; tls.ciphersuites; pcre:\"/\\\\x00\\\\x00|\\\\x00\\\\x03/\"; sid:3000015; rev:1;)",
+      "description": "Detect NULL (0x0000) OR EXPORT_RC4_40 (0x0003) cipher suites using PCRE alternation after tls.ciphersuites sticky buffer. Use pcre for OR matching multiple ciphers.",
+      "source": "TLS C2 detection pattern (validated)"
+    },
+    {
+      "name": "TLS C2 - periodic beaconing small payloads",
+      "rule": "alert tcp $HOME_NET any -> $EXTERNAL_NET 443 (msg:\"Periodic beaconing detected - possible C2 check-in\"; flow:established,to_server; dsize:<1024; app-layer-protocol:tls; threshold:type threshold, track by_both, count 5, seconds 300; sid:3000012; rev:1;)",
+      "description": "Detect periodic small-payload connections to port 443. Uses flow:established (NOT flags:S) because dsize requires payload data. Uses track by_both for src-dst pair tracking. Do NOT use dsize with SYN packets.",
+      "source": "TLS C2 detection pattern"
+    },
+    {
+      "name": "TLS C2 - certificate from uncommon issuer with xbits",
+      "rule": "alert tls $HOME_NET any -> $EXTERNAL_NET 443 (msg:\"TLS cert from uncommon issuer\"; flow:established,to_server; tls.cert_issuer; pcre:\"/^(?!.*(?:DigiCert|Let's Encrypt|Comodo|GlobalSign|Sectigo|Amazon|Google Trust))/i\"; sid:3000013; rev:1;)",
+      "description": "Alert on TLS certificates NOT issued by well-known CAs using negative lookahead PCRE. Useful for C2 detection where attackers use self-signed or obscure CA certs.",
+      "source": "TLS C2 detection pattern"
+    },
+    {
+      "name": "Protocol anomaly - HTTP cleartext on port 443",
+      "rule": "alert http any any -> any 443 (msg:\"HTTP clear text on port 443\"; flow:to_server; app-layer-protocol:http; threshold: type limit, track by_src, seconds 3600, count 1; sid:2271019; rev:1;)",
+      "description": "Detect unencrypted HTTP on port 443 (should be TLS). Uses app-layer-protocol:http to match actual protocol, not just port.",
+      "source": "suricata-rules community (traffic_anomalies)"
+    },
+    {
+      "name": "Protocol anomaly - non-HTTP on TCP port 80",
+      "rule": "alert tcp any any -> any 80 (msg:\"Non-HTTP on TCP port 80\"; flow:to_server; app-layer-protocol:!http; threshold: type limit, track by_src, seconds 60, count 1; sid:2271002; rev:1;)",
+      "description": "Detect non-HTTP traffic on port 80 using app-layer-protocol negation. Catches tunneling or protocol abuse.",
+      "source": "suricata-rules community (traffic_anomalies)"
+    },
+    {
+      "name": "Protocol anomaly - TLS on unusual port",
+      "rule": "alert tcp any any -> any ![443,465,587] (msg:\"TLS on unusual port\"; flow:to_server; app-layer-protocol:tls; threshold: type limit, track by_src, seconds 60, count 1; sid:2271004; rev:1;)",
+      "description": "Detect TLS on non-standard ports using port negation group and app-layer-protocol:tls. Catches C2 or data exfiltration over encrypted channels on unusual ports.",
+      "source": "suricata-rules community (traffic_anomalies)"
+    },
+    {
+      "name": "Protocol anomaly - non-TLS on TLS port",
+      "rule": "alert tcp any any -> any [443,465] (msg:\"Non-TLS on TLS port\"; flow:to_server; app-layer-protocol:!tls; threshold: type limit, track by_src, seconds 60, count 1; sid:2271003; rev:1;)",
+      "description": "Detect non-TLS traffic on ports 443/465 using app-layer-protocol negation. Catches protocol abuse or tunneling.",
+      "source": "suricata-rules community (traffic_anomalies)"
+    },
+    {
+      "name": "Protocol anomaly - SSH on unusual port",
+      "rule": "alert tcp any any -> any !22 (msg:\"SSH on unusual port\"; flow:to_server; app-layer-protocol:ssh; threshold: type limit, track by_src, seconds 60, count 1; sid:2271009; rev:1;)",
+      "description": "Detect SSH on non-standard ports. Catches SSH tunneling or backdoor access on unexpected ports.",
+      "source": "suricata-rules community (traffic_anomalies)"
+    },
+    {
+      "name": "Protocol anomaly - non-SSH on TCP port 22",
+      "rule": "alert tcp any any -> any 22 (msg:\"Non-SSH on TCP port 22\"; flow:to_server; app-layer-protocol:!ssh; threshold: type limit, track by_src, seconds 60, count 1; sid:2271010; rev:1;)",
+      "description": "Detect non-SSH traffic on port 22. Catches protocol abuse or tunneling through SSH port.",
+      "source": "suricata-rules community (traffic_anomalies)"
+    },
+    {
+      "name": "Protocol anomaly - FTP on unusual port",
+      "rule": "alert tcp any any -> any ![20,21,6667] (msg:\"FTP on unusual TCP port\"; flow:to_server; app-layer-protocol:ftp; threshold: type limit, track by_src, seconds 60, count 1; sid:2271005; rev:1;)",
+      "description": "Detect FTP on non-standard ports using port negation group.",
+      "source": "suricata-rules community (traffic_anomalies)"
+    },
+    {
+      "name": "Protocol anomaly - DNS-TCP on unusual port",
+      "rule": "alert tcp any any -> any !53 (msg:\"DNS-TCP on unusual port\"; flow:to_server; app-layer-protocol:dns; threshold: type limit, track by_src, seconds 60, count 1; sid:2271015; rev:1;)",
+      "description": "Detect DNS over TCP on non-standard ports. May indicate DNS tunneling or exfiltration.",
+      "source": "suricata-rules community (traffic_anomalies)"
+    },
+    {
+      "name": "Protocol anomaly - DNS-UDP on unusual port",
+      "rule": "alert udp any any -> any !53 (msg:\"DNS-UDP on unusual port\"; flow:to_server; app-layer-protocol:dns; threshold: type limit, track by_src, seconds 60, count 1; sid:2271017; rev:1;)",
+      "description": "Detect DNS over UDP on non-standard ports. May indicate DNS tunneling.",
+      "source": "suricata-rules community (traffic_anomalies)"
+    },
+    {
+      "name": "HTTP on unusual port",
+      "rule": "alert tcp any any -> any !80 (msg:\"HTTP on unusual port\"; flow:to_server; app-layer-protocol:http; threshold: type limit, track by_src, seconds 60, count 1; sid:2271001; rev:1;)",
+      "description": "Detect HTTP on non-standard ports. Catches web shells, C2 callbacks, or misconfigured services.",
+      "source": "suricata-rules community (traffic_anomalies)"
+    },
+    {
+      "name": "Suspicious domain - Tor exit node via HTTP",
+      "rule": "alert http any any -> any any (msg:\"HTTP Request to suspicious *.onion.to domain\"; flow:established,to_server; content:\".onion.to\"; http_host; isdataat:!1,relative; sid:2500007; rev:1;)",
+      "description": "Detect HTTP requests to Tor-to-web proxy domains (.onion.to). Uses http_host with isdataat:!1,relative for exact domain suffix match.",
+      "source": "suricata-rules community (suspicious)"
+    },
+    {
+      "name": "Suspicious domain - generic .onion proxy",
+      "rule": "alert http any any -> any any (msg:\"HTTP Request to suspicious *.onion.* domain\"; flow:established,to_server; content:\".onion.\"; http_host; isdataat:!1,relative; sid:2500011; rev:1;)",
+      "description": "Detect HTTP requests to any Tor-to-web proxy domain (.onion.*). Broad pattern for Tor proxy detection.",
+      "source": "suricata-rules community (suspicious)"
+    },
+    {
+      "name": "Suspicious DNS query - .ws TLD",
+      "rule": "alert udp any any -> any 53 (msg:\"DNS Query to suspicious *.ws domain\"; content:\"|01 00 00 01 00 00 00 00 00 00|\"; depth:10; offset:2; content:\"|02|ws|00|\"; nocase; sid:2500003; rev:1;)",
+      "description": "Detect DNS queries to .ws TLD using raw DNS packet content matching with hex byte patterns for DNS wire format.",
+      "source": "suricata-rules community (suspicious)"
+    },
+    {
+      "name": "Plaintext private key over HTTP",
+      "rule": "alert http any any -> any any (msg:\"Plaintext PEM RSA private key over HTTP\"; filemagic:\"PEM RSA private key\"; sid:2500017; rev:1;)",
+      "description": "Detect RSA private keys transmitted in plaintext over HTTP using filemagic keyword for file type detection.",
+      "source": "suricata-rules community (plaintext)"
+    },
+    {
+      "name": "Plaintext certificate request over HTTP",
+      "rule": "alert http any any -> any any (msg:\"Plaintext PEM certificate request over HTTP\"; filemagic:\"PEM certificate request\"; sid:2500016; rev:1;)",
+      "description": "Detect PEM certificate requests transmitted over HTTP using filemagic keyword.",
+      "source": "suricata-rules community (plaintext)"
+    },
+    {
+      "name": "Pass rule - Windows Update whitelist",
+      "rule": "pass http $HOME_NET any -> $EXTERNAL_NET any (flow:established,to_server; content:\"windowsupdate.com\"; http_host; isdataat:!1,relative; sid:9000001; rev:1;)",
+      "description": "Bypass detection engine for Windows Update traffic. Pass rules prevent matched traffic from triggering other rules. Use sparingly.",
+      "source": "suricata-rules community (pass)"
+    },
+    {
+      "name": "Backdoor - Teleconsole DNS query",
+      "rule": "alert dns any any -> any any (msg:\"Teleconsole DNS query\"; dns_query; content:\"teleconsole\"; nocase; sid:9000032; rev:1;)",
+      "description": "Detect DNS queries for Teleconsole remote access tool using dns_query content match.",
+      "source": "suricata-rules community (backdoors)"
+    },
+    {
+      "name": "Suspicious TLS cert - Tor onion.to",
+      "rule": "alert tls any any -> any any (msg:\"SSL session to suspicious *onion.to\"; tls.subject:\"CN=*.onion.to, OU=Domain Control Validated\"; sid:2500013; rev:1;)",
+      "description": "Detect TLS connections with certificates issued to Tor proxy domains using tls.subject exact match.",
+      "source": "suricata-rules community (suspicious)"
+    },
+    {
+      "name": "SSH brute force detection with SYN flags",
+      "rule": "alert tcp $HOME_NET any -> any 22 (msg:\"Potential SSH brute force attack from internal host\"; flow:to_server; flags:S; threshold:type threshold, track by_src, count 10, seconds 60; sid:1000005; rev:1;)",
+      "description": "Detect SSH brute force by counting SYN packets (connection attempts). MUST use flags:S with flow:to_server, NOT flow:established — established only matches completed handshakes and misses failed login attempts.",
+      "source": "SSH attack detection (validated)"
+    },
+    {
+      "name": "SSH tunneling detection with stream_size and app-layer-protocol",
+      "rule": "alert tcp $HOME_NET any -> any any (msg:\"Suspicious SSH tunnel - high data volume\"; flow:established,to_server; app-layer-protocol:ssh; stream_size:server,>,10485760; sid:1000006; rev:1;)",
+      "description": "Detect SSH tunneling by monitoring data volume. MUST include app-layer-protocol:ssh to scope to SSH only (without it, matches ALL TCP traffic over 10MB). Uses stream_size for byte counting.",
+      "source": "SSH attack detection (validated)"
+    },
+    {
+      "name": "TLS C2 - periodic beaconing with small payloads",
+      "rule": "alert tcp $HOME_NET any -> $EXTERNAL_NET 443 (msg:\"Periodic beaconing detected - possible automated C2 check-in\"; flow:established,to_server; app-layer-protocol:tls; dsize:<1024; threshold:type threshold, track by_both, count 5, seconds 300; sid:3000003; rev:1;)",
+      "description": "Detect periodic small-payload TLS connections. Uses flow:established (NOT flags:S — SYN packets have no payload so dsize won't work). Uses track by_both for src-dst pair tracking. app-layer-protocol:tls scopes to TLS only.",
+      "source": "TLS C2 detection pattern (validated)"
+    },
+    {
+      "name": "HTTP/2 Transfer-Encoding smuggling (RFC 7540 violation)",
+      "rule": "alert http $HOME_NET any -> $EXTERNAL_NET 443 (msg:\"Transfer-Encoding header in HTTP/2 - protocol violation for smuggling\"; flow:established,to_server; http.protocol; content:\"HTTP/2\"; http.header_names; content:\"Transfer-Encoding\"; nocase; sid:4000002; rev:1;)",
+      "description": "Detect Transfer-Encoding header in HTTP/2 traffic (forbidden by RFC 7540). Uses http.protocol to match HTTP/2, then http.header_names to check for header presence. Do NOT use http.header for presence checks — use http.header_names. Do NOT add CRLF hex bytes in header_names content.",
+      "source": "HTTP/2 smuggling detection (validated)"
+    },
+    {
+      "name": "WebSocket upgrade with IP-based Origin (C2 tunnel)",
+      "rule": "alert http $HOME_NET any -> any [80,443] (msg:\"WebSocket upgrade with IP-based Origin - possible C2 tunnel\"; flow:established,to_server; http.header; content:\"Upgrade|3a 20|websocket\"; nocase; http.header; content:\"Origin|3a 20|http\"; pcre:\"/Origin\\x3a\\x20https?\\x3a\\x2f\\x2f(?:[0-9]{1,3}\\.){3}[0-9]{1,3}/i\"; sid:4000003; rev:1;)",
+      "description": "Detect WebSocket upgrade requests with IP address in Origin header (common in C2 tools). Uses http.header for value matching with PCRE for IP pattern. Multiple http.header sticky buffers are valid for different content groups.",
+      "source": "WebSocket C2 detection (validated)"
+    },
+    {
+      "name": "Excessive WebSocket connections (C2 probing)",
+      "rule": "alert http $HOME_NET any -> $EXTERNAL_NET [80,443] (msg:\"Excessive WebSocket connections - possible C2 infrastructure probing\"; flow:established,to_client; http.stat_code; content:\"101\"; threshold:type threshold, track by_src, count 10, seconds 60; sid:4000004; rev:1;)",
+      "description": "Detect rapid WebSocket connection establishment by counting 101 Switching Protocols responses. Uses threshold with track by_src. Do NOT use bsize after http.stat_code — status codes are always 3 digits.",
+      "source": "WebSocket C2 detection (validated)"
+    },
+    {
+      "name": "CRLF injection in HTTP headers (request smuggling)",
+      "rule": "alert http $HOME_NET any -> $EXTERNAL_NET [80,443] (msg:\"CRLF injection in HTTP headers - request smuggling attempt\"; flow:established,to_server; http.header; content:\"|0d 0a|\"; content:\"|0d 0a|\"; distance:1; within:5; sid:4000005; rev:1;)",
+      "description": "Detect CRLF injection within HTTP header values. Uses two content:\"|0d 0a|\" matches with distance:1; within:5; to find injected CRLFs close together. Do NOT use content:!\"|0d 0a 0d 0a|\" negation — it does not work as intended. Do NOT match |0d 0a 0d 0a| alone — it naturally terminates headers.",
+      "source": "HTTP smuggling detection (validated)"
+    },
+    {
+      "name": "HTTP/2 Content-Length:0 with non-empty body (smuggling)",
+      "rule": "alert http $HOME_NET any -> $EXTERNAL_NET 443 (msg:\"HTTP/2 Content-Length header with non-empty body - possible smuggling\"; flow:established,to_server; http.protocol; content:\"HTTP/2\"; http.header_names; content:\"Content-Length\"; nocase; http.request_body; isdataat:1; sid:4000006; rev:1;)",
+      "description": "Detect HTTP/2 requests with Content-Length header and a non-empty body (smuggling indicator). Uses http.header_names for header presence check, then http.request_body with isdataat:1 to verify body is non-empty. Do NOT use http.content_len; content:\"0\" — use http.header_names instead. Do NOT use content:!\"|00|\" for body detection — use isdataat:1.",
+      "source": "HTTP/2 smuggling detection (validated)"
+    },
+    {
+      "name": "SMB null session enumeration (NTLMSSP Type 1)",
+      "rule": "alert smb $HOME_NET any -> $HOME_NET 445 (msg:\"SMB null session enumeration detected - possible reconnaissance\"; flow:established,to_server; content:\"NTLMSSP\"; content:\"|01 00 00 00|\"; distance:1; within:4; sid:5000001; rev:1;)",
+      "description": "Detect NTLMSSP Negotiate (Type 1) messages for anonymous auth. NTLMSSP signature is 8 bytes, then 1 null terminator, then message type. Use distance:1; within:4; NOT distance:0.",
+      "source": "SMB lateral movement detection (validated)"
+    },
+    {
+      "name": "SMB authentication failures (STATUS_LOGON_FAILURE)",
+      "rule": "alert smb $HOME_NET 445 -> $HOME_NET any (msg:\"Excessive SMB authentication failures - possible credential brute force\"; flow:established,to_client; content:\"|6d 00 00 c0|\"; threshold:type threshold, track by_both, count 5, seconds 60; sid:5000002; rev:1;)",
+      "description": "Detect SMB STATUS_LOGON_FAILURE (0xC000006D) responses. Little-endian: |6d 00 00 c0|. Responses come FROM server (port 445). Use type threshold for rate counting, NOT type both.",
+      "source": "SMB lateral movement detection (validated)"
+    },
+    {
+      "name": "SMB admin share access from non-server (smb.share)",
+      "rule": "alert smb !$SERVERS any -> $HOME_NET 445 (msg:\"Administrative share access from workstation - possible lateral movement\"; flow:established,to_server; smb.share; pcre:\"/^(?:ADMIN\\$|C\\$|IPC\\$)$/i\"; sid:5000003; rev:1;)",
+      "description": "Detect TREE_CONNECT to admin shares using smb.share sticky buffer with PCRE OR alternation. Do NOT use multiple content matches (AND logic) — use PCRE for OR. Source negation !$SERVERS excludes legitimate servers.",
+      "source": "SMB lateral movement detection (validated)"
+    },
+    {
+      "name": "PsExec-style service creation via SMB (smb.named_pipe)",
+      "rule": "alert smb $HOME_NET any -> $HOME_NET 445 (msg:\"Suspicious remote service creation via SMB - possible PsExec lateral movement\"; flow:established,to_server; smb.named_pipe; content:\"svcctl\"; nocase; content:\"PSEXESVC\"; nocase; sid:5000004; rev:1;)",
+      "description": "Detect DCE/RPC Service Control Manager calls via svcctl named pipe. Use smb.named_pipe sticky buffer, NOT raw Unicode content. For multiple service names use PCRE: pcre:\"/(?:PSEXESVC|BTOBTO|PAExec)/i\";",
+      "source": "SMB lateral movement detection (validated)"
+    },
+    {
+      "name": "Rapid NTLM authentication (relay indicator)",
+      "rule": "alert smb $HOME_NET any -> $HOME_NET 445 (msg:\"Rapid NTLM authentication attempts - possible relay attack\"; flow:established,to_server; content:\"NTLMSSP\"; content:\"|03 00 00 00|\"; distance:1; within:4; threshold:type threshold, track by_both, count 3, seconds 10; sid:5000005; rev:1;)",
+      "description": "Detect rapid NTLM Type 3 (Authentication) messages as relay indicator. True relay detection requires comparing challenge-response pairs (beyond Suricata). Use distance:1; within:4; after NTLMSSP. Use type threshold NOT type both.",
+      "source": "SMB lateral movement detection (validated)"
+    },
+    {
+      "name": "QUIC Initial packet on non-standard port (C2 evasion)",
+      "rule": "alert udp $HOME_NET any -> $EXTERNAL_NET ![443,80,8443] (msg:\"QUIC connection on non-standard port - possible C2 evasion\"; flow:to_server; content:\"|c0|\"; depth:1; content:\"|00 00 00 01|\"; distance:4; within:4; threshold:type limit, track by_src, count 1, seconds 60; sid:6000001; rev:1;)",
+      "description": "Detect QUIC Long Header Initial packets (0xC0 = bit 0x80 set + Initial type) with QUIC version 1 (|00 00 00 01|) on non-standard ports. Use port negation ![443,80,8443] in header.",
+      "source": "QUIC/HTTP3 C2 detection (validated)"
+    },
+    {
+      "name": "QUIC CRYPTO frame with suspicious SNI",
+      "rule": "alert udp $HOME_NET any -> $EXTERNAL_NET any (msg:\"QUIC connection with suspicious SNI - possible C2 domain\"; flow:to_server; content:\"|06|\"; content:\"|00 00|\"; distance:0; within:50; pcre:\"/\\x00\\x00.{2}(?:(?:[0-9]{1,3}\\\\.){3}[0-9]{1,3}|[0-9a-f]{32,})/\"; sid:6000002; rev:1;)",
+      "description": "Detect QUIC CRYPTO frame (type 0x06) with TLS SNI extension (0x0000) containing IP addresses or hex-encoded DGA domains. Use single content:|00 00| with within:50, NOT duplicate content matches.",
+      "source": "QUIC/HTTP3 C2 detection (validated)"
+    },
+    {
+      "name": "Excessive QUIC connection migrations",
+      "rule": "alert udp $HOME_NET any -> $EXTERNAL_NET any (msg:\"Excessive QUIC connection migrations - possible C2 resilience technique\"; flow:to_server; content:\"|18|\"; threshold:type threshold, track by_both, count 10, seconds 120; sid:6000003; rev:1;)",
+      "description": "Detect QUIC NEW_CONNECTION_ID frames (type 0x18) indicating connection migration. Use threshold by_both to track source-destination pairs.",
+      "source": "QUIC/HTTP3 C2 detection (validated)"
+    },
+    {
+      "name": "QUIC Short Header beaconing pattern",
+      "rule": "alert udp $HOME_NET any -> $EXTERNAL_NET any (msg:\"QUIC beaconing pattern detected - possible automated C2 check-in\"; flow:to_server; dsize:<200; pcre:\"/^[\\\\x00-\\\\x7f]/\"; threshold:type threshold, track by_both, count 8, seconds 240; sid:6000004; rev:1;)",
+      "description": "Detect QUIC Short Header packets (bit 0x80 NOT set) with small payloads at regular intervals. Use pcre:/^[\\x00-\\x7f]/ for bit-level check, NOT content:!|80| which only checks byte equality.",
+      "source": "QUIC/HTTP3 C2 detection (validated)"
+    },
+    {
+      "name": "MQTT CONNECT with suspicious client credentials",
+      "rule": "alert tcp $HOME_NET any -> $EXTERNAL_NET [1883,8883] (msg:\"MQTT connection with suspicious client credentials - possible IoT C2\"; flow:established,to_server; content:\"|10|\"; depth:1; content:\"|00 04 4d 51 54 54|\"; distance:1; within:6; pcre:\"/\\x00\\x04MQTT[\\x04\\x05].{4}\\x00.[a-fA-F0-9]{16,}/s\"; sid:7000001; rev:1;)",
+      "description": "Detect MQTT CONNECT (0x10) with protocol identifier and hex-pattern Client ID. Handles MQTT 3.1.1 (0x04) and 5.0 (0x05). Client ID length is 2 bytes (\\x00.).",
+      "source": "IoT/MQTT C2 detection (validated)"
+    },
+    {
+      "name": "MQTT PUBLISH to encoded topic",
+      "rule": "alert tcp $HOME_NET any -> $EXTERNAL_NET [1883,8883] (msg:\"MQTT publish to encoded topic - possible C2 command channel\"; flow:established,to_server; pcre:\"/^[\\x30-\\x3f]/\"; pcre:\"/.{1,4}\\x00.(?:(?:cmd|exec|shell|data)\\/[A-Za-z0-9+\\/=]{10,}|[A-Za-z0-9+\\/=]{50,})/s\"; sid:7000002; rev:1;)",
+      "description": "Detect MQTT PUBLISH (0x30-0x3F) with encoded topic names. Topic length is 2 bytes (\\x00.), NOT 1 byte. .{1,4} skips variable remaining length.",
+      "source": "IoT/MQTT C2 detection (validated)"
+    },
+    {
+      "name": "MQTT wildcard subscription to command topics",
+      "rule": "alert tcp $HOME_NET any -> $EXTERNAL_NET [1883,8883] (msg:\"MQTT wildcard subscription to command topics - possible C2 listener\"; flow:established,to_server; content:\"|82|\"; depth:1; pcre:\"/(?:cmd|exec|shell|control|admin).*?[#\\+]|[#\\+].*?(?:cmd|exec|shell|control|admin)/i\"; sid:7000003; rev:1;)",
+      "description": "Detect MQTT SUBSCRIBE (0x82) with wildcard patterns (# or +) combined with command keywords. Bidirectional PCRE matching.",
+      "source": "IoT/MQTT C2 detection (validated)"
+    },
+    {
+      "name": "CoAP POST to suspicious resource path",
+      "rule": "alert udp $HOME_NET any -> $EXTERNAL_NET [5683,5684] (msg:\"CoAP POST to suspicious resource path - possible IoT C2 command\"; flow:to_server; content:\"|02|\"; offset:1; depth:1; pcre:\"/(?:\\.(?:sh|exe|bat|ps1)|[A-Za-z0-9+\\/=]{100,}|[a-fA-F0-9]{40,})/s\"; sid:7000004; rev:1;)",
+      "description": "Detect CoAP POST (method code 0x02 at offset 1) with suspicious URI paths. Match POST at offset:1 to handle variable token length. Do NOT hardcode first byte.",
+      "source": "IoT/MQTT C2 detection (validated)"
+    },
+    {
+      "name": "Excessive MQTT PINGREQ keep-alive",
+      "rule": "alert tcp $HOME_NET any -> $EXTERNAL_NET [1883,8883] (msg:\"Excessive MQTT keep-alive with minimal data - possible dormant C2 channel\"; flow:established,to_server; content:\"|c0 00|\"; depth:2; threshold:type threshold, track by_src, count 20, seconds 300; sid:7000005; rev:1;)",
+      "description": "Detect excessive MQTT PINGREQ (0xC0 + remaining length 0x00) indicating dormant C2 channel maintenance.",
+      "source": "IoT/MQTT C2 detection (validated)"
+    },
+    {
+      "name": "Large image upload to external hosting",
+      "rule": "alert http $HOME_NET any -> $EXTERNAL_NET any (msg:\"Large image upload to external hosting service - possible steganography\"; flow:established,to_server; http.method; content:\"POST\"; http.content_type; content:\"image/\"; http.host; pcre:\"/(?:imgur\\.com|postimg\\.cc|imgbb\\.com)/i\"; http.content_len; byte_test:0,>,5242880,0,string,dec; sid:9000001; rev:1;)",
+      "description": "Detect large image uploads (>5MB) via POST to known image hosting services. Uses byte_test:0 (reads entire ASCII buffer as decimal) on http.content_len for size check.",
+      "source": "Steganography detection (validated)"
+    },
+    {
+      "name": "PNG with suspicious custom chunks",
+      "rule": "alert http $HOME_NET any -> $EXTERNAL_NET any (msg:\"PNG with suspicious custom chunks - possible steganography container\"; flow:established,to_server; http.method; content:\"POST\"; file_data; content:\"|89 50 4E 47 0D 0A 1A 0A|\"; pcre:\"/(?:stEg|dAtA|sEcR|[a-z][A-Z][a-z][A-Z])/s\"; sid:9000002; rev:1;)",
+      "description": "Detect PNG files with non-standard chunk types that may hide steganographic data. Uses file_data (underscore) sticky buffer with PNG magic bytes and PCRE for suspicious chunk names.",
+      "source": "Steganography detection (validated)"
+    },
+    {
+      "name": "JPEG with excessive comment markers",
+      "rule": "alert http $HOME_NET any -> $EXTERNAL_NET any (msg:\"JPEG with excessive comment markers - possible hidden data\"; flow:established,to_server; http.method; content:\"POST\"; file_data; content:\"|FF D8 FF|\"; content:\"|FF FE|\"; threshold:type threshold, track by_src, count 4, seconds 60; sid:9000003; rev:1;)",
+      "description": "Detect JPEG files with more than 3 COM markers (0xFFFE). Uses count 4 because 'more than 3' means the 4th occurrence triggers. Uses file_data for file content inspection.",
+      "source": "Steganography detection (validated)"
+    },
+    {
+      "name": "Base64-encoded image in HTTP body",
+      "rule": "alert http $HOME_NET any -> $EXTERNAL_NET any (msg:\"Large base64-encoded image in HTTP body - possible steganography exfiltration\"; flow:established,to_server; http.method; content:\"POST\"; http.content_type; pcre:\"/^application\\/(json|xml)/i\"; file_data; content:\"data:image/\"; pcre:\"/data:image\\/(?:png|jpeg);base64,[A-Za-z0-9+\\/=]{13300,}/s\"; sid:9000004; rev:1;)",
+      "description": "Detect base64-encoded image data in JSON or XML HTTP POST bodies. Uses PCRE on http.content_type to match both application/json and application/xml. Uses {13300,} because 10MB decoded ≈ 13.3MB base64.",
+      "source": "Steganography detection (validated)"
+    },
+    {
+      "name": "Repeated image uploads to same destination",
+      "rule": "alert http $HOME_NET any -> $EXTERNAL_NET any (msg:\"Excessive image uploads to single destination - possible automated steganography exfiltration\"; flow:established,to_server; http.method; content:\"POST\"; http.content_type; content:\"image/\"; threshold:type threshold, track by_both, count 10, seconds 600; sid:9000005; rev:1;)",
+      "description": "Detect repeated image uploads (>10 in 600s) from same source to same destination using threshold with by_both tracking. Suggests automated exfiltration tool.",
+      "source": "Steganography detection (validated)"
+    },
+    {
+      "name": "DC replication pass rule (bidirectional)",
+      "rule": "pass tcp $AD_DOMAIN_CONTROLLERS any <> $AD_DOMAIN_CONTROLLERS [88,389,636,3268] (msg:\"PASS - Allow legitimate DC-to-DC replication traffic\"; flow:established; sid:1000001; rev:1;)",
+      "description": "Allow DC-to-DC replication on Kerberos, LDAP, LDAPS, Global Catalog ports. Uses <> bidirectional operator with flow:established (NO direction qualifier — to_server/to_client conflict with <>).",
+      "source": "Active Directory zero trust (validated)"
+    },
+    {
+      "name": "Kerberoasting TGS-REQ with RC4-HMAC detection",
+      "rule": "drop tcp [$INTERNAL_NET,!$ADMIN_WORKSTATIONS] any -> $AD_DOMAIN_CONTROLLERS 88 (msg:\"DROP - Block Kerberoasting TGS-REQ with RC4-HMAC etype 23\"; flow:established,to_server; content:\"|a0 03 02 01 05 a1 03 02 01 0c|\"; content:\"|a0 03 02 01 17|\"; sid:1000003; rev:1;)",
+      "description": "Block TGS-REQ (msg type 12) with RC4-HMAC encryption (etype 23) from non-admin workstations. ASN.1: a0 03 02 01 05 = Kerberos v5, a1 03 02 01 0c = TGS-REQ, a0 03 02 01 17 = RC4-HMAC.",
+      "source": "Active Directory zero trust (validated)"
+    },
+    {
+      "name": "DCSync attack blocking via DRSUAPI",
+      "rule": "drop tcp [$INTERNAL_NET,!$AD_DOMAIN_CONTROLLERS] any -> $AD_DOMAIN_CONTROLLERS [135,445] (msg:\"DROP - Block DCSync DRS GetNCChanges from non-DC source\"; flow:established,to_server; content:\"|05 00|\"; depth:2; content:\"|e8 06 d0 46 9b b8 01 18 9d 68 00 80 5f 9b 4f b4|\"; sid:1000007; rev:1;)",
+      "description": "Block DRS replication requests from non-domain controllers. Detects DRSUAPI interface UUID (e8 06 d0 46...) in DCE/RPC traffic. Only DCs should replicate.",
+      "source": "Active Directory zero trust (validated)"
+    },
+    {
+      "name": "External Kerberos authentication rejection",
+      "rule": "reject tcp $EXTERNAL_NET any -> $AD_DOMAIN_CONTROLLERS 88 (msg:\"REJECT - Block Kerberos auth from external networks\"; flow:to_server; content:\"|a0 03 02 01 05|\"; depth:7; sid:1000008; rev:1;)",
+      "description": "Reject Kerberos authentication from external networks with TCP RST. Detects Kerberos v5 marker in first 7 bytes. Uses flow:to_server (not established) to catch initial packets.",
+      "source": "Active Directory zero trust (validated)"
+    },
+    {
+      "name": "Silver Ticket admin share access detection",
+      "rule": "alert smb $INTERNAL_NET any -> $AD_DOMAIN_CONTROLLERS 445 (msg:\"ALERT - Silver Ticket abuse - admin share access pattern\"; flow:established,to_server; smb.share; pcre:\"/^(?:ADMIN\\$|C\\$|IPC\\$)$/i\"; threshold:type threshold, track by_src, count 6, seconds 240; sid:1000009; rev:1;)",
+      "description": "Detect service ticket access to admin shares without normal TGT exchange. Uses smb.share sticky buffer with PCRE alternation for OR matching. Requires Suricata 5.0+ with SMB support.",
+      "source": "Active Directory zero trust (validated)"
+    },
+    {
+      "name": "Kerberos TGS-REQ sensitive SPN monitoring",
+      "rule": "alert tcp $INTERNAL_NET any -> $AD_DOMAIN_CONTROLLERS 88 (msg:\"ALERT - High-value Kerberos TGS-REQ for sensitive SPNs\"; flow:established,to_server; content:\"|a0 03 02 01 05|\"; content:\"|a1 03 02 01 0c|\"; pcre:\"/(?:MSSQL|HTTP|CIFS|HOST)\\/[a-zA-Z0-9\\-\\.]+/i\"; threshold:type threshold, track by_src, count 11, seconds 180; sid:1000002; rev:1;)",
+      "description": "Detect TGS-REQ for sensitive SPNs with threshold >10 (count 11 because 'more than 10' means the 11th triggers). Uses Kerberos v5 + TGS-REQ ASN.1 markers.",
+      "source": "Active Directory zero trust (validated)"
+    },
+    {
+      "name": "AS-REP Roasting enumeration detection",
+      "rule": "alert tcp $INTERNAL_NET any -> $AD_DOMAIN_CONTROLLERS 88 (msg:\"ALERT - AS-REP Roasting enumeration - bulk AS-REQ without pre-authentication\"; flow:established,to_server; content:\"|a0 03 02 01 05|\"; content:\"|a1 03 02 01 0a|\"; content:!\"|a7|\"; threshold:type threshold, track by_src, count 9, seconds 90; sid:1000006; rev:1;)",
+      "description": "Detect AS-REQ without pre-authentication (missing pa-data tag a7). content:!|a7| is CRITICAL for AS-REP Roasting detection. Threshold >8 = count 9.",
+      "source": "Active Directory zero trust (validated)"
+    },
+    {
+      "name": "Golden Ticket detection via abnormal ticket lifetime",
+      "rule": "reject tcp $INTERNAL_NET any -> $AD_DOMAIN_CONTROLLERS 88 (msg:\"REJECT - Suspected Golden Ticket - AS-REQ with abnormal ticket lifetime\"; flow:established,to_server; content:\"|a0 03 02 01 05|\"; content:\"|a1 03 02 01 0a|\"; pcre:\"/\\xa5.{0,20}\\x30.{0,10}\\x18[\\x00-\\x7f]{10,17}\\x18[\\x00-\\x7f]{10,17}/s\"; sid:1000005; rev:1;)",
+      "description": "Detect AS-REQ with suspicious ticket lifetime fields. PCRE matches two consecutive GeneralizedTime values (tag 0x18) in the KDC-REQ-BODY (tag a5).",
+      "source": "Active Directory zero trust (validated)"
+    },
+    {
+      "name": "AWS: URL category - block malicious URLs",
+      "category": "block",
+      "rule": "alert http any any -> any any (msg:\"URL Category is Malicious\"; aws_url_category:Malicious; sid:55555555; rev:1;)",
+      "description": "Alert on HTTP traffic categorized as malicious using aws_url_category. Evaluates complete URLs for HTTP, requires TLS inspection for HTTPS. Falls back to domain-level if no URL match.",
+      "source": "AWS Network Firewall URL/Domain Category Filtering (official docs)"
+    },
+    {
+      "name": "AWS: URL category - block gambling and social networking",
+      "category": "block",
+      "rule": "drop http any any -> any any (msg:\"Block gambling and social sites\"; aws_url_category:Gambling,Social Networking; sid:55555556; rev:1;)",
+      "description": "Block HTTP traffic to gambling and social networking sites. Multiple categories can be specified comma-separated in a single rule.",
+      "source": "AWS Network Firewall URL/Domain Category Filtering (official docs)"
+    },
+    {
+      "name": "AWS: Domain category - alert on cryptocurrency domains",
+      "category": "detection",
+      "rule": "alert tls any any -> any any (msg:\"Domain Category is Cryptocurrency\"; aws_domain_category:Cryptocurrency; sid:55555557; rev:1;)",
+      "description": "Alert on TLS traffic to cryptocurrency domains using aws_domain_category. Evaluates domain from TLS SNI field. No TLS inspection required.",
+      "source": "AWS Network Firewall URL/Domain Category Filtering (official docs)"
+    },
+    {
+      "name": "AWS: Domain category - block malware and phishing",
+      "category": "block",
+      "rule": "reject tls $HOME_NET any -> any any (msg:\"Category:Malware,Phishing\"; aws_domain_category:Malware,Phishing; flow:to_server; sid:202602065; rev:1;)",
+      "description": "Block TLS connections to domains categorized as Malware or Phishing. CANNOT combine aws_domain_category with geoip in the same rule — use separate rules.",
+      "source": "AWS Network Firewall URL/Domain Category Filtering (official docs)"
+    },
+    {
+      "name": "AWS: GeoIP negation - drop traffic not from US or UK",
+      "category": "block",
+      "rule": "drop ip any any -> any any (msg:\"Drop traffic not from US or UK\"; geoip:src,!US,UK; sid:55555558; rev:1;)",
+      "description": "Drop traffic from any country except US and UK using geoip negation. Negation applies to the first country code, remaining are included.",
+      "source": "AWS Network Firewall Geographic IP Filtering (official docs)"
+    },
+    {
+      "name": "AWS: HTTP/2 domain filtering - allow specific domain",
+      "category": "allow",
+      "rule": "pass http2 $HOME_NET any -> $EXTERNAL_NET any (http.request_header; content:\"authority|3a 20|example.com\"; sid:1; rev:1;)",
+      "description": "Allow HTTP/2 traffic to specific domain using http.request_header with authority pseudo-header. Requires TLS inspection to decrypt HTTP/2.",
+      "source": "AWS Network Firewall Suricata Examples (official docs)"
+    },
+    {
+      "name": "AWS: HTTP/2 block non-allowed decrypted traffic",
+      "category": "block",
+      "rule": "drop http2 $HOME_NET any -> $EXTERNAL_NET any (flow:established, to_server; http2.header_name; content:\"authority\"; sid:3; rev:1;)",
+      "description": "Drop all HTTP/2 decrypted traffic not matching allowed domains. Uses http2.header_name sticky buffer to match the authority header.",
+      "source": "AWS Network Firewall Suricata Examples (official docs)"
+    },
+    {
+      "name": "AWS: Reject non-HTTP/2 TCP traffic",
+      "category": "block",
+      "rule": "reject tcp $HOME_NET any -> $EXTERNAL_NET any (app-layer-protocol:!http2; flow:to_server, established; sid:2; rev:1;)",
+      "description": "Reject TCP traffic that is not HTTP/2 protocol. Used in combination with HTTP/2 domain filtering rules.",
+      "source": "AWS Network Firewall Suricata Examples (official docs)"
+    },
+    {
+      "name": "AWS: SNI allowlist with xbits cert issuer verification",
+      "category": "advanced",
+      "rule": "alert tls $HOME_NET any -> $EXTERNAL_NET 443 (ssl_state:client_hello; tls.sni; content:\"checkip.amazonaws.com\"; endswith; nocase; xbits:set, allowed_sni_destination_ips, track ip_dst, expire 3600; noalert; sid:238745;)",
+      "description": "Set xbit on allowed SNI for subsequent certificate issuer verification. Uses noalert to suppress alert while setting the xbit. Part of multi-rule pattern.",
+      "source": "AWS Network Firewall Suricata Examples (official docs)"
+    },
+    {
+      "name": "AWS: xbits stateless pass for allowed destinations",
+      "category": "allow",
+      "rule": "pass tcp $HOME_NET any -> $EXTERNAL_NET 443 (xbits:isset, allowed_sni_destination_ips, track ip_dst; flow:stateless; sid:89207006;)",
+      "description": "Pass TCP traffic to destinations with allowed xbit set. Uses flow:stateless to match packets regardless of connection state. Part of SNI+cert issuer verification pattern.",
+      "source": "AWS Network Firewall Suricata Examples (official docs)"
+    },
+    {
+      "name": "AWS: Certificate issuer verification pass rule",
+      "category": "allow",
+      "rule": "pass tls $EXTERNAL_NET 443 -> $HOME_NET any (tls.cert_issuer; content:\"Amazon\"; msg:\"Pass rules do not alert\"; xbits:isset, allowed_sni_destination_ips, track ip_src; sid:29822;)",
+      "description": "Pass TLS traffic from allowed destinations only if certificate issuer is Amazon. Uses xbits:isset to verify the SNI was previously allowed.",
+      "source": "AWS Network Firewall Suricata Examples (official docs)"
+    },
+    {
+      "name": "AWS: Block non-Amazon cert issuers for allowed SNIs",
+      "category": "block",
+      "rule": "reject tls $EXTERNAL_NET 443 -> $HOME_NET any (tls.cert_issuer; content:\"=\"; nocase; msg:\"Block all other cert issuers not allowed by sid:29822\"; sid:897972;)",
+      "description": "Reject TLS traffic from allowed SNI destinations if certificate issuer is not Amazon. Catches certificate impersonation attacks.",
+      "source": "AWS Network Firewall Suricata Examples (official docs)"
+    },
+    {
+      "name": "AWS: SSH/SFTP banner filtering - allow AWS Transfer Family",
+      "category": "allow",
+      "rule": "pass ssh $EXTERNAL_NET 22 -> $HOME_NET any (ssh.software; content:\"AWS_SFTP\"; flow:from_server; sid:217872;)",
+      "description": "Allow only SSH/SFTP servers with AWS_SFTP banner (AWS Transfer Family). Uses ssh.software sticky buffer with flow:from_server to match server banner.",
+      "source": "AWS Network Firewall Suricata Examples (official docs)"
+    },
+    {
+      "name": "AWS: Block unauthorized SSH servers",
+      "category": "block",
+      "rule": "drop ssh $EXTERNAL_NET 22 -> $HOME_NET any (ssh.software; content:!\"@\"; pcre:\"/[a-z]/i\"; msg:\"Block unauthorized SFTP/SSH.\"; flow:from_server; sid:999217872;)",
+      "description": "Block SSH servers that do not have the expected banner. Uses content negation and PCRE to match any non-approved SSH software string.",
+      "source": "AWS Network Firewall Suricata Examples (official docs)"
+    },
+    {
+      "name": "AWS: Strict order SNI allow with default drop",
+      "category": "advanced",
+      "rule": "pass tls $HOME_NET any -> $EXTERNAL_NET any (ssl_state:client_hello; tls.sni; content:\"example.com\"; dotprefix; nocase; flow:to_server, established; sid:2;)",
+      "description": "Allow TLS traffic to specific domain in strict order mode. Must be placed BEFORE the drop rule. Uses dotprefix for subdomain matching.",
+      "source": "AWS Network Firewall Suricata Examples (official docs)"
+    },
+    {
+      "name": "AWS: Strict order default drop for established traffic",
+      "category": "block",
+      "rule": "drop tcp $HOME_NET any -> $EXTERNAL_NET any (flow:to_server, established; sid:1;)",
+      "description": "Drop all established outbound TCP traffic. In strict order mode, this must be placed AFTER pass rules. Catches all traffic not explicitly allowed.",
+      "source": "AWS Network Firewall Suricata Examples (official docs)"
+    },
+    {
+      "name": "AWS: IP set reference with prefix list",
+      "category": "block",
+      "rule": "drop tcp @BETA any -> any any (sid:1;)",
+      "description": "Block traffic from IP addresses in a VPC prefix list. The @BETA variable references a prefix list ARN defined in the rule group's ReferenceSets.IPSetReferences.",
+      "source": "AWS Network Firewall Suricata Examples (official docs)"
+    },
+    {
+      "name": "AWS: TLS domain deny list (auto-generated pattern)",
+      "category": "block",
+      "rule": "drop tls $HOME_NET any -> $EXTERNAL_NET any (ssl_state:client_hello; tls.sni; content:\"evil.com\"; startswith; nocase; endswith; msg:\"matching TLS denylisted FQDNs\"; flow:to_server, established; sid:1; rev:1;)",
+      "description": "Strict-order equivalent of the pattern Network Firewall generates for TLS domain deny lists. Uses ssl_state:client_hello, startswith+endswith for exact FQDN match. Place before any default allow rules.",
+      "source": "AWS Network Firewall Domain List Generated Rules (adapted for strict order)"
+    },
+    {
+      "name": "AWS: TLS domain allow list with default drop (auto-generated pattern)",
+      "category": "block",
+      "rule": "drop tls $HOME_NET any -> $EXTERNAL_NET any (msg:\"not matching any TLS allowlisted FQDNs\"; ssl_state:client_hello; flow:to_server, established; sid:3; rev:1;)",
+      "description": "Strict-order equivalent of the default drop rule for TLS domain allow lists. Drops all TLS traffic not matching any allowed domain. Place after all pass rules.",
+      "source": "AWS Network Firewall Domain List Generated Rules (adapted for strict order)"
+    },
+    {
+      "name": "AWS: HTTP domain allow list with wildcard (auto-generated pattern)",
+      "category": "allow",
+      "rule": "pass http $HOME_NET any -> $EXTERNAL_NET any (http.host; dotprefix; content:\".amazon.com\"; endswith; msg:\"matching HTTP allowlisted FQDNs\"; flow:to_server, established; sid:1; rev:1;)",
+      "description": "Strict-order equivalent of the pattern Network Firewall generates for HTTP domain allow lists with wildcard. Uses dotprefix for subdomain matching. Place before default drop rules.",
+      "source": "AWS Network Firewall Domain List Generated Rules (adapted for strict order)"
+    },
+    {
+      "name": "AWS: HTTP allow list default drop (auto-generated pattern)",
+      "category": "block",
+      "rule": "drop http $HOME_NET any -> $EXTERNAL_NET any (http.header_names; content:\"|0d 0a|\"; startswith; msg:\"not matching any HTTP allowlisted FQDNs\"; flow:to_server, established; sid:3; rev:1;)",
+      "description": "Strict-order equivalent of the default drop rule for HTTP domain allow lists. Uses http.header_names with CRLF content to match any HTTP request with headers. Place after all pass rules.",
+      "source": "AWS Network Firewall Domain List Generated Rules (adapted for strict order)"
+    }
+  ]
+}

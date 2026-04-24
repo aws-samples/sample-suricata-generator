@@ -112,6 +112,18 @@ class UIManager:
             tools_menu.add_command(label="Analyze Traffic Costs (requires dependencies)",
                                   command=self._show_traffic_analyzer_deps_help, state='disabled')
         
+        # Add AI Rule Assistant menu item
+        tools_menu.add_separator()
+        from src.gui.ai_assistant_panel import HAS_BOTO3 as HAS_BOTO3_AI
+        if HAS_BOTO3_AI:
+            tools_menu.add_command(label="AI Rule Assistant",
+                                  command=self.parent.show_ai_assistant, accelerator="Ctrl+I")
+        else:
+            tools_menu.add_command(label="AI Rule Assistant (requires boto3)",
+                                  command=lambda: None, state='disabled')
+        tools_menu.add_command(label="Test Rules with PCAP",
+                              command=self.parent.show_pcap_tester)
+        
         # Help menu - about dialog and keyboard shortcuts
         help_menu = tk.Menu(menubar, tearoff=0)
         menubar.add_cascade(label="Help", menu=help_menu)
@@ -155,6 +167,8 @@ class UIManager:
         self.parent.root.bind('<space>', self.on_space_key)
         self.parent.root.bind('<Control-g>', self.on_ctrl_g_key)
         self.parent.root.bind('<Control-G>', self.on_ctrl_g_key)
+        self.parent.root.bind('<Control-i>', lambda e: self.parent.show_ai_assistant())
+        self.parent.root.bind('<Control-I>', lambda e: self.parent.show_ai_assistant())
         self.parent.root.bind('<Return>', self.on_enter_key)
         
         # Main frame
@@ -6589,7 +6603,7 @@ Would you like to run a complete analysis?"""
         ttk.Button(buttons_container, text="Copy Selected", command=self.parent.copy_selected_rules).pack(side=tk.LEFT, padx=(0, 5))
         self.paste_button = ttk.Button(buttons_container, text="Paste", command=self.parent.paste_rules, state="disabled")
         self.paste_button.pack(side=tk.LEFT, padx=(0, 5))
-        ttk.Button(buttons_container, text="Insert Rule", command=self.parent.insert_rule).pack(side=tk.LEFT, padx=(0, 5))
+        ttk.Button(buttons_container, text="✨ Insert AI Rule", command=self.parent.show_ai_assistant).pack(side=tk.LEFT, padx=(0, 5))
         ttk.Button(buttons_container, text="Insert Comment", command=self.parent.insert_comment).pack(side=tk.LEFT, padx=(0, 5))
         ttk.Button(buttons_container, text="Insert Domain Allow Rule", command=self.parent.domain_importer.insert_domain_rule).pack(side=tk.LEFT, padx=(0, 5))
         
@@ -7456,6 +7470,7 @@ Would you like to run a complete analysis?"""
             ]),
             ("Tools", [
                 ("Ctrl+E", "Open Advanced Editor"),
+                ("Ctrl+I", "Open AI Rule Assistant"),
             ]),
             ("Editing & Selection", [
                 ("Ctrl+Z", "Undo last change"),
@@ -11783,6 +11798,48 @@ Would you like to run a complete analysis?"""
         ttk.Label(req4_frame, text="See IAM Permissions tab for required policy",
                  font=("TkDefaultFont", 9), foreground="#666666").pack(anchor=tk.W, padx=10, pady=10)
         
+        # Requirement 5: Bedrock Model Access (for AI Rule Assistant)
+        req5_frame = ttk.LabelFrame(prereq_content, text="5. Enable Bedrock Model Access (AI Rule Assistant)")
+        req5_frame.pack(fill=tk.X, padx=15, pady=10)
+        
+        req5_text = (
+            "The AI Rule Assistant uses Amazon Bedrock to generate rules.\n\n"
+            "Enable model access in the AWS Console:\n"
+            "• Go to Amazon Bedrock → Model access\n"
+            "• Request access to Anthropic Claude models\n"
+            "• Wait for access to be granted (usually immediate)\n\n"
+            "Supported regions: us-east-1, us-west-2, eu-west-1,\n"
+            "ap-northeast-1, ap-southeast-1\n\n"
+            "Note: Bedrock usage incurs per-token charges.\n"
+            "See AWS Bedrock pricing for details."
+        )
+        ttk.Label(req5_frame, text=req5_text, font=("TkDefaultFont", 9),
+                 justify=tk.LEFT).pack(anchor=tk.W, padx=10, pady=10)
+        
+        # Optional prerequisites separator
+        ttk.Separator(prereq_content, orient=tk.HORIZONTAL).pack(fill=tk.X, padx=15, pady=(15, 5))
+        ttk.Label(prereq_content, text="Optional Prerequisites:",
+                 font=("TkDefaultFont", 11, "bold")).pack(anchor=tk.W, padx=15, pady=(5, 10))
+        
+        # Optional: Suricata engine (for PCAP testing)
+        opt_frame = ttk.LabelFrame(prereq_content, text="Suricata Engine (for Test Rules with PCAP only)")
+        opt_frame.pack(fill=tk.X, padx=15, pady=10)
+        
+        opt_text = (
+            "This is NOT an AWS requirement. It is only needed if you want\n"
+            "to use the Tools > Test Rules with PCAP feature.\n\n"
+            "The PCAP tester runs the Suricata engine locally to validate\n"
+            "rules against captured network traffic (PCAP files).\n\n"
+            "Installation:\n"
+            "• macOS: brew install suricata\n"
+            "• Ubuntu/Debian: sudo apt install suricata\n"
+            "• Amazon Linux/RHEL: sudo yum install suricata\n"
+            "• Windows: Download from suricata.io\n\n"
+            "All other features work without Suricata installed."
+        )
+        ttk.Label(opt_frame, text=opt_text, font=("TkDefaultFont", 9),
+                 justify=tk.LEFT).pack(anchor=tk.W, padx=10, pady=10)
+        
         # Tab 2: IAM Permissions
         iam_frame = ttk.Frame(notebook)
         notebook.add(iam_frame, text="IAM Permissions")
@@ -11837,13 +11894,12 @@ Would you like to run a complete analysis?"""
       "network-firewall:ListRuleGroups",
       "network-firewall:DescribeRuleGroup",
       "network-firewall:CreateRuleGroup",
-      "network-firewall:UpdateRuleGroup"
+      "network-firewall:UpdateRuleGroup",
+      "bedrock:InvokeModel",
+      "bedrock:ListFoundationModels",
+      "bedrock:ListInferenceProfiles"
     ],
-    "Resource": [
-      "arn:aws:logs:*:*:log-group:/aws/network-firewall/*",
-      "arn:aws:network-firewall:*:*:stateful-rulegroup/*",
-      "arn:aws:network-firewall:*:aws-managed:stateful-rulegroup/*"
-    ]
+    "Resource": "*"
   }]
 }'''
             self.parent.root.clipboard_clear()
@@ -11874,13 +11930,12 @@ Would you like to run a complete analysis?"""
       "network-firewall:ListRuleGroups",
       "network-firewall:DescribeRuleGroup",
       "network-firewall:CreateRuleGroup",
-      "network-firewall:UpdateRuleGroup"
+      "network-firewall:UpdateRuleGroup",
+      "bedrock:InvokeModel",
+      "bedrock:ListFoundationModels",
+      "bedrock:ListInferenceProfiles"
     ],
-    "Resource": [
-      "arn:aws:logs:*:*:log-group:/aws/network-firewall/*",
-      "arn:aws:network-firewall:*:*:stateful-rulegroup/*",
-      "arn:aws:network-firewall:*:aws-managed:stateful-rulegroup/*"
-    ]
+    "Resource": "*"
   }]
 }'''
         policy_text.insert("1.0", policy_json)
@@ -11895,16 +11950,18 @@ Would you like to run a complete analysis?"""
             "• logs:DescribeLogGroups - List available log groups\n"
             "• logs:StartQuery - Initiates CloudWatch Logs Insights queries\n"
             "• logs:GetQueryResults - Retrieves query results\n"
-            "• logs:StopQuery - Cancels running queries\n"
-            "• Resource: /aws/network-firewall/* log groups only\n\n"
+            "• logs:StopQuery - Cancels running queries\n\n"
             "Network Firewall (Rule Group Import & Managed Rule Analysis):\n"
             "• network-firewall:ListRuleGroups - Browse account and managed rule groups\n"
-            "• network-firewall:DescribeRuleGroup - View rule group details and rules\n"
-            "• Resource: Account rule groups + AWS managed rule groups\n\n"
+            "• network-firewall:DescribeRuleGroup - View rule group details and rules\n\n"
             "Network Firewall (Rule Group Export):\n"
             "• network-firewall:CreateRuleGroup - Deploy new rule groups\n"
-            "• network-firewall:UpdateRuleGroup - Overwrite existing rule groups\n"
-            "• Resource: All Network Firewall stateful rule groups in account"
+            "• network-firewall:UpdateRuleGroup - Overwrite existing rule groups\n\n"
+            "Amazon Bedrock (AI Rule Assistant):\n"
+            "• bedrock:InvokeModel - Send prompts to Claude for rule generation\n"
+            "• bedrock:ListFoundationModels - Discover available models\n"
+            "• bedrock:ListInferenceProfiles - List inference profiles for model selection\n"
+            "• Note: Model access must also be enabled in the Bedrock console"
         )
         ttk.Label(breakdown_frame, text=breakdown_text, font=("TkDefaultFont", 9),
                  justify=tk.LEFT).pack(anchor=tk.W, padx=10, pady=10)
@@ -11917,12 +11974,14 @@ Would you like to run a complete analysis?"""
             "• Read permissions for CloudWatch Logs and Rule Group browsing\n"
             "• Read access to AWS managed rule groups (for analysis only)\n"
             "• Write permissions for Rule Group deployment (CreateRuleGroup, UpdateRuleGroup)\n"
-            "• Minimal scope (CloudWatch Logs + Network Firewall rule groups)\n"
+            "• Bedrock InvokeModel sends rule descriptions to Claude (no data stored by AWS)\n"
+            "• Bedrock List permissions are read-only for model discovery\n"
+            "• Resource set to * because Bedrock ARNs vary by region and model\n"
             "• No access to firewalls, policies, EC2, VPC, or other services\n"
             "• Overwrite protection via confirmation dialog\n"
             "• Same security model as AWS CLI\n"
             "• No credentials stored by application\n"
-            "• Single policy covers all AWS features (future-proof)"
+            "• Single policy covers all AWS features"
         )
         ttk.Label(security_frame, text=security_text, font=("TkDefaultFont", 9),
                  justify=tk.LEFT).pack(anchor=tk.W, padx=10, pady=10)
@@ -12277,6 +12336,77 @@ Would you like to run a complete analysis?"""
         # Note about UpdateRuleGroup
         results.append(("ℹ️", "network-firewall:UpdateRuleGroup - Same permissions as Create"))
         
+        # Test 6: Amazon Bedrock access (AI Rule Assistant)
+        results.append(("", ""))
+        results.append(("", "Amazon Bedrock (AI Rule Assistant):"))
+        try:
+            bedrock_client = self.parent.aws_session.get_client('bedrock')
+            
+            # Test ListFoundationModels
+            response = bedrock_client.list_foundation_models(
+                byOutputModality="TEXT",
+            )
+            model_count = len(response.get('modelSummaries', []))
+            results.append(("✓", f"bedrock:ListFoundationModels - Verified ({model_count} models)"))
+            
+            # Test ListInferenceProfiles
+            try:
+                profile_response = bedrock_client.list_inference_profiles()
+                profile_count = len(profile_response.get('inferenceProfileSummaries', []))
+                results.append(("✓", f"bedrock:ListInferenceProfiles - Verified ({profile_count} profiles)"))
+            except Exception as profile_e:
+                profile_err = str(profile_e)
+                if "AccessDenied" in profile_err:
+                    results.append(("✗", "bedrock:ListInferenceProfiles - Permission missing"))
+                else:
+                    results.append(("⚠️", f"ListInferenceProfiles: {profile_err[:50]}"))
+            
+            # Check for Claude model access
+            claude_models = [m for m in response.get('modelSummaries', [])
+                           if 'claude' in m.get('modelId', '').lower()
+                           and m.get('modelLifecycle', {}).get('status', '').upper() == 'ACTIVE']
+            if claude_models:
+                results.append(("✓", f"Claude models available: {len(claude_models)} active"))
+            else:
+                results.append(("⚠️", "No active Claude models found — enable model access in Bedrock console"))
+            
+            # Test InvokeModel permission with a minimal request
+            try:
+                bedrock_rt_client = self.parent.aws_session.get_client('bedrock-runtime')
+                # Use Converse API with minimal input to test permission
+                # This will fail with ValidationException if model not enabled,
+                # or succeed with a tiny response — either confirms IAM permission
+                bedrock_rt_client.converse(
+                    modelId="anthropic.claude-3-haiku-20240307-v1:0",
+                    messages=[{"role": "user", "content": [{"text": "hi"}]}],
+                    inferenceConfig={"maxTokens": 1},
+                )
+                results.append(("✓", "bedrock:InvokeModel - Verified"))
+            except Exception as invoke_e:
+                invoke_err = str(invoke_e)
+                if "AccessDeniedException" in invoke_err:
+                    if "model access" in invoke_err.lower() or "not authorized to perform" in invoke_err.lower():
+                        results.append(("✗", "bedrock:InvokeModel - Permission missing or model access not enabled"))
+                    else:
+                        results.append(("✗", "bedrock:InvokeModel - IAM permission missing"))
+                elif "ValidationException" in invoke_err or "ResourceNotFoundException" in invoke_err:
+                    # Model not enabled but IAM permission exists
+                    results.append(("✓", "bedrock:InvokeModel - IAM permission verified"))
+                    results.append(("⚠️", "Enable Claude model access in Bedrock console"))
+                elif "ThrottlingException" in invoke_err:
+                    results.append(("✓", "bedrock:InvokeModel - Verified (throttled)"))
+                else:
+                    results.append(("⚠️", f"InvokeModel test: {invoke_err[:60]}"))
+                    
+        except Exception as e:
+            error_str = str(e)
+            if "AccessDenied" in error_str:
+                results.append(("✗", "Amazon Bedrock permissions missing"))
+            elif "EndpointConnectionError" in error_str or "Could not connect" in error_str:
+                results.append(("⚠️", "Bedrock not available in this region"))
+            else:
+                results.append(("✗", f"Bedrock test failed: {error_str[:50]}"))
+        
         # All tests complete
         results.append(("", ""))
         results.append(("✓", "All checks passed!"))
@@ -12284,6 +12414,7 @@ Would you like to run a complete analysis?"""
         results.append(("", "Ready to use:"))
         results.append(("", "• Tools > Analyze Rule Usage"))
         results.append(("", "• Tools > Analyze Rule Usage > Managed Rule Groups"))
+        results.append(("", "• Tools > AI Rule Assistant"))
         results.append(("", "• File > Import Rule Group"))
         results.append(("", "• File > Export Rule Group"))
         

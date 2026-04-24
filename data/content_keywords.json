@@ -1,6 +1,6 @@
 {
-  "version": "1.2.1",
-  "last_updated": "2026-02-02",
+  "version": "1.2.2",
+  "last_updated": "2026-04-18",
   "description": "AWS Network Firewall Suricata Content Keywords",
   "note": "This file contains keywords verified to work with AWS Network Firewall. Users can add new keywords as AWS/Suricata adds features.",
   "keywords": [
@@ -184,6 +184,50 @@
         "Useful for header presence/absence checking",
         "Can detect header order with distance modifier",
         "Negation (!) checks for header absence"
+      ]
+    },
+    {
+      "name": "http.request_header",
+      "syntax": "http.request_header; content:\"<header_name>|3a 20|<value>\"",
+      "modifiers": [
+        "content",
+        "nocase",
+        "pcre",
+        "bsize"
+      ],
+      "description": "Match on HTTP request header name and value pair. Works with both HTTP/1 and HTTP/2. Use |3a 20| (colon space) to separate header name from value",
+      "category": "http",
+      "example": "http.request_header; content:\"authority|3a 20|example.com\";",
+      "examples": [
+        "http.request_header; content:\"Host|3a 20|example.com\";",
+        "http.request_header; content:\"authority|3a 20|example.com\";"
+      ],
+      "notes": [
+        "Works with HTTP/1 and HTTP/2 traffic",
+        "For HTTP/2, matches pseudo-headers like :authority, :method, :path",
+        "Use |3a 20| hex bytes for the colon-space separator between header name and value"
+      ]
+    },
+    {
+      "name": "http2.header_name",
+      "syntax": "http2.header_name; content:\"<header_name>\"",
+      "modifiers": [
+        "content",
+        "nocase",
+        "startswith",
+        "endswith"
+      ],
+      "description": "Match on HTTP/2 header name. Used for matching HTTP/2 pseudo-headers such as authority, method, path. Requires TLS inspection for decrypted HTTP/2 traffic",
+      "category": "http",
+      "example": "http2.header_name; content:\"authority\";",
+      "examples": [
+        "http2.header_name; content:\"authority\";",
+        "http2.header_name; content:\"method\";"
+      ],
+      "notes": [
+        "Only works with HTTP/2 protocol traffic",
+        "Requires TLS inspection to decrypt HTTP/2",
+        "Use with http2 protocol in rule header"
       ]
     },
     {

@@ -1,0 +1,185 @@
+{
+  "version": "1.2.0",
+  "last_updated": "2026-04-23",
+  "source": "https://docs.suricata.io/en/latest/rules/intro.html",
+  "description": "Suricata rule structure definitions from official documentation — actions, protocols, addressing, ports, direction, and rule options",
+  "rule_structure": {
+    "description": "A Suricata rule consists of three parts: action, header, and rule options",
+    "format": "<action> <protocol> <src_net> <src_port> <direction> <dst_net> <dst_port> (<options>)",
+    "example": "alert http $HOME_NET any -> $EXTERNAL_NET any (msg:\"HTTP GET Request Containing Rule in URI\"; flow:established,to_server; http.method; content:\"GET\"; http.uri; content:\"rule\"; fast_pattern; classtype:bad-unknown; sid:123; rev:1;)"
+  },
+  "actions": {
+    "description": "The action determines what happens when the rule matches. AWS Network Firewall supports four actions.",
+    "values": [
+      {"name": "alert", "description": "Generate an alert"},
+      {"name": "pass", "description": "Stop further inspection of the packet"},
+      {"name": "drop", "description": "Drop packet and generate alert (IPS mode)"},
+      {"name": "reject", "description": "Send RST/ICMP unreachable error to sender of matching packet"}
+    ],
+    "note": "Standard Suricata also supports rejectsrc, rejectdst, and rejectboth, but AWS Network Firewall only supports the four actions listed above."
+  },
+  "protocols": {
+    "description": "The protocol limits which protocol(s) the signature will be applied to. If protocol is 'http', Suricata ensures the signature only matches if the TCP stream contains HTTP traffic.",
+    "network_protocols": [
+      {"name": "ip", "description": "All/any IP traffic"},
+      {"name": "tcp", "description": "TCP traffic"},
+      {"name": "udp", "description": "UDP traffic"},
+      {"name": "icmp", "description": "Both ICMPv4 and ICMPv6"},
+      {"name": "icmpv4", "description": "ICMPv4 only"},
+      {"name": "icmpv6", "description": "ICMPv6 only"},
+      {"name": "ipv4", "description": "IPv4 only (alias: ip4)"},
+      {"name": "ipv6", "description": "IPv6 only (alias: ip6)"},
+      {"name": "pkthdr", "description": "Inspecting packets with invalid headers"}
+    ],
+    "tcp_specific": [
+      {"name": "tcp-pkt", "description": "Match content in individual TCP packets"},
+      {"name": "tcp-stream", "description": "Match content only in reassembled TCP stream"}
+    ],
+    "application_layer": [
+      {"name": "http", "description": "HTTP1 or HTTP2"},
+      {"name": "http1", "description": "HTTP/1.x only"},
+      {"name": "http2", "description": "HTTP/2 only"},
+      {"name": "http1", "description": "HTTP/1.x only"},
+      {"name": "http2", "description": "HTTP/2 only"},
+      {"name": "tls", "description": "TLS (includes SSL)"},
+      {"name": "quic", "description": "QUIC protocol"},
+      {"name": "ftp", "description": "FTP command channel"},
+      {"name": "ftp-data", "description": "FTP data channel"},
+      {"name": "smb", "description": "SMB protocol"},
+      {"name": "dns", "description": "DNS protocol"},
+      {"name": "ssh", "description": "SSH protocol"},
+      {"name": "smtp", "description": "SMTP protocol"},
+      {"name": "imap", "description": "IMAP protocol"},
+      {"name": "pop3", "description": "POP3 protocol"},
+      {"name": "dhcp", "description": "DHCP protocol"},
+      {"name": "nfs", "description": "NFS protocol"},
+      {"name": "krb5", "description": "Kerberos 5"},
+      {"name": "mqtt", "description": "MQTT protocol"},
+      {"name": "ntp", "description": "NTP protocol"},
+      {"name": "rdp", "description": "RDP protocol"},
+      {"name": "snmp", "description": "SNMP protocol"},
+      {"name": "sip", "description": "SIP protocol"},
+      {"name": "telnet", "description": "Telnet protocol"},
+      {"name": "websocket", "description": "WebSocket protocol"},
+      {"name": "pgsql", "description": "PostgreSQL protocol"}
+    ]
+  },
+  "addressing": {
+    "description": "Source and destination IP addresses. Supports IPv4, IPv6, CIDR ranges, variables, grouping, and negation.",
+    "variables": [
+      {"name": "$HOME_NET", "description": "Internal network as defined in suricata.yaml"},
+      {"name": "$EXTERNAL_NET", "description": "External network as defined in suricata.yaml"}
+    ],
+    "operators": [
+      {"operator": "../..", "description": "IP ranges using CIDR notation (e.g., 10.0.0.0/24)"},
+      {"operator": "!", "description": "Negation/exception (e.g., !1.1.1.1)"},
+      {"operator": "[.., ..]", "description": "Grouping (e.g., [10.0.0.0/24, !10.0.0.5])"}
+    ],
+    "examples": [
+      "!1.1.1.1 — every IP but 1.1.1.1",
+      "![1.1.1.1, 1.1.1.2] — every IP but 1.1.1.1 and 1.1.1.2",
+      "$HOME_NET — your HOME_NET setting",
+      "[$EXTERNAL_NET, !$HOME_NET] — EXTERNAL_NET and not HOME_NET",
+      "[10.0.0.0/24, !10.0.0.5] — 10.0.0.0/24 except 10.0.0.5"
+    ]
+  },
+  "ports": {
+    "description": "Source and destination ports. Source ports are typically 'any' (OS assigns random). Destination ports identify the application.",
+    "operators": [
+      {"operator": ":", "description": "Port ranges (e.g., 80:82)"},
+      {"operator": "!", "description": "Negation (e.g., !80)"},
+      {"operator": "[.., ..]", "description": "Grouping (e.g., [80, 81, 82])"}
+    ],
+    "examples": [
+      "[80, 81, 82] — ports 80, 81, and 82",
+      "[80:82] — range from 80 to 82",
+      "[1024:] — from 1024 to highest port",
+      "!80 — every port but 80",
+      "[80:100,!99] — range 80-100 except 99",
+      "[1:80,![2,4]] — range 1-80 except ports 2 and 4"
+    ]
+  },
+  "direction": {
+    "description": "The directional arrow indicates which way the signature is evaluated.",
+    "values": [
+      {"symbol": "->", "description": "Unidirectional — only packets from source to destination match"},
+      {"symbol": "<>", "description": "Bidirectional — rule matches in either direction (Suricata duplicates the rule internally)"}
+    ],
+    "notes": [
+      "There is no reverse direction (<-)",
+      "For AWS Network Firewall, use -> for most rules and <> for bidirectional inspection"
+    ]
+  },
+  "rule_options": {
+    "description": "Options are enclosed in parentheses, separated by semicolons. Some have settings (keyword:value;), others are standalone (keyword;). Order matters — changing order changes rule meaning.",
+    "escaping": "Characters ; and \" must be escaped with backslash when used in option values. Backslash itself must also be escaped.",
+    "modifier_types": [
+      {
+        "type": "content_modifier",
+        "description": "Older style — looks back at previous content match. Example: content:\"index.php\"; http_uri;",
+        "note": "The modifier applies to the content keyword that precedes it"
+      },
+      {
+        "type": "sticky_buffer",
+        "description": "Newer style — buffer name comes first, all following keywords apply to that buffer. Example: http.uri; content:\"/api/\";",
+        "note": "Preferred style. The buffer keyword must appear BEFORE the content match it modifies"
+      }
+    ],
+    "normalized_buffers": "HTTP keywords, reassembled streams, TLS/SSL/SSH/FTP/DCERPC buffers are normalized — anomalous content is removed and packets are combined. The data is an interpretation, not raw bytes."
+  },
+  "best_practices": [
+    "Use sticky buffer syntax (http.uri; content:...) over legacy content modifier syntax (content:...; http_uri;)",
+    "Sticky buffers must appear BEFORE the content match they modify",
+    "Rule option order matters — changing order changes rule meaning",
+    "Use flow:established,to_server for client-to-server traffic on established connections",
+    "Use $HOME_NET and $EXTERNAL_NET variables instead of hardcoded IPs",
+    "Source ports are typically 'any' since OS assigns random ports",
+    "Use fast_pattern on the most unique content match to optimize performance",
+    "Use noalert with flowbits/xbits when setting state without generating alerts",
+    "Escape semicolons and quotes in option values with backslash",
+    "For HTTP body size checks, use http.content_len with byte_test (not dsize, which is per-packet only)",
+    "For AWS Network Firewall, use strict rule ordering with 'drop established' default action",
+    "CANNOT combine aws_url_category or aws_domain_category with geoip in the same rule — use separate rules",
+    "aws_url_category requires TLS inspection for HTTPS traffic; without it, use aws_domain_category instead",
+    "For HTTP/2 domain filtering with TLS inspection, use http2 protocol with http.request_header or http2.header_name",
+    "Use flow:stateless in xbits pass rules to match packets regardless of connection state",
+    "IP set references use @ prefix (e.g., @BETA) to reference VPC prefix list ARNs",
+    "The pcre keyword MUST be paired with content, tls.sni, http.host, http.uri, or dns.query — it cannot be used alone in AWS Network Firewall",
+    "Do NOT use the priority keyword in strict order rule groups — it is not supported and will cause errors",
+    "Thresholding keywords (threshold, detection_filter) have limited support in AWS Network Firewall — test thoroughly before relying on them"
+  ],
+  "aws_specific_keywords": {
+    "description": "Keywords specific to AWS Network Firewall that are not part of standard Suricata",
+    "keywords": [
+      {"name": "aws_url_category", "description": "Match AWS managed URL categories. Evaluates complete URLs (HTTP) or domains. Requires TLS inspection for HTTPS. Supported protocol: HTTP. Example: aws_url_category:Malicious;"},
+      {"name": "aws_domain_category", "description": "Match AWS managed domain categories. Evaluates domain from TLS SNI or HTTP host. No TLS inspection required. Supported protocols: TLS, HTTP. Example: aws_domain_category:Malware;"},
+      {"name": "ja4.hash", "description": "JA4 TLS fingerprint hash sticky buffer. Newer than JA3, provides more granular TLS client fingerprinting."},
+      {"name": "dotprefix", "description": "Transform that prepends '.' to buffer content. Used with tls.sni or dns.query for subdomain matching. Example: tls.sni; dotprefix; content:\".amazon.com\"; endswith;"},
+      {"name": "http2.header_name", "description": "HTTP/2 header name sticky buffer. Used for matching HTTP/2 pseudo-headers like 'authority'. Requires TLS inspection."},
+      {"name": "http.request_header", "description": "HTTP request header sticky buffer. Works with both HTTP/1 and HTTP/2. Format: content:\"header_name|3a 20|value\";"}
+    ],
+    "constraints": [
+      "aws_url_category and aws_domain_category CANNOT be combined with geoip in the same rule",
+      "aws_url_category requires TLS inspection for HTTPS traffic evaluation",
+      "Multiple categories can be comma-separated: aws_url_category:Gambling,Social Networking;",
+      "Category database is automatically maintained and updated by AWS",
+      "The pcre keyword is only allowed with content, tls.sni, http.host, http.uri, and dns.query keywords — pcre cannot be used alone",
+      "The priority keyword is NOT supported for rule groups using strict evaluation order — do not include priority in strict order rules",
+      "Thresholding keywords (threshold, detection_filter) have limited support — test thoroughly before relying on them in production"
+    ],
+    "supported_categories": [
+      "Abortion", "Adult and Mature Content", "Artificial Intelligence and Machine Learning",
+      "Arts and Culture", "Business and Economy", "Career and Job Search", "Child Abuse",
+      "Command and Control", "Criminal and Illegal Activities", "Cryptocurrency", "Dating",
+      "Education", "Email", "Entertainment", "Family and Parenting", "Fashion",
+      "Financial Services", "Food and Dining", "For Kids", "Gambling",
+      "Government and Legal", "Hacking", "Health", "Hobbies and Interest",
+      "Home and Garden", "Lifestyle", "Malicious", "Malware", "Marijuana", "Military",
+      "News", "Online Ads", "Parked Domains", "Pets", "Phishing", "Private IP Address",
+      "Proxy Avoidance", "Real Estate", "Redirect", "Religion",
+      "Search Engines and Portals", "Science", "Shopping", "Social Networking", "Spam",
+      "Sports and Recreation", "Technology and Internet", "Translation", "Travel",
+      "Vehicles", "Violence and Hate Speech"
+    ]
+  }
+}

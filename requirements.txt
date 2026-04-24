@@ -26,7 +26,8 @@ wxPython>=4.2.0
 # - Tools > Analyze Rule Usage (CloudWatch Logs analysis)
 # - File > Import Rule Group (from AWS Network Firewall)
 # - File > Export Rule Group (to AWS Network Firewall)
-# - Tools > Traffic Analysis & VPC Endpoints (NEW)
+# - Tools > Traffic Analysis & VPC Endpoints
+# - Tools > AI Rule Assistant (Amazon Bedrock-powered rule generation)
 boto3>=1.26.0
 
 # Traffic Analysis & VPC Endpoints (optional)
@@ -34,6 +35,11 @@ boto3>=1.26.0
 # Provides fast IP-to-service mapping and AWS IP range analysis
 intervaltree>=3.1.0
 requests>=2.28.0
+
+# XML Security (recommended)
+# Protects against XML External Entity (XXE) attacks when importing
+# Palo Alto firewall configuration exports
+defusedxml>=0.7.1
 
 # Installation for AWS features:
 # pip install boto3 intervaltree requests

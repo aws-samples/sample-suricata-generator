@@ -164,3 +164,13 @@ class ValidationMessages:
     
     NETWORK_ERROR = "Network error: {error}"
     TIMEOUT_ERROR = "Operation timed out after {seconds} seconds"
+
+
+# Bedrock-supported regions for AI feature region dropdowns
+BEDROCK_REGIONS = [
+    "us-east-1",
+    "us-west-2",
+    "eu-west-1",
+    "ap-northeast-1",
+    "ap-southeast-1",
+]

@@ -654,6 +654,7 @@ class DomainImporter:
                 # Auto-detect variables after domain import
                 self.parent.auto_detect_variables()
                 self.parent.update_status_bar()
+                self.parent._invalidate_ai_cache()
                 
                 result[0] = True
                 dialog.destroy()
@@ -1387,6 +1388,7 @@ class DomainImporter:
             # Auto-detect variables after domain rule insertion
             self.parent.auto_detect_variables()
             self.parent.update_status_bar()
+            self.parent._invalidate_ai_cache()
             
             result[0] = True
             dialog.destroy()

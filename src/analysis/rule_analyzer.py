@@ -925,8 +925,15 @@ class RuleAnalyzer:
         return False
     
     def has_negated_content(self, content: str) -> bool:
-        """Check if content has negated matches like content:!"something" """
-        return 'content:!' in content
+        """Check if content has negated matches like content:!"something" or ip_proto:!TCP"""
+        if 'content:!' in content:
+            return True
+        # Also detect negated ip_proto keywords (e.g., ip_proto:!TCP, ip_proto:!UDP)
+        # These narrow a rule's scope by excluding specific protocols, so the rule
+        # is NOT broader than rules without these restrictions
+        if 'ip_proto:!' in content:
+            return True
+        return False
     
     def uses_different_detection_mechanisms(self, content1: str, content2: str) -> bool:
         """Check if rules use fundamentally different detection mechanisms"""
@@ -2162,7 +2169,8 @@ class RuleAnalyzer:
             'app-layer-protocol:', 'geoip:', 'byte_test:', 'byte_extract:',
             'isdataat:', 'depth:', 'offset:', 'distance:', 'within:',
             'flowbits:', 'flowint:', 'xbits:', 'hostbits:',  # State/condition keywords
-            'aws_url_category:', 'aws_domain_category:'  # AWS category keywords (external DB lookup)
+            'aws_url_category:', 'aws_domain_category:',  # AWS category keywords (external DB lookup)
+            'ip_proto:',  # IP protocol filter (e.g., ip_proto:!TCP narrows scope)
         ]
         
         # Check if content has any actual content matching or state keywords

@@ -28,18 +28,10 @@ except ImportError:
 
 from src.agent.agent_factory import AgentFactory
 from src.agent.models import GenerationResult
+from src.core.constants import BEDROCK_REGIONS
 from src.core.suricata_rule import SuricataRule
 
 logger = logging.getLogger(__name__)
-
-# Bedrock-supported regions for the region dropdown
-BEDROCK_REGIONS = [
-    "us-east-1",
-    "us-west-2",
-    "eu-west-1",
-    "ap-northeast-1",
-    "ap-southeast-1",
-]
 
 # Example prompts shown when the chat is empty — a random subset is displayed each time
 _EXAMPLE_PROMPTS = [
@@ -99,10 +91,46 @@ class AIAssistantPanel:
         # Disclaimer shown once per session
         self._disclaimer_accepted: bool = False
 
+        # Handoff context: when rules are generated from an AI Analysis
+        # handoff, this stores the SID after which new rules should be
+        # inserted.  Reset to None after each insertion so it only
+        # affects the immediate handoff, not subsequent manual prompts.
+        self._pending_insert_after_sid: int | None = None
+
 
     # ------------------------------------------------------------------ #
     #  Public API                                                         #
     # ------------------------------------------------------------------ #
+
+    def reset_session(self) -> None:
+        """Reset the AI Rule Assistant to a fresh state.
+
+        Clears chat history, closes the panel window if open, and resets
+        internal state.  Called when the user opens a different file so
+        the assistant starts clean for the new ruleset context.
+        """
+        self.chat_history.clear()
+        self._pending_insert_after_sid = None
+        self.agent_factory = None
+        self._generating = False
+
+        # Close the window if it exists
+        if self.window is not None:
+            try:
+                if self.window.winfo_exists():
+                    self.window.destroy()
+            except tk.TclError:
+                pass
+            self.window = None
+
+        # Reset widget references (they belong to the destroyed window)
+        self.message_area = None
+        self.input_field = None
+        self.submit_btn = None
+        self.region_var = None
+        self.model_var = None
+        self.model_combo = None
+        self._model_list = []
 
     def show(self) -> None:
         """Create the AI panel window or bring an existing one to front."""
@@ -669,16 +697,27 @@ class AIAssistantPanel:
 
         btn_frame = ttk.Frame(self.message_area)
 
+        # Capture the current handoff context (if any) at button creation
+        # time so it's used when the user clicks "Insert Rules".
+        captured_insert_after = self._pending_insert_after_sid
+
         insert_btn = ttk.Button(
             btn_frame,
             text="Insert Rules",
-            command=lambda r=rules: self._insert_rules(r),
+            command=lambda r=rules, sid=captured_insert_after: self._do_insert(r, sid),
         )
         insert_btn.pack(side=tk.LEFT, padx=(0, 8))
 
         self.message_area.window_create(tk.END, window=btn_frame)
         self.message_area.insert(tk.END, "\n")
         self.message_area.config(state=tk.DISABLED)
+
+    def _do_insert(self, rules: list[str], insert_after_sid: int | None) -> None:
+        """Insert rules and clear the handoff context afterward."""
+        self._insert_rules(rules, insert_after_sid=insert_after_sid)
+        # Clear the pending context so subsequent manual prompts
+        # append to the end as usual.
+        self._pending_insert_after_sid = None
 
     # ------------------------------------------------------------------ #
     #  Chat Area Helpers                                                  #
@@ -863,14 +902,22 @@ class AIAssistantPanel:
     #  Rule Insertion (Task 5.1)                                          #
     # ------------------------------------------------------------------ #
 
-    def _insert_rules(self, rules: list[str]) -> None:
+    def _insert_rules(self, rules: list[str], insert_after_sid: int | None = None) -> None:
         """Parse rules, assign unique SIDs, and insert into the parent's rule list.
 
         Steps:
         1. Save undo state so the user can revert with Ctrl+Z.
         2. Collect existing SIDs to avoid collisions.
-        3. Parse each rule string, assign a fresh SID, validate, and append.
+        3. Parse each rule string, assign a fresh SID, validate, and insert.
         4. Refresh the UI (variables, table, status bar).
+
+        Args:
+            rules: List of Suricata rule strings to insert.
+            insert_after_sid: If provided, insert new rules after the rule
+                with this SID instead of appending to the end. This is used
+                by the AI Analysis handoff to place rules near the affected
+                rules for correct evaluation order in strict mode. When None
+                (the default), rules are appended to the end as before.
         """
         # 1. Save undo state BEFORE making any changes
         self.parent.save_undo_state()
@@ -914,8 +961,22 @@ class AIAssistantPanel:
                     errors.append(category_error)
                     continue
 
-                # Append to the parent's rule list
-                self.parent.rules.append(parsed)
+                # Insert into the parent's rule list at the appropriate position
+                if insert_after_sid is not None:
+                    # Find the index of the anchor SID and insert after it
+                    anchor_idx = None
+                    for idx, r in enumerate(self.parent.rules):
+                        if hasattr(r, "sid") and r.sid == insert_after_sid:
+                            anchor_idx = idx
+                    if anchor_idx is not None:
+                        # Insert after the anchor, offset by previously inserted rules
+                        insert_pos = anchor_idx + 1 + inserted_count
+                        self.parent.rules.insert(insert_pos, parsed)
+                    else:
+                        # Anchor SID not found — fall back to append
+                        self.parent.rules.append(parsed)
+                else:
+                    self.parent.rules.append(parsed)
 
                 # Change tracking: create baseline snapshot so this version is preserved
                 if getattr(self.parent, 'tracking_enabled', False):
@@ -931,6 +992,7 @@ class AIAssistantPanel:
             self.parent.modified = True
             self.parent.auto_detect_variables()
             self.parent.refresh_table()
+            self.parent._invalidate_ai_cache()
 
             # Update status bar
             status_msg = f"Inserted {inserted_count} AI-generated rule{'s' if inserted_count != 1 else ''}"
@@ -939,10 +1001,17 @@ class AIAssistantPanel:
 
         # 5. Display feedback in the chat area
         if inserted_count > 0:
-            self._append_to_chat(
-                f"✓ Inserted {inserted_count} rule{'s' if inserted_count != 1 else ''} into the rule list.\n",
-                "status_msg",
-            )
+            if insert_after_sid is not None:
+                self._append_to_chat(
+                    f"✓ Inserted {inserted_count} rule{'s' if inserted_count != 1 else ''} "
+                    f"after SID {insert_after_sid} for correct evaluation order.\n",
+                    "status_msg",
+                )
+            else:
+                self._append_to_chat(
+                    f"✓ Inserted {inserted_count} rule{'s' if inserted_count != 1 else ''} into the rule list.\n",
+                    "status_msg",
+                )
 
         for err in errors:
             self._append_to_chat(f"⚠ {err}\n", "error_msg")

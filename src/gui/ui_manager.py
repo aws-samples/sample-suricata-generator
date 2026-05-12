@@ -2353,6 +2353,7 @@ Would you like to run a complete analysis?"""
                                            if not (hasattr(r, 'sid') and r.sid in checked_sids)]
                         self.parent.refresh_table()
                         self.parent.modified = True
+                        self.parent._invalidate_ai_cache()
                         
                         # Close results window and show success
                         results_window.destroy()
@@ -2634,6 +2635,7 @@ Would you like to run a complete analysis?"""
                                        if not (hasattr(r, 'sid') and r.sid in checked_sids)]
                     self.parent.refresh_table()
                     self.parent.modified = True
+                    self.parent._invalidate_ai_cache()
                     results_window.destroy()
                     messagebox.showinfo("Success", 
                                       f"Deleted {len(checked_sids)} low-frequency rules.\n\n"
@@ -7337,6 +7339,7 @@ Would you like to run a complete analysis?"""
         self.parent.refresh_table(preserve_selection=False)
         self.parent.modified = True
         self.parent.update_status_bar()
+        self.parent._invalidate_ai_cache()
         
         # Select the line after the inserted blank line
         all_items = self.tree.get_children()
@@ -7590,6 +7593,7 @@ Would you like to run a complete analysis?"""
             self.parent.add_history_entry('variable_deleted', {'variable': var_name})
             self.parent.refresh_variables_table()
             self.parent.update_status_bar()  # Update status bar to reflect undefined variable count
+            self.parent._invalidate_ai_cache()
     
     def on_variable_double_click(self, event):
         """Handle double-click events on variables tree items"""
@@ -7807,6 +7811,7 @@ Would you like to run a complete analysis?"""
             self.parent.add_history_entry(action_type, {'variable': name, 'definition': definition})
             self.parent.refresh_variables_table()
             self.parent.update_status_bar()  # Update status bar to reflect variable definition changes
+            self.parent._invalidate_ai_cache()
             dialog.destroy()
         
         ttk.Button(button_frame, text="Save", command=save_variable).pack(side=tk.LEFT, padx=5)
@@ -7971,6 +7976,7 @@ Would you like to run a complete analysis?"""
             self.parent.add_history_entry(action_type, {'variable': name, 'definition': definition, 'description': description})
             self.parent.refresh_variables_table()
             self.parent.update_status_bar()  # Update status bar to reflect variable definition changes
+            self.parent._invalidate_ai_cache()
             dialog.destroy()
         
         ttk.Button(button_frame, text="Save", command=save_variable).pack(side=tk.LEFT, padx=5)

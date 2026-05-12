@@ -115,3 +115,43 @@ class DeployResult:
     rule_group_arn: str = ""
     update_token: str = ""
     error: Optional[str] = None
+
+
+@dataclass
+class AnalysisFinding:
+    """A single finding from the AI analyzer."""
+
+    id: str                          # Unique ID, e.g. "cg-1", "pc-2"
+    section: str                     # "coverage_gaps" | "policy_coherence" | "optimizations" | "aws_advice"
+    severity: str                    # "critical" | "warning" | "info"
+    confidence: str                  # "high" | "medium" | "low"
+    description: str                 # Finding description
+    affected_sids: list[int] = field(default_factory=list)  # SIDs of affected rules
+    recommendation: str = ""         # Actionable recommendation
+    caveat: str = ""                 # Contextual caveat (e.g., "may be intentional if...")
+    reference: str = ""              # Reference to AWS best practices section
+
+
+@dataclass
+class StructuredAnalysisResponse:
+    """Complete AI analysis response."""
+
+    coverage_gaps: list[AnalysisFinding] = field(default_factory=list)
+    policy_coherence: list[AnalysisFinding] = field(default_factory=list)
+    optimizations: list[AnalysisFinding] = field(default_factory=list)
+    aws_advice: list[AnalysisFinding] = field(default_factory=list)
+    raw_text: str = ""               # Original LLM response for debugging
+    was_summarized: bool = False     # True if ruleset was truncated for context window
+    is_cached: bool = False          # True if served from cache
+    timestamp: str = ""              # ISO 8601 timestamp of analysis
+    model_id: str = ""               # Model used for analysis
+
+    @property
+    def all_findings(self) -> list[AnalysisFinding]:
+        """All findings across all sections."""
+        return self.coverage_gaps + self.policy_coherence + self.optimizations + self.aws_advice
+
+    @property
+    def finding_count(self) -> int:
+        """Total number of findings across all sections."""
+        return len(self.all_findings)

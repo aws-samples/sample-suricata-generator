@@ -1,5 +1,38 @@
 # Release Notes
 
+## Version 2.3.0 / Analyzer v2.0.0 - April 27, 2026
+
+### New Feature: AI Rule Analysis
+
+AI-powered semantic analysis of your entire ruleset via Amazon Bedrock, complementing the existing static rule analyzer. After running **Tools > Review Rules**, a new **AI Analysis** tab appears alongside the static analysis results. Click **AI Deep Analysis** to send your ruleset to an LLM that evaluates security posture, coverage gaps, policy coherence, optimization opportunities, and AWS Network Firewall-specific advice.
+
+#### Key Capabilities
+- **Coverage Gap Detection**: Identifies missing detection categories based on what rules exist versus what a comprehensive security policy should contain (e.g., missing DNS tunneling detection, no HTTP/2 inspection despite HTTP/1 rules)
+- **Policy Coherence Review**: Evaluates whether rule actions across the ruleset are consistent and identifies contradictions (e.g., allowing all UDP but blocking specific TCP ports)
+- **Rule Optimization Suggestions**: Identifies rules that could be consolidated or improved for performance (e.g., using `dotprefix` instead of separate subdomain rules, PCRE consolidation)
+- **AWS Network Firewall Advice**: Evaluates the ruleset against AWS NFW operational requirements including strict evaluation order, HOME_NET scope, TCP handshake pass rules, and rule type processing order interactions
+- **Structured Findings**: Results organized by category with severity icons (critical/warning/info), confidence indicators, affected rule SIDs, actionable recommendations, and contextual caveats
+- **Finding Handoff**: Select specific findings and send them to the AI Rule Assistant for rule generation, with automatic positional insertion near affected rules for correct evaluation order
+- **Session Caching**: Results are cached per-session to avoid redundant API calls; cache invalidates automatically when rules or variables change
+- **Large Ruleset Handling**: Rulesets exceeding 500 rules are automatically summarized, prioritizing rules flagged by the static analyzer
+- **Export**: Save analysis results as HTML or PDF for sharing with your team
+- **Graceful Degradation**: The feature requires boto3 but the main program and static analyzer continue to work normally without it
+
+#### Shared Infrastructure
+- Bedrock regions list moved to a shared constant so both the AI Rule Assistant and AI Analysis use the same set
+- New `AgentFactory` methods (`get_bedrock_client`, `get_knowledge_base`) provide lightweight access to Bedrock and grounding data without constructing the full agent pipeline
+
+---
+
+## Rules Analysis Engine Bug Fix (v1.12.0) - April 27, 2026
+
+### Bug Fixes
+
+- **False Positive: `ip_proto` Negation Not Recognized as Content Restriction**: Fixed the `has_only_flow_keywords()` method incorrectly classifying rules with `ip_proto:!TCP; ip_proto:!UDP; ip_proto:!ICMP` as "flow-only" broad rules. Added `ip_proto:` to the content-matching keywords list so these narrowing restrictions are properly recognized.
+- **False Positive: `ip_proto:!` Not Detected as Negated Content**: Extended `has_negated_content()` to detect `ip_proto:!` patterns in addition to `content:!`. This prevents the analyzer from treating a rule that explicitly excludes protocols (e.g., only matching non-TCP/UDP/ICMP traffic) as broader than rules matching all IP traffic.
+
+---
+
 ## Version 2.2.2 - April 23, 2026
 
 ### Bug Fixes

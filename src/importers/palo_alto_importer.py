@@ -3408,6 +3408,7 @@ class PaloAltoImporter:
         self.parent.auto_detect_variables()
         self.parent.refresh_tags_table()
         self.parent.update_status_bar()
+        self.parent._invalidate_ai_cache()
 
         # Log import operation if tracking enabled
         if self.parent.tracking_enabled:

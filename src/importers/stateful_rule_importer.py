@@ -1588,6 +1588,7 @@ class StatefulRuleImporter:
         self.parent.current_file = None
         self.parent.modified = True
         self.parent.update_status_bar()
+        self.parent._invalidate_ai_cache()
         self.parent.root.title(f"Suricata Rule Generator - {parsed_data['name']}")
         
         # Set up rule editor for new rule insertion

@@ -131,6 +131,45 @@ class AgentFactory:
         self._model_id = None
         self._sid_allocator = None
 
+    def get_bedrock_client(self, region: str, read_timeout: int = 300):
+        """Return a ``bedrock-runtime`` client for the given region.
+
+        This is a lightweight accessor that creates a Bedrock Runtime client
+        using the factory's ``_aws_session`` without constructing the full
+        ``AgentLoop`` pipeline.  It is intended for components like
+        ``AIRuleAnalyzer`` that need direct Bedrock access.
+
+        A longer read timeout is configured by default because AI analysis
+        of large rulesets can take several minutes for the LLM to process.
+
+        Args:
+            region: AWS region for the Bedrock Runtime client
+                    (e.g. ``us-east-1``).
+            read_timeout: Socket read timeout in seconds (default 300s / 5min).
+
+        Returns:
+            A ``bedrock-runtime`` boto3 client.
+        """
+        from botocore.config import Config
+        config = Config(read_timeout=read_timeout, retries={"max_attempts": 0})
+        session = self._aws_session.get_session()
+        return session.client(
+            "bedrock-runtime", region_name=region, config=config,
+        )
+
+    def get_knowledge_base(self) -> KnowledgeBase:
+        """Return a ``KnowledgeBase`` instance using the factory's data directory.
+
+        This is a lightweight accessor that creates a new ``KnowledgeBase``
+        without constructing the full ``AgentLoop`` pipeline.  It is intended
+        for components like ``AIRuleAnalyzer`` that need access to grounding
+        data (e.g. the AWS best practices document).
+
+        Returns:
+            A ``KnowledgeBase`` instance backed by ``self._data_dir``.
+        """
+        return KnowledgeBase(local_data_dir=self._data_dir)
+
     @staticmethod
     def list_models(aws_session, region: str) -> list[dict]:
         """Query Bedrock for available foundation models / inference profiles.

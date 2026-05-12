@@ -1004,6 +1004,7 @@ class SuricataRuleGenerator:
             self.rules, self.variables, self.has_header, self.created_timestamp = self.file_manager.load_rules_from_file(filename)
             self.refresh_table()
             self.auto_detect_variables()
+            self._invalidate_ai_cache()
             
             # Check for associated .stats file and load if found
             self.load_stats_file_if_exists(filename)
@@ -1175,6 +1176,7 @@ class SuricataRuleGenerator:
         
         self.modified = True
         self.update_status_bar()
+        self._invalidate_ai_cache()
     
     def move_rule_down(self):
         """Move selected rule down by one position"""
@@ -1213,6 +1215,7 @@ class SuricataRuleGenerator:
         
         self.modified = True
         self.update_status_bar()
+        self._invalidate_ai_cache()
     
     def get_next_available_sid(self, start_sid: int = 100) -> int:
         """Get the next available SID in the range 100-999999999"""
@@ -1565,6 +1568,7 @@ class SuricataRuleGenerator:
                     self.rules.insert(insert_index, updated_rule)
                 self.refresh_table()
                 self.modified = True
+                self._invalidate_ai_cache()
                 messagebox.showinfo("Success", f"Rule added at line {line_num} successfully.")
             else:
                 messagebox.showerror("Error", f"SID {updated_rule.sid} is already in use. Please choose a different SID.")
@@ -1698,6 +1702,7 @@ class SuricataRuleGenerator:
                 self.rules.insert(insert_index, updated_rule)
                 self.refresh_table()
                 self.modified = True
+                self._invalidate_ai_cache()
                 messagebox.showinfo("Success", f"Rule inserted at line {insert_index + 1} successfully.")
             else:
                 messagebox.showerror("Error", f"SID {updated_rule.sid} is already in use. Please choose a different SID.")
@@ -1767,6 +1772,7 @@ class SuricataRuleGenerator:
                         self.modified = True
                         self.auto_detect_variables()
                         self.update_status_bar()
+                        self._invalidate_ai_cache()
                         messagebox.showinfo("Success", f"Rule at line {rule_index + 1} updated successfully.")
                         return
                     
@@ -1889,6 +1895,7 @@ class SuricataRuleGenerator:
                     # Auto-detect variables after rule changes
                     self.auto_detect_variables()
                     self.update_status_bar()
+                    self._invalidate_ai_cache()
                     messagebox.showinfo("Success", f"Rule at line {rule_index + 1} updated successfully.")
                 else:
                     messagebox.showerror("Error", f"SID {updated_rule.sid} is already in use. Please choose a different SID.")
@@ -1939,6 +1946,7 @@ class SuricataRuleGenerator:
             
             self.refresh_table()
             self.modified = True
+            self._invalidate_ai_cache()
             # Don't call update_status_bar() here - refresh_table() already called it with proper displayed_count
     
     
@@ -2004,6 +2012,11 @@ class SuricataRuleGenerator:
         self.has_header = False
         self.created_timestamp = None
         self.pending_history.clear()
+        self._invalidate_ai_cache()
+
+        # Reset AI Rule Assistant history for the new file context
+        if self.ai_panel is not None:
+            self.ai_panel.reset_session()
         
         # Create header for new files only if tracking enabled
         if self.tracking_enabled:
@@ -2072,6 +2085,10 @@ class SuricataRuleGenerator:
             # Reset file session flag for upgrade prompt
             if hasattr(self, '_file_upgrade_prompted'):
                 delattr(self, '_file_upgrade_prompted')
+
+            # Reset AI Rule Assistant history for the new file context
+            if self.ai_panel is not None:
+                self.ai_panel.reset_session()
             
             self.load_rules_from_file(filename)
             self.current_file = filename
@@ -2710,6 +2727,7 @@ class SuricataRuleGenerator:
         # Auto-detect variables after paste operation
         self.auto_detect_variables()
         self.update_status_bar()
+        self._invalidate_ai_cache()
         
         # Show appropriate success message based on source
         rule_text = "rule" if count == 1 else "rules"
@@ -4265,6 +4283,7 @@ class SuricataRuleGenerator:
                 self.modified = True
                 self.auto_detect_variables()
                 self.update_status_bar()
+                self._invalidate_ai_cache()
                 
                 messagebox.showinfo("Success", f"Rule added at line {updated_line_num} successfully.")
                 
@@ -4302,6 +4321,7 @@ class SuricataRuleGenerator:
                         self.modified = True
                         self.auto_detect_variables()
                         self.update_status_bar()
+                        self._invalidate_ai_cache()
                         
                         # Reselect the updated rule
                         items = self.tree.get_children()
@@ -4493,6 +4513,7 @@ class SuricataRuleGenerator:
                     self.modified = True
                     self.auto_detect_variables()
                     self.update_status_bar()
+                    self._invalidate_ai_cache()
                     
                     # Reselect the updated rule
                     items = self.tree.get_children()
@@ -4682,6 +4703,7 @@ class SuricataRuleGenerator:
                 # Auto-detect variables after rule changes
                 self.auto_detect_variables()
                 self.update_status_bar()
+                self._invalidate_ai_cache()
                 
                 # Reselect the updated rule
                 items = self.tree.get_children()
@@ -4801,6 +4823,7 @@ class SuricataRuleGenerator:
         self.refresh_table()
         self.modified = True
         self.update_status_bar()
+        self._invalidate_ai_cache()
     
     def on_tree_click(self, event):
         """Handle clicks on the tree to manage rule selection and insertion
@@ -5018,6 +5041,7 @@ class SuricataRuleGenerator:
             self.modified = True
             # Auto-detect variables after rule insertion
             self.auto_detect_variables()
+            self._invalidate_ai_cache()
             
             # Clear selection and set up for next insertion
             self.tree.selection_remove(self.tree.selection())
@@ -5114,6 +5138,7 @@ class SuricataRuleGenerator:
             self.refresh_table()
             self.modified = True
             self.update_status_bar()
+            self._invalidate_ai_cache()
             
             messagebox.showinfo("Success", f"Comment inserted at line {insert_index + 1} successfully.")
     
@@ -5373,6 +5398,7 @@ class SuricataRuleGenerator:
         self.refresh_table()
         self.modified = True
         self.update_status_bar()
+        self._invalidate_ai_cache()
 
         # Show feedback message
         total_toggled = len(enabled_rules) + len(disabled_rules) + commented_count - len(disabled_rules) + uncommented_count - len(enabled_rules)
@@ -6291,6 +6317,7 @@ class SuricataRuleGenerator:
                     self.auto_detect_variables()
                     self.modified = True
                     self.update_status_bar()
+                    self._invalidate_ai_cache()
         
         except Exception as e:
             messagebox.showerror(
@@ -6676,33 +6703,84 @@ class SuricataRuleGenerator:
 
 
     
+    def _invalidate_ai_cache(self):
+        """Invalidate the AI analysis cache when rules or variables change.
+
+        Called from rule add/edit/delete/reorder operations and variable
+        changes so that the next AI analysis request triggers a fresh LLM
+        invocation.  This is a non-critical operation — failures are
+        silently ignored to avoid disrupting the primary workflow.
+        """
+        try:
+            if (hasattr(self, '_ai_analysis_tab')
+                    and self._ai_analysis_tab is not None
+                    and hasattr(self._ai_analysis_tab, '_ai_analyzer')
+                    and self._ai_analysis_tab._ai_analyzer is not None):
+                self._ai_analysis_tab._ai_analyzer.invalidate_cache()
+        except Exception:
+            pass  # Non-critical — never block the main workflow
+
     def show_analysis_report(self, conflicts):
-        """Show analysis results in a new window"""
+        """Show analysis results in a tabbed notebook window.
+
+        Creates a Toplevel with a ttk.Notebook containing:
+          - "Static Analysis" tab  — the existing text-based report
+          - "AI Analysis" tab      — AIAnalysisTab for Bedrock-powered analysis
+
+        Per ui-conventions.md:
+          - No transient() call (Req 20.3)
+          - minsize() set (Req 20.2)
+          - Buttons packed BOTTOM before content
+          - Window is resizable by default
+        """
+        # Local import to avoid circular dependency (ai_analysis_tab
+        # uses TYPE_CHECKING guard for SuricataRuleGenerator)
+        from src.gui.ai_analysis_tab import AIAnalysisTab
+
         report_window = tk.Toplevel(self.root)
         report_window.title("Rule Analysis Report")
         report_window.geometry("900x600")
-        report_window.transient(self.root)
-        
-        # Create text widget with scrollbar
-        text_frame = ttk.Frame(report_window)
-        text_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
-        
+        report_window.minsize(800, 500)
+        # NOTE: no transient() call — per Req 20.3 / ui-conventions.md rule 3
+
+        # ── Static Analysis tab: buttons packed BOTTOM first ─────────
+        # Pack buttons at the bottom of the window BEFORE the notebook
+        # so they remain visible regardless of window size (rule 5).
+        buttons_frame = ttk.Frame(report_window)
+        buttons_frame.pack(side=tk.BOTTOM, fill=tk.X, pady=10, padx=10)
+
+        ttk.Button(buttons_frame, text="Save as HTML", command=lambda: self.save_report_html(conflicts)).pack(side=tk.LEFT, padx=5)
+        ttk.Button(buttons_frame, text="Save as PDF", command=lambda: self.save_report_pdf(conflicts)).pack(side=tk.LEFT, padx=5)
+        ttk.Button(buttons_frame, text="Close", command=report_window.destroy).pack(side=tk.LEFT, padx=5)
+
+        # ── Notebook ─────────────────────────────────────────────────
+        notebook = ttk.Notebook(report_window)
+        notebook.pack(fill=tk.BOTH, expand=True, padx=10, pady=(10, 0))
+
+        # ── Tab 1: Static Analysis ───────────────────────────────────
+        static_tab = ttk.Frame(notebook)
+        notebook.add(static_tab, text="Static Analysis")
+
+        # Create text widget with scrollbar (expand=False per rule 1)
+        text_frame = ttk.Frame(static_tab)
+        text_frame.pack(fill=tk.BOTH, expand=False, padx=10, pady=10)
+
         text_widget = tk.Text(text_frame, wrap=tk.WORD, font=("Consolas", 10))
         scrollbar = ttk.Scrollbar(text_frame, orient=tk.VERTICAL, command=text_widget.yview)
         text_widget.configure(yscrollcommand=scrollbar.set)
-        
+
         text_widget.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
-        
+
         # Generate report content
         report = self.generate_analysis_report(conflicts)
         text_widget.insert(tk.END, report)
-        
+
         # Make read-only but allow selection and copying
         text_widget.config(state=tk.NORMAL)
         text_widget.bind("<Key>", lambda e: "break")  # Prevent typing
         text_widget.bind("<Button-1>", lambda e: text_widget.focus_set())  # Allow selection
-        
+
         # Add right-click context menu for copying
         def show_context_menu(event):
             context_menu = tk.Menu(report_window, tearoff=0)
@@ -6712,7 +6790,7 @@ class SuricataRuleGenerator:
                 context_menu.tk_popup(event.x_root, event.y_root)
             finally:
                 context_menu.grab_release()
-        
+
         def copy_selection():
             try:
                 selected_text = text_widget.selection_get()
@@ -6720,16 +6798,37 @@ class SuricataRuleGenerator:
                 report_window.clipboard_append(selected_text)
             except tk.TclError:
                 pass  # No selection
-        
+
         text_widget.bind("<Button-3>", show_context_menu)  # Right-click
-        
-        # Buttons frame
-        buttons_frame = ttk.Frame(report_window)
-        buttons_frame.pack(pady=10)
-        
-        ttk.Button(buttons_frame, text="Save as HTML", command=lambda: self.save_report_html(conflicts)).pack(side=tk.LEFT, padx=5)
-        ttk.Button(buttons_frame, text="Save as PDF", command=lambda: self.save_report_pdf(conflicts)).pack(side=tk.LEFT, padx=5)
-        ttk.Button(buttons_frame, text="Close", command=report_window.destroy).pack(side=tk.LEFT, padx=5)
+
+        # Cross-platform copy bindings (ui-conventions.md)
+        def _copy_sel(event=None):
+            try:
+                sel = text_widget.get(tk.SEL_FIRST, tk.SEL_LAST)
+                report_window.clipboard_clear()
+                report_window.clipboard_append(sel)
+            except tk.TclError:
+                pass
+            return "break"
+
+        text_widget.bind("<Control-c>", _copy_sel)
+        text_widget.bind("<Command-c>", _copy_sel)
+
+        # Cross-platform mouse scroll wheel (ui-conventions.md)
+        def _on_mousewheel(event):
+            if event.num == 4:
+                text_widget.yview_scroll(-3, "units")
+            elif event.num == 5:
+                text_widget.yview_scroll(3, "units")
+            else:
+                text_widget.yview_scroll(int(-1 * (event.delta / 120)), "units")
+
+        text_widget.bind("<MouseWheel>", _on_mousewheel)
+        text_widget.bind("<Button-4>", _on_mousewheel)
+        text_widget.bind("<Button-5>", _on_mousewheel)
+
+        # ── Tab 2: AI Analysis ───────────────────────────────────────
+        self._ai_analysis_tab = AIAnalysisTab(notebook, self, conflicts)
     
     def generate_analysis_report(self, conflicts):
         """Generate formatted analysis report with timestamp and version info"""

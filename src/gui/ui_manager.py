@@ -124,6 +124,40 @@ class UIManager:
         tools_menu.add_command(label="Test Rules with PCAP",
                               command=self.parent.show_pcap_tester)
         
+        # Managed Rules menu - MRG integration (positioned after Tools, before Help)
+        # Use try/except to detect MRG availability without circular imports
+        try:
+            from src.mrg import MRG_VERSION
+            _has_mrg = True
+        except ImportError:
+            _has_mrg = False
+        
+        mrg_menu = tk.Menu(menubar, tearoff=0)
+        menubar.add_cascade(label="Managed Rules", menu=mrg_menu)
+        
+        if not _has_mrg:
+            mrg_menu.add_command(
+                label="New Configuration (boto3 required)", state=tk.DISABLED)
+            mrg_menu.add_command(
+                label="Open Configuration (boto3 required)", state=tk.DISABLED)
+            mrg_menu.add_command(
+                label="Browse Deployed Configs (boto3 required)", state=tk.DISABLED)
+        else:
+            mrg_menu.add_command(
+                label="New Configuration", command=self.parent._open_mrg_new,
+                accelerator="Ctrl+M")
+            mrg_menu.add_command(
+                label="Open Configuration...", command=self.parent._open_mrg_file)
+            mrg_menu.add_command(
+                label="Browse Deployed Configs...", command=self.parent._browse_mrg_configs)
+            mrg_menu.add_separator()
+            mrg_menu.add_command(
+                label="Full Teardown...", command=self.parent._full_mrg_teardown)
+            
+            # Bind Ctrl+M keyboard shortcuts
+            self.parent.root.bind('<Control-m>', lambda e: self.parent._open_mrg_new())
+            self.parent.root.bind('<Control-M>', lambda e: self.parent._open_mrg_new())
+        
         # Help menu - about dialog and keyboard shortcuts
         help_menu = tk.Menu(menubar, tearoff=0)
         menubar.add_cascade(label="Help", menu=help_menu)
@@ -7474,6 +7508,7 @@ Would you like to run a complete analysis?"""
             ("Tools", [
                 ("Ctrl+E", "Open Advanced Editor"),
                 ("Ctrl+I", "Open AI Rule Assistant"),
+                ("Ctrl+M", "New Managed Rule Group Configuration"),
             ]),
             ("Editing & Selection", [
                 ("Ctrl+Z", "Undo last change"),

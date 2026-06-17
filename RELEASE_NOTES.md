@@ -1,5 +1,32 @@
 # Release Notes
 
+## Version 2.4.0 / MRG v1.0.0 - June 17, 2026
+
+### New Feature: Managed Rule Group Generator Integration
+
+Integrated the standalone Managed Rule Group Generator into the Suricata Rule Generator as a built-in module. Cherry-pick rules from AWS-managed threat signature rule groups, deploy filtered rule groups to AWS Network Firewall, and maintain automatic synchronization via a Lambda function — all from within the main application.
+
+#### Key Capabilities
+- **Managed Rules Menu**: New top-level "Managed Rules" menu with New Configuration (Ctrl+M), Open Configuration, Browse Deployed Configs, and Full Teardown
+- **Source Rule Group Browser**: Browse and select from AWS-managed strict-order threat signature rule groups (ThreatSignatures*StrictOrder)
+- **Metadata-Based Filtering**: Filter rules by metadata fields using AND/OR logic with equals, not_equals, in, not_in, and contains operators
+- **Deduplication**: Automatic removal of duplicate SIDs, keeping the rule from the most recently updated source rule group
+- **Test Mode**: Convert all rule actions to `alert` with [TEST-<ORIGINAL_ACTION>] message prefix for safe traffic monitoring
+- **One-Click Deployment**: Deploy filtered rule groups, Lambda function, IAM role, and SNS subscriptions to AWS with a single click
+- **Automatic Synchronization**: Lambda function triggers automatically when AWS updates managed threat signatures, re-applying your filters
+- **Send to Editor**: Transfer filtered managed rules directly into the main editor for further editing and analysis
+- **Backup and Rollback**: Manage backup rule groups and rollback to previous versions
+- **Configuration Files**: Save and load `.mrg` configuration files preserving all settings and deployment metadata
+- **Export to .suricata**: Export filtered rules as a `.suricata` file for use with the main editor
+- **Session Logging**: View all AWS API calls and operations via Tools > Logs with level filtering
+- **Profile Isolation**: MRG windows maintain independent AWS profile selection without affecting the main application
+
+#### AWS Setup
+- IAM permissions: `network-firewall:*`, `lambda:*`, `iam:CreateRole/PutRolePolicy/DeleteRole`, `sns:*`, `sts:GetCallerIdentity`
+- Lambda function deployed per-region with automatic IAM role and SNS subscription management
+
+---
+
 ## Version 2.3.0 / Analyzer v2.0.0 - April 27, 2026
 
 ### New Feature: AI Rule Analysis

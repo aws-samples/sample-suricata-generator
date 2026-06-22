@@ -1,5 +1,20 @@
 # Release Notes
 
+## Version 2.4.1 / MRG v1.0.1 - June 22, 2026
+
+### Bug Fixes
+
+- **Fixed crash when MRG window closed during source rule group loading**: The source browser's background fetch callback now guards against destroyed widgets with `winfo_exists()`, preventing a `TclError` when the MRG window is closed before the AWS API response returns
+- **Fixed crash on startup with partial MRG installation**: The Managed Rules menu now verifies that the parent application has the required handler methods before enabling menu items, preventing an `AttributeError` when `src/mrg/` exists but `suricata_generator.py` is outdated
+- **Fixed Lambda deployment failure (`No module named 'core.mrg_file'`)**: The Lambda zip packaging now writes a minimal `core/__init__.py` that only imports the four bundled modules, instead of copying the full `__init__.py` which references `mrg_file.py` (not included in the Lambda package)
+- **Fixed deployment failure (`'AWSSessionManager' object has no attribute 'get_account_id'`)**: The IAM role creation now calls STS `GetCallerIdentity` directly to retrieve the account ID instead of relying on a non-existent method
+- **Fixed "Browse Deployed Configs" import error**: Corrected the import to use the actual class name `BrowseDeployedConfigsDialog` (via the `browse_deployed_configs()` convenience function)
+- **Fixed false "MRG windows still open" warning on close**: The close guard now filters out already-destroyed windows using `winfo_exists()` before prompting
+- **Fixed empty session logs after deployment**: Set the `src.mrg` logger level to `DEBUG` so log records propagate to the GUI log handler (previously blocked by the default `WARNING` level)
+- **Reduced noise from cross-account SNS authorization errors during teardown**: Expected `AuthorizationError` on the AWS-managed topic now logs at `DEBUG` level instead of `ERROR`, and shows a friendly info message in the teardown dialog
+
+---
+
 ## Version 2.4.0 / MRG v1.0.0 - June 17, 2026
 
 ### New Feature: Managed Rule Group Generator Integration

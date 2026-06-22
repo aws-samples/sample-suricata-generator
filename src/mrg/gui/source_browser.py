@@ -192,6 +192,10 @@ class SourceBrowser(ttk.LabelFrame):
             error: Error message string, or None on success.
             callback: Optional callback to invoke.
         """
+        # Guard against widget being destroyed while fetch was in progress
+        if not self.winfo_exists():
+            return
+
         self._loading = False
         self._rule_groups = rule_groups
 

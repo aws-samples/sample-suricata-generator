@@ -126,9 +126,11 @@ class UIManager:
         
         # Managed Rules menu - MRG integration (positioned after Tools, before Help)
         # Use try/except to detect MRG availability without circular imports
+        # Also verify that the parent has the required handler methods (guards against
+        # partial updates where src/mrg exists but suricata_generator.py is outdated)
         try:
             from src.mrg import MRG_VERSION
-            _has_mrg = True
+            _has_mrg = hasattr(self.parent, '_open_mrg_new')
         except ImportError:
             _has_mrg = False
         

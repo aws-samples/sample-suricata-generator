@@ -21,9 +21,16 @@ from src.managers.template_manager import TemplateManager
 from src.analysis.rule_usage_analyzer import RuleUsageAnalyzer, HAS_BOTO3
 from src.aws.aws_session_manager import AWSSessionManager
 from src.core.constants import SuricataConstants
-from src.core.version import get_main_version, get_analyzer_version, get_flow_tester_version, get_palo_alto_importer_version
+from src.core.version import get_main_version, get_analyzer_version, get_flow_tester_version, get_palo_alto_importer_version, get_mrg_version
 from src.core.security_validator import security_validator, validate_rule_input, validate_file_operation
 from src.gui.ai_assistant_panel import AIAssistantPanel, HAS_BOTO3 as HAS_BOTO3_AI
+
+# Managed Rule Group (MRG) module - conditional import
+try:
+    from src.mrg import MRG_VERSION
+    HAS_BOTO3_MRG = True
+except ImportError:
+    HAS_BOTO3_MRG = False
 
 class SuricataRuleGenerator:
     """Main application class for the Suricata Rule Generator GUI"""
@@ -86,6 +93,9 @@ class SuricataRuleGenerator:
         
         # AI Rule Assistant panel (optional - requires boto3)
         self.ai_panel = None
+        
+        # MRG (Managed Rule Group) window tracking set
+        self._mrg_windows = set()
         
         # Load user configuration
         self.load_config()
@@ -6433,6 +6443,7 @@ class SuricataRuleGenerator:
         text_widget.insert(tk.END, f"\n  Rule Analyzer v{get_analyzer_version()}")
         text_widget.insert(tk.END, f"\n  Flow Tester v{get_flow_tester_version()}")
         text_widget.insert(tk.END, f"\n  Palo Alto Importer v{get_palo_alto_importer_version()}")
+        text_widget.insert(tk.END, f"\n  Managed Rule Group Generator v{get_mrg_version()}")
 
         text_widget.insert(tk.END, "\n\n")
         
@@ -8558,6 +8569,27 @@ class SuricataRuleGenerator:
     
     def on_closing(self):
         """Handle application closing"""
+        # Close guard: check for open MRG windows (filter out already-destroyed ones)
+        if self._mrg_windows:
+            live_windows = set()
+            for win in self._mrg_windows:
+                try:
+                    if hasattr(win, '_window') and win._window.winfo_exists():
+                        live_windows.add(win)
+                except Exception:
+                    pass
+            self._mrg_windows = live_windows
+            
+            if self._mrg_windows:
+                result = messagebox.askyesno(
+                    "MRG Windows Open",
+                    "MRG windows are still open. Close all windows?")
+                if not result:
+                    return
+                for win in list(self._mrg_windows):
+                    win.force_close()
+                self._mrg_windows.clear()
+        
         if self.modified and not self.ask_save_changes():
             return
         
@@ -8588,6 +8620,125 @@ class SuricataRuleGenerator:
         if self.ai_panel is None:
             self.ai_panel = AIAssistantPanel(self)
         self.ai_panel.show()
+    
+    # ─── Managed Rule Group (MRG) Integration ─────────────────────────────
+
+    def _receive_mrg_rules(self, parsed_rules):
+        """Callback that receives rules from MRG window and injects into main editor.
+        
+        Converts ParsedRule objects to SuricataRule objects via SuricataRule.from_string(),
+        replaces the main rule table, auto-detects variables, and sets untitled/modified state.
+        """
+        if self.modified and not self.ask_save_changes():
+            return
+        
+        from src.core.suricata_rule import SuricataRule
+        suricata_rules = []
+        for pr in parsed_rules:
+            sr = SuricataRule.from_string(pr.raw)
+            if sr:
+                suricata_rules.append(sr)
+        
+        self.rules = suricata_rules
+        self.current_file = None
+        self.modified = True
+        self.refresh_table()
+        self.auto_detect_variables()
+        self.root.title("Suricata Rule Generator for AWS Network Firewall")
+    
+    def _open_mrg_new(self):
+        """Open a new MRG configuration window (lazy import for startup performance)."""
+        from src.mrg.mrg_window import MRGWindow
+        window = MRGWindow(
+            parent=self.root,
+            session_manager=self.aws_session,
+            send_to_editor_callback=self._receive_mrg_rules,
+        )
+        self._mrg_windows.add(window)
+    
+    def _open_mrg_file(self):
+        """Open a file dialog for .mrg files and load the selected configuration."""
+        filepath = filedialog.askopenfilename(
+            title="Open MRG Configuration",
+            filetypes=[("MRG Configuration", "*.mrg"), ("All Files", "*.*")],
+        )
+        if not filepath:
+            return
+        
+        from src.mrg.mrg_window import MRGWindow
+        window = MRGWindow(
+            parent=self.root,
+            session_manager=self.aws_session,
+            send_to_editor_callback=self._receive_mrg_rules,
+            mrg_filepath=filepath,
+        )
+        self._mrg_windows.add(window)
+    
+    def _browse_mrg_configs(self):
+        """Open the browse deployed configurations dialog."""
+        from src.mrg.gui.browse_configs_dialog import browse_deployed_configs
+        browse_deployed_configs(
+            parent=self.root,
+            session_manager=self.aws_session,
+        )
+    
+    def _full_mrg_teardown(self):
+        """Remove ALL MRG infrastructure in a selected region."""
+        from tkinter import simpledialog
+        
+        # Valid AWS regions that support Network Firewall
+        valid_regions = [
+            'us-east-1', 'us-east-2', 'us-west-1', 'us-west-2',
+            'ca-central-1',
+            'eu-central-1', 'eu-west-1', 'eu-west-2', 'eu-west-3', 'eu-north-1',
+            'ap-northeast-1', 'ap-northeast-2', 'ap-northeast-3',
+            'ap-southeast-1', 'ap-southeast-2', 'ap-south-1',
+            'sa-east-1',
+        ]
+        
+        region = simpledialog.askstring(
+            "Full Teardown - Select Region",
+            "Enter AWS region for teardown:\n\n"
+            "Common regions: us-east-1, us-west-2, eu-west-1",
+            initialvalue='us-east-1',
+            parent=self.root)
+        if not region or not region.strip():
+            return
+        region = region.strip()
+        
+        if region not in valid_regions:
+            messagebox.showerror(
+                "Invalid Region",
+                "'{}' is not a valid AWS region.\n\n"
+                "Valid regions:\n{}".format(region, ', '.join(valid_regions)),
+                parent=self.root)
+            return
+        
+        profile = self.aws_session.display_name
+        msg = (
+            "FULL TEARDOWN - Remove ALL Managed Rule Generator infrastructure?\n\n"
+            "This will delete in region '{}':\n"
+            "- Lambda function\n"
+            "- IAM role and policy\n"
+            "- All SNS subscriptions\n"
+            "- Notification topic\n\n"
+            "Profile: {}\n\n"
+            "This action cannot be undone!".format(region, profile))
+        
+        if not messagebox.askyesno("Confirm Full Teardown", msg, icon='warning',
+                                   parent=self.root):
+            return
+        
+        delete_rgs = messagebox.askyesno(
+            "Delete Rule Groups?",
+            "Also delete all MRG-managed rule groups and backups?",
+            parent=self.root)
+        
+        from src.mrg.gui.deploy_dialog import full_teardown
+        full_teardown(
+            self.root, self.aws_session, region,
+            delete_rule_groups=delete_rgs, delete_backups=delete_rgs,
+        )
     
     def show_pcap_tester(self):
         """Open a file dialog to select rules and a PCAP file, then test."""

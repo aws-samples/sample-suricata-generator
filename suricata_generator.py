@@ -61,6 +61,7 @@ class SuricataRuleGenerator:
         self.placeholder_item = None  # Placeholder row for new rule insertion
         self.variables = {}  # Dictionary to store network variables
         self.tags = {}  # Dictionary to store AWS tags
+        self._external_net_mismatch_warning = False  # Warning flag for $EXTERNAL_NET mismatch
         self.clipboard = []  # Clipboard for copy/paste functionality
         self.has_header = False  # Whether file has our header
         self.created_timestamp = None  # Original creation timestamp
@@ -254,12 +255,40 @@ class SuricataRuleGenerator:
                 home_net_def = home_net_data
             
             if home_net_def.strip():
-                # Generate $EXTERNAL_NET as negation of $HOME_NET using helper method
-                external_net_def = self._negate_cidr_list(home_net_def)
-                self.variables['$EXTERNAL_NET'] = {
-                    "definition": external_net_def,
-                    "description": "Auto-defined as negation of $HOME_NET"
-                }
+                # Generate the expected $EXTERNAL_NET as negation of $HOME_NET
+                expected_external_net_def = self._negate_cidr_list(home_net_def)
+
+                # Check if $EXTERNAL_NET already exists with a non-empty definition
+                existing_ext_data = self.variables.get('$EXTERNAL_NET')
+                existing_ext_def = ''
+                if existing_ext_data:
+                    if isinstance(existing_ext_data, dict):
+                        existing_ext_def = existing_ext_data.get("definition", "")
+                    else:
+                        existing_ext_def = existing_ext_data
+
+                if not existing_ext_def.strip():
+                    # No existing definition — auto-set as negation
+                    self.variables['$EXTERNAL_NET'] = {
+                        "definition": expected_external_net_def,
+                        "description": "Auto-defined as negation of $HOME_NET"
+                    }
+                    self._external_net_mismatch_warning = False
+                else:
+                    # Existing definition — check if it matches expected negation
+                    if existing_ext_def.strip() == expected_external_net_def.strip():
+                        self._external_net_mismatch_warning = False
+                    else:
+                        # Mismatch: user set a custom $EXTERNAL_NET that differs from negation
+                        self._external_net_mismatch_warning = True
+                        # Clear the auto-defined description since it's no longer accurate
+                        if isinstance(self.variables.get('$EXTERNAL_NET'), dict):
+                            if self.variables['$EXTERNAL_NET'].get('description') == 'Auto-defined as negation of $HOME_NET':
+                                self.variables['$EXTERNAL_NET']['description'] = ''
+            else:
+                self._external_net_mismatch_warning = False
+        else:
+            self._external_net_mismatch_warning = False
         
         # Refresh variables table display
         self.refresh_variables_table()
@@ -301,6 +330,33 @@ class SuricataRuleGenerator:
             else:
                 return cidr_list
     
+    def _on_home_net_changed(self):
+        """Auto-update $EXTERNAL_NET when $HOME_NET is modified.
+        
+        Only updates $EXTERNAL_NET if it's currently tracking $HOME_NET
+        (i.e., the mismatch warning is not active). If the user has
+        customized $EXTERNAL_NET, it's left unchanged.
+        """
+        if self._external_net_mismatch_warning:
+            # User has a custom $EXTERNAL_NET — don't overwrite it
+            return
+        
+        home_net_data = self.variables.get('$HOME_NET')
+        if not home_net_data:
+            return
+        
+        if isinstance(home_net_data, dict):
+            home_net_def = home_net_data.get('definition', '')
+        else:
+            home_net_def = home_net_data
+        
+        if home_net_def.strip():
+            negated = self._negate_cidr_list(home_net_def)
+            self.variables['$EXTERNAL_NET'] = {
+                'definition': negated,
+                'description': 'Auto-defined as negation of $HOME_NET'
+            }
+    
     def refresh_variables_table(self):
         """Refresh the variables table display"""
         # Clear existing items
@@ -309,6 +365,8 @@ class SuricataRuleGenerator:
         
         # Configure grey tag for $EXTERNAL_NET
         self.variables_tree.tag_configure("external_net", foreground="#808080")
+        # Configure yellow warning tag for $EXTERNAL_NET mismatch
+        self.variables_tree.tag_configure("ext_net_warning", background="#FFFACD")
         
         # Analyze variable usage to determine correct types
         variable_usage = self.file_manager.analyze_variable_usage(self.rules)
@@ -333,15 +391,18 @@ class SuricataRuleGenerator:
                     var_type = "Port Set"
             
             if var == '$EXTERNAL_NET':
-                # Show actual definition if auto-generated, otherwise show as managed by AWS
-                if definition.strip():
-                    # We have an auto-generated definition - show it with grey formatting
-                    item = self.variables_tree.insert("", tk.END, values=(var, var_type, definition, description), tags=("external_net",))
+                # Determine tags based on warning state
+                if self._external_net_mismatch_warning:
+                    row_tags = ("ext_net_warning",)
                 else:
-                    # No definition - show as managed by AWS
+                    row_tags = ("external_net",)
+
+                if definition.strip():
+                    item = self.variables_tree.insert("", tk.END, values=(var, var_type, definition, description), tags=row_tags)
+                else:
                     display_definition = "(auto-defined by AWS Network Firewall)"
                     auto_description = "Automatically managed by AWS"
-                    item = self.variables_tree.insert("", tk.END, values=(var, var_type, display_definition, auto_description), tags=("external_net",))
+                    item = self.variables_tree.insert("", tk.END, values=(var, var_type, display_definition, auto_description), tags=row_tags)
             else:
                 item = self.variables_tree.insert("", tk.END, values=(var, var_type, definition, description))
     
@@ -8623,11 +8684,16 @@ class SuricataRuleGenerator:
     
     # ─── Managed Rule Group (MRG) Integration ─────────────────────────────
 
-    def _receive_mrg_rules(self, parsed_rules):
+    def _receive_mrg_rules(self, parsed_rules, home_net=None, external_net=None):
         """Callback that receives rules from MRG window and injects into main editor.
         
         Converts ParsedRule objects to SuricataRule objects via SuricataRule.from_string(),
         replaces the main rule table, auto-detects variables, and sets untitled/modified state.
+        
+        Args:
+            parsed_rules: List of ParsedRule objects from the MRG build.
+            home_net: Optional $HOME_NET value (comma-separated CIDRs) from MRG config.
+            external_net: Optional $EXTERNAL_NET value (comma-separated CIDRs) from MRG config.
         """
         if self.modified and not self.ask_save_changes():
             return
@@ -8644,6 +8710,31 @@ class SuricataRuleGenerator:
         self.modified = True
         self.refresh_table()
         self.auto_detect_variables()
+
+        # Overwrite $HOME_NET if provided by MRG
+        if home_net:
+            self.variables['$HOME_NET'] = {
+                'definition': home_net,
+                'description': 'Set by Managed Rule Group Generator'
+            }
+            # If $EXTERNAL_NET was not explicitly provided, auto-calculate as negation
+            if not external_net:
+                negated = self._negate_cidr_list(home_net)
+                self.variables['$EXTERNAL_NET'] = {
+                    'definition': negated,
+                    'description': 'Auto-defined as negation of $HOME_NET'
+                }
+
+        # Overwrite $EXTERNAL_NET if explicitly provided by MRG
+        if external_net:
+            self.variables['$EXTERNAL_NET'] = {
+                'definition': external_net,
+                'description': 'Set by Managed Rule Group Generator'
+            }
+
+        # Refresh the variables tab
+        self.refresh_variables_table()
+
         self.root.title("Suricata Rule Generator for AWS Network Firewall")
     
     def _open_mrg_new(self):

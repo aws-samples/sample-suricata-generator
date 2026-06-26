@@ -99,6 +99,8 @@ class MRGConfig:
         self.notification_topic_arn: Optional[str] = None
         self.lambda_function_arn: Optional[str] = None
         self.last_deployment_stats: Optional[Dict] = None
+        self.home_net: Optional[str] = None
+        self.external_net: Optional[str] = None
 
     def get_filter_config(self) -> FilterConfig:
         """Convert the filters dict to a FilterConfig object.
@@ -176,6 +178,8 @@ class MRGConfig:
             'notification_topic_arn': self.notification_topic_arn,
             'lambda_function_arn': self.lambda_function_arn,
             'last_deployment_stats': self.last_deployment_stats,
+            'home_net': self.home_net,
+            'external_net': self.external_net,
         }
 
     @classmethod
@@ -214,6 +218,8 @@ class MRGConfig:
         config.notification_topic_arn = data.get('notification_topic_arn')
         config.lambda_function_arn = data.get('lambda_function_arn')
         config.last_deployment_stats = data.get('last_deployment_stats')
+        config.home_net = data.get('home_net')
+        config.external_net = data.get('external_net')
 
         # Validate critical fields
         if config.missing_metadata_behavior not in ('exclude', 'include'):
@@ -389,6 +395,12 @@ def build_lambda_config(mrg_config: MRGConfig) -> Dict:
 
     if mrg_config.notification_topic_arn:
         config['notification_topic_arn'] = mrg_config.notification_topic_arn
+
+    if mrg_config.home_net:
+        config['home_net'] = mrg_config.home_net
+
+    if mrg_config.external_net:
+        config['external_net'] = mrg_config.external_net
 
     return config
 

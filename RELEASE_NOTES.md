@@ -1,5 +1,23 @@
 # Release Notes
 
+## Version 2.4.2 / MRG v1.0.2 - June 26, 2026
+
+### New Features
+
+- **$HOME_NET and $EXTERNAL_NET support in MRG deployments**: The MRG configuration panel now includes optional fields for defining `$HOME_NET` and `$EXTERNAL_NET` variables. When set, these are included as `RuleVariables.IPSets` in the deployed Network Firewall rule group, and transferred to the main editor when using "Send to Editor"
+- **$EXTERNAL_NET is now editable in the Variables tab**: Previously greyed out, users can now set custom values for `$EXTERNAL_NET` independent of `$HOME_NET`
+- **Auto-update $EXTERNAL_NET on $HOME_NET change**: When `$HOME_NET` is modified in the Variables tab, `$EXTERNAL_NET` automatically updates to its negation — unless the user has set a custom `$EXTERNAL_NET` value
+- **Yellow warning highlight for $EXTERNAL_NET mismatch**: When `$EXTERNAL_NET` doesn't match the negation of `$HOME_NET`, the row is highlighted yellow with a hover tooltip suggesting the user update it
+- **MRG "Send to Editor" auto-calculates $EXTERNAL_NET**: If `$HOME_NET` is defined in MRG but `$EXTERNAL_NET` is left empty, the main editor automatically sets `$EXTERNAL_NET` to the negation of the provided `$HOME_NET`
+
+### UI Improvements
+
+- **MRG config panel layout**: `$HOME_NET` and `$EXTERNAL_NET` moved to their own row with descriptive label ("Optionally define in generated rule group") and hover tooltips showing format hints
+- **Notification email "(optional)" label** added for clarity
+- **"Managed Rules" menu: Ctrl+M shortcut** added to Help > Keyboard Shortcuts dialog
+
+---
+
 ## Version 2.4.1 / MRG v1.0.1 - June 22, 2026
 
 ### Bug Fixes

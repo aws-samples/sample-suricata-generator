@@ -132,6 +132,7 @@ class ConfigPanel(ttk.Frame):
         self._setup_source_browser()
         self._setup_filter_section()
         self._setup_bottom_row()
+        self._setup_variables_row()
         self._setup_build_button()
 
     def _setup_top_row(self):
@@ -238,7 +239,7 @@ class ConfigPanel(ttk.Frame):
         ).pack(anchor=tk.W, padx=4, pady=2)
 
     def _setup_bottom_row(self):
-        """Create bottom row: Deployment mode and Notification email."""
+        """Create bottom row: Deployment mode, Notification email."""
         bottom_frame = ttk.Frame(self._content_frame)
         bottom_frame.pack(fill=tk.X, pady=(0, 4))
 
@@ -268,7 +269,69 @@ class ConfigPanel(ttk.Frame):
             textvariable=self._email_var,
             width=30,
         )
-        self._email_entry.pack(side=tk.LEFT)
+        self._email_entry.pack(side=tk.LEFT, padx=(0, 4))
+        ttk.Label(bottom_frame, text="(optional)", font=('TkDefaultFont', 8),
+                  foreground='#888888').pack(side=tk.LEFT, padx=(0, 12))
+
+    def _setup_variables_row(self):
+        """Create variables row: $HOME_NET and $EXTERNAL_NET with hover tooltips."""
+        vars_frame = ttk.Frame(self._content_frame)
+        vars_frame.pack(fill=tk.X, pady=(0, 4))
+
+        # Description label
+        ttk.Label(vars_frame, text="Optionally define in generated rule group",
+                  font=('TkDefaultFont', 9), foreground='#555555').pack(side=tk.LEFT, padx=(0, 12))
+
+        # $HOME_NET
+        ttk.Label(vars_frame, text="$HOME_NET:").pack(side=tk.LEFT, padx=(0, 4))
+        self._home_net_var = tk.StringVar(value='')
+        self._home_net_entry = ttk.Entry(
+            vars_frame,
+            textvariable=self._home_net_var,
+            width=30,
+        )
+        self._home_net_entry.pack(side=tk.LEFT, padx=(0, 12))
+        self._home_net_entry.bind('<Enter>', lambda e: self._show_tooltip(
+            self._home_net_entry,
+            "Comma-separated CIDRs, e.g. 10.0.0.0/8,172.16.0.0/12,192.168.0.0/16"))
+        self._home_net_entry.bind('<Leave>', self._hide_tooltip)
+
+        # $EXTERNAL_NET
+        ttk.Label(vars_frame, text="$EXTERNAL_NET:").pack(side=tk.LEFT, padx=(0, 4))
+        self._external_net_var = tk.StringVar(value='')
+        self._external_net_entry = ttk.Entry(
+            vars_frame,
+            textvariable=self._external_net_var,
+            width=30,
+        )
+        self._external_net_entry.pack(side=tk.LEFT)
+        self._external_net_entry.bind('<Enter>', lambda e: self._show_tooltip(
+            self._external_net_entry,
+            "Comma-separated CIDRs, e.g. !10.0.0.0/8,!172.16.0.0/12,!192.168.0.0/16"))
+        self._external_net_entry.bind('<Leave>', self._hide_tooltip)
+
+        # Initialize tooltip reference
+        self._tooltip = None
+
+    def _show_tooltip(self, widget, text):
+        """Show a tooltip near the widget."""
+        if not widget.winfo_exists():
+            return
+        x = widget.winfo_rootx() + 20
+        y = widget.winfo_rooty() + widget.winfo_height() + 5
+        self._tooltip = tk.Toplevel(widget)
+        self._tooltip.wm_overrideredirect(True)
+        self._tooltip.wm_geometry("+{}+{}".format(x, y))
+        label = ttk.Label(self._tooltip, text=text, background="#FFFFDD",
+                          relief=tk.SOLID, borderwidth=1, font=('TkDefaultFont', 9))
+        label.pack()
+
+    def _hide_tooltip(self, event=None):
+        """Hide the tooltip."""
+        if hasattr(self, '_tooltip') and self._tooltip:
+            if self._tooltip.winfo_exists():
+                self._tooltip.destroy()
+            self._tooltip = None
 
     def _setup_build_button(self):
         """Create the Build Rule Group button."""
@@ -530,6 +593,24 @@ class ConfigPanel(ttk.Frame):
         """Get the filter builder widget."""
         return self._filter_builder
 
+    def get_home_net(self) -> Optional[str]:
+        """Get the $HOME_NET value, or None if empty."""
+        val = self._home_net_var.get().strip()
+        return val if val else None
+
+    def set_home_net(self, value: Optional[str]):
+        """Set the $HOME_NET value."""
+        self._home_net_var.set(value or '')
+
+    def get_external_net(self) -> Optional[str]:
+        """Get the $EXTERNAL_NET value, or None if empty."""
+        val = self._external_net_var.get().strip()
+        return val if val else None
+
+    def set_external_net(self, value: Optional[str]):
+        """Set the $EXTERNAL_NET value."""
+        self._external_net_var.set(value or '')
+
     # ─── MRG Config Integration ───────────────────────────────────
 
     def load_from_mrg_config(self, config):
@@ -580,6 +661,12 @@ class ConfigPanel(ttk.Frame):
         # Store them for deferred application
         self._pending_source_arns = list(config.source_rule_groups)
 
+        # Set home_net
+        self.set_home_net(config.home_net if hasattr(config, 'home_net') else None)
+
+        # Set external_net
+        self.set_external_net(config.external_net if hasattr(config, 'external_net') else None)
+
         return warnings
 
     def save_to_mrg_config(self, config):
@@ -597,6 +684,12 @@ class ConfigPanel(ttk.Frame):
         config.deployment_mode = self.get_deployment_mode()
         config.notification_email = self.get_notification_email()
         config.source_rule_groups = self.get_selected_source_arns()
+
+        # Save home_net
+        config.home_net = self.get_home_net()
+
+        # Save external_net
+        config.external_net = self.get_external_net()
 
         # Save filter config
         filter_config = self.get_filter_config()
@@ -623,6 +716,8 @@ class ConfigPanel(ttk.Frame):
         self._missing_meta_var.set('exclude')
         self._mode_var.set('as_is')
         self._email_var.set('')
+        self._home_net_var.set('')
+        self._external_net_var.set('')
         self._filter_builder.clear()
         self._source_browser.deselect_all()
         self._has_built = False

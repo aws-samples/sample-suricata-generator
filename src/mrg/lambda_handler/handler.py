@@ -336,6 +336,25 @@ def _process_config(config: Dict, region: str, trigger_arns: Set[str]) -> Dict:
     # Build the new rules string
     new_rules_string = _build_rules_string(deduped_rules)
 
+    # Build rule_variables if home_net or external_net is defined
+    rule_variables = None
+    home_net = config.get('home_net')
+    external_net = config.get('external_net')
+    if home_net:
+        rule_variables = {
+            'IPSets': {
+                'HOME_NET': {
+                    'Definition': [cidr.strip() for cidr in home_net.split(',')]
+                }
+            }
+        }
+    if external_net:
+        if rule_variables is None:
+            rule_variables = {'IPSets': {}}
+        rule_variables['IPSets']['EXTERNAL_NET'] = {
+            'Definition': [cidr.strip() for cidr in external_net.split(',')]
+        }
+
     # Step 6: Fetch current rule group and compare
     current_details = _describe_rule_group(nfw_client, output_arn)
     current_rules_string = current_details.get('RulesString', '')
@@ -366,7 +385,8 @@ def _process_config(config: Dict, region: str, trigger_arns: Set[str]) -> Dict:
         # Continue with update even if backup fails - but log the warning
 
     # Step 8: Update rule group with retry for stale UpdateToken
-    _update_rule_group_with_retry(nfw_client, output_arn, new_rules_string, update_token)
+    _update_rule_group_with_retry(nfw_client, output_arn, new_rules_string, update_token,
+                                  rule_variables=rule_variables)
     logger.info("Updated rule group '%s' with %d rules", config_name, len(deduped_rules))
 
     # Step 8b: Update tags on the rule group
@@ -551,7 +571,8 @@ def _create_backup(nfw_client: Any, source_name: str, source_arn: str,
 
 
 def _update_rule_group_with_retry(nfw_client: Any, rule_group_arn: str,
-                                  rules_string: str, update_token: str) -> None:
+                                  rules_string: str, update_token: str,
+                                  rule_variables: Optional[Dict] = None) -> None:
     """Update a rule group with retry logic for stale UpdateToken.
 
     If the UpdateToken is stale (another process updated the rule group
@@ -562,6 +583,7 @@ def _update_rule_group_with_retry(nfw_client: Any, rule_group_arn: str,
         rule_group_arn: ARN of the rule group to update.
         rules_string: New rules string content.
         update_token: Current update token.
+        rule_variables: Optional RuleVariables dict (e.g. IPSets for $HOME_NET).
 
     Raises:
         RuntimeError: If all retries fail.
@@ -570,11 +592,11 @@ def _update_rule_group_with_retry(nfw_client: Any, rule_group_arn: str,
 
     for attempt in range(MAX_UPDATE_RETRIES):
         try:
-            nfw_client.update_rule_group(
-                UpdateToken=current_token,
-                RuleGroupArn=rule_group_arn,
-                Type='STATEFUL',
-                RuleGroup={
+            kwargs = {
+                'UpdateToken': current_token,
+                'RuleGroupArn': rule_group_arn,
+                'Type': 'STATEFUL',
+                'RuleGroup': {
                     'RulesSource': {
                         'RulesString': rules_string,
                     },
@@ -582,7 +604,12 @@ def _update_rule_group_with_retry(nfw_client: Any, rule_group_arn: str,
                         'RuleOrder': 'STRICT_ORDER',
                     },
                 },
-            )
+            }
+
+            if rule_variables:
+                kwargs['RuleGroup']['RuleVariables'] = rule_variables
+
+            nfw_client.update_rule_group(**kwargs)
             return  # Success
 
         except ClientError as e:

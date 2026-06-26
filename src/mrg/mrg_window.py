@@ -805,7 +805,9 @@ class MRGWindow:
             return
 
         logger.info("Sending %d rules to main editor.", count)
-        self._send_to_editor_callback(final_rules)
+        home_net = self._config_panel.get_home_net()
+        external_net = self._config_panel.get_external_net()
+        self._send_to_editor_callback(final_rules, home_net, external_net)
 
         # Close the MRG window after sending (same behavior as clicking close)
         self._on_close()

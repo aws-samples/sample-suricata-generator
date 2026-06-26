@@ -100,6 +100,7 @@ class RuleTable(ttk.Frame):
             columns=self.COLUMNS,
             show='headings',
             selectmode='extended',
+            height=3,
         )
 
         # Configure headings

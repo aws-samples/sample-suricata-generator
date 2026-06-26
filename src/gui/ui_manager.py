@@ -6713,6 +6713,11 @@ Would you like to run a complete analysis?"""
         # Bind double-click event to edit variable
         self.variables_tree.bind("<Double-1>", self.on_variable_double_click)
         
+        # Bind Motion event for $EXTERNAL_NET warning tooltip
+        self.variables_tree.bind("<Motion>", self._on_variables_tree_motion)
+        self.variables_tree.bind("<Leave>", self._hide_variables_tooltip)
+        self._variables_tooltip = None
+        
         # Variables buttons
         var_buttons_frame = ttk.Frame(variables_tab)
         var_buttons_frame.pack(fill=tk.X, padx=5, pady=(0, 5))
@@ -7593,11 +7598,6 @@ Would you like to run a complete analysis?"""
         values = self.parent.variables_tree.item(item, "values")
         var_name = values[0]
         
-        # Prevent editing $EXTERNAL_NET
-        if var_name == '$EXTERNAL_NET':
-            messagebox.showinfo("Information", "$EXTERNAL_NET is automatically defined by AWS Network Firewall as the inverse of $HOME_NET and cannot be edited.")
-            return
-        
         # Get var_type from table, but infer actual type from definition if it hasn't been used yet
         var_type = values[1].lower().replace(' ', '_')
         definition = self.parent.variables.get(var_name, "")
@@ -7632,6 +7632,46 @@ Would you like to run a complete analysis?"""
             self.parent.update_status_bar()  # Update status bar to reflect undefined variable count
             self.parent._invalidate_ai_cache()
     
+    def _on_variables_tree_motion(self, event):
+        """Handle mouse motion over variables tree for $EXTERNAL_NET warning tooltip."""
+        item = self.variables_tree.identify_row(event.y)
+        if not item:
+            self._hide_variables_tooltip()
+            return
+
+        values = self.variables_tree.item(item, "values")
+        if not values:
+            self._hide_variables_tooltip()
+            return
+
+        var_name = values[0]
+        # Show tooltip only for $EXTERNAL_NET when warning flag is set
+        if var_name == '$EXTERNAL_NET' and hasattr(self.parent, '_external_net_mismatch_warning') and self.parent._external_net_mismatch_warning:
+            if self._variables_tooltip is None:
+                x = event.x_root + 15
+                y = event.y_root + 10
+                self._variables_tooltip = tk.Toplevel(self.variables_tree)
+                self._variables_tooltip.wm_overrideredirect(True)
+                self._variables_tooltip.wm_geometry("+{}+{}".format(x, y))
+                label = ttk.Label(
+                    self._variables_tooltip,
+                    text="$EXTERNAL_NET is not set to the negation of $HOME_NET.\nConsider updating to avoid policy conflicts.",
+                    background="#FFFACD",
+                    relief=tk.SOLID,
+                    borderwidth=1,
+                    font=('TkDefaultFont', 9),
+                )
+                label.pack()
+        else:
+            self._hide_variables_tooltip()
+
+    def _hide_variables_tooltip(self, event=None):
+        """Hide the variables tree tooltip."""
+        if hasattr(self, '_variables_tooltip') and self._variables_tooltip:
+            if self._variables_tooltip.winfo_exists():
+                self._variables_tooltip.destroy()
+            self._variables_tooltip = None
+
     def on_variable_double_click(self, event):
         """Handle double-click events on variables tree items"""
         item = self.variables_tree.identify_row(event.y)
@@ -7644,11 +7684,6 @@ Would you like to run a complete analysis?"""
             return
         
         var_name = values[0]
-        
-        # Prevent editing $EXTERNAL_NET
-        if var_name == '$EXTERNAL_NET':
-            messagebox.showinfo("Information", "$EXTERNAL_NET is automatically defined by AWS Network Firewall as the inverse of $HOME_NET and cannot be edited.")
-            return
         
         # Get var_type from table, but infer actual type from definition if it hasn't been used yet
         var_type = values[1].lower().replace(' ', '_')
@@ -7849,6 +7884,10 @@ Would you like to run a complete analysis?"""
             self.parent.refresh_variables_table()
             self.parent.update_status_bar()  # Update status bar to reflect variable definition changes
             self.parent._invalidate_ai_cache()
+            # Auto-update $EXTERNAL_NET if $HOME_NET was modified
+            if name == '$HOME_NET':
+                self.parent._on_home_net_changed()
+                self.parent.refresh_variables_table()
             dialog.destroy()
         
         ttk.Button(button_frame, text="Save", command=save_variable).pack(side=tk.LEFT, padx=5)
@@ -8014,6 +8053,10 @@ Would you like to run a complete analysis?"""
             self.parent.refresh_variables_table()
             self.parent.update_status_bar()  # Update status bar to reflect variable definition changes
             self.parent._invalidate_ai_cache()
+            # Auto-update $EXTERNAL_NET if $HOME_NET was modified
+            if name == '$HOME_NET':
+                self.parent._on_home_net_changed()
+                self.parent.refresh_variables_table()
             dialog.destroy()
         
         ttk.Button(button_frame, text="Save", command=save_variable).pack(side=tk.LEFT, padx=5)

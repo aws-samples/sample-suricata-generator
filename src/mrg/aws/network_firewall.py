@@ -262,7 +262,8 @@ def create_rule_group(session_manager: AWSSessionManager,
                       rules_string: str,
                       capacity: int = DEFAULT_RULE_GROUP_CAPACITY,
                       description: str = '',
-                      tags: Optional[List[Dict]] = None) -> Dict:
+                      tags: Optional[List[Dict]] = None,
+                      rule_variables: Optional[Dict] = None) -> Dict:
     """Create a new stateful rule group with STRICT_ORDER.
 
     Args:
@@ -273,6 +274,7 @@ def create_rule_group(session_manager: AWSSessionManager,
         capacity: Rule group capacity (fixed at creation, cannot be changed).
         description: Optional description.
         tags: Optional list of tag dicts [{'Key': 'k', 'Value': 'v'}, ...].
+        rule_variables: Optional RuleVariables dict (e.g. IPSets for $HOME_NET).
 
     Returns:
         Dict with keys:
@@ -299,6 +301,9 @@ def create_rule_group(session_manager: AWSSessionManager,
                 },
             },
         }
+
+        if rule_variables:
+            kwargs['RuleGroup']['RuleVariables'] = rule_variables
 
         if description:
             kwargs['Description'] = description
@@ -330,7 +335,8 @@ def update_rule_group(session_manager: AWSSessionManager,
                       update_token: str,
                       rule_group_arn: Optional[str] = None,
                       rule_group_name: Optional[str] = None,
-                      description: Optional[str] = None) -> Dict:
+                      description: Optional[str] = None,
+                      rule_variables: Optional[Dict] = None) -> Dict:
     """Update an existing stateful rule group with new rules.
 
     Must provide either rule_group_arn or rule_group_name.
@@ -344,6 +350,7 @@ def update_rule_group(session_manager: AWSSessionManager,
         rule_group_arn: ARN of the rule group (preferred).
         rule_group_name: Name of the rule group (alternative).
         description: Optional updated description.
+        rule_variables: Optional RuleVariables dict (e.g. IPSets for $HOME_NET).
 
     Returns:
         Dict with keys:
@@ -371,6 +378,9 @@ def update_rule_group(session_manager: AWSSessionManager,
                 },
             },
         }
+
+        if rule_variables:
+            kwargs['RuleGroup']['RuleVariables'] = rule_variables
 
         if rule_group_arn:
             kwargs['RuleGroupArn'] = rule_group_arn

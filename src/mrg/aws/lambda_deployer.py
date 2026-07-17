@@ -671,6 +671,32 @@ def invoke_lambda_function(session_manager: AWSSessionManager,
         raise LambdaDeployerError(error_msg) from e
 
 
+def invoke_force_sync(session_manager: AWSSessionManager,
+                      region: str) -> Dict:
+    """Invoke the Lambda function with a force-sync event.
+
+    Triggers the Lambda to re-evaluate all configurations and process
+    updates immediately, rather than waiting for an SNS notification.
+
+    Args:
+        session_manager: AWSSessionManager instance for client creation.
+        region: AWS region.
+
+    Returns:
+        Dict with 'StatusCode' and 'Response' from the Lambda invocation.
+
+    Raises:
+        LambdaNotFoundError: If the function doesn't exist.
+        LambdaDeployerError: If invocation fails.
+    """
+    force_sync_event = {
+        "source": "managed-rule-generator",
+        "action": "force-sync",
+        "detail-type": "Force Sync from Deploy",
+    }
+    return invoke_lambda_function(session_manager, region, payload=force_sync_event)
+
+
 def _build_environment_variables(configs: List[Dict]) -> Dict[str, str]:
     """Build the environment variables dict for the Lambda function.
 

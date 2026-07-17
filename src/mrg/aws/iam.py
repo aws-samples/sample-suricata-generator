@@ -95,7 +95,7 @@ def _build_lambda_policy(region: str, account_id: str) -> Dict:
                 "Action": [
                     "sns:Publish"
                 ],
-                "Resource": "arn:aws:sns:{}:{}:ManagedRuleGenerator-Notifications".format(
+                "Resource": "arn:aws:sns:{}:{}:ManagedRuleGenerator-Notifications*".format(
                     region, account_id
                 )
             },

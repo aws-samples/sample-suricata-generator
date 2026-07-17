@@ -7,7 +7,7 @@ import platform
 import threading
 import tkinter as tk
 from tkinter import ttk
-from typing import Callable, Dict, Optional
+from typing import Callable, Dict, List, Optional
 from src.aws.aws_session_manager import AWSSessionManager
 
 logger = logging.getLogger(__name__)
@@ -136,6 +136,309 @@ class DeployProgressDialog:
         return self._is_complete
 
 
+def _get_dashboard_config_names(
+    session_manager: AWSSessionManager,
+    region: str,
+    current_config_name: str,
+    all_configs_with_dashboard: List[str],
+) -> List[str]:
+    """Gather config names that should appear in the shared dashboard.
+
+    Combines the known configs that have create_dashboard=True with any
+    additional configs that are deployed in the region (from Lambda env)
+    that already reference a dashboard. The current config name is always
+    included in the returned list if it has create_dashboard=True.
+
+    Args:
+        session_manager: AWS session manager.
+        region: AWS region.
+        current_config_name: Name of the config being deployed/modified.
+        all_configs_with_dashboard: List of config names known to have
+            create_dashboard=True (typically just the current one unless
+            we can discover others from .mrg files on disk).
+
+    Returns:
+        Deduplicated list of config names for dashboard filter clauses.
+    """
+    config_names = list(all_configs_with_dashboard)
+    if current_config_name and current_config_name not in config_names:
+        config_names.append(current_config_name)
+    # Deduplicate while preserving order
+    seen = set()
+    unique = []
+    for name in config_names:
+        if name not in seen:
+            seen.add(name)
+            unique.append(name)
+    return unique
+
+
+def _get_existing_dashboard_creation_date(
+    session_manager: AWSSessionManager,
+    region: str,
+    dashboard_name: str,
+) -> Optional[str]:
+    """Read the Dashboard Creation Date from an existing dashboard's Text widget.
+
+    Parses the dashboard body JSON to extract the creation date embedded
+    in the header markdown text widget. Returns None if the dashboard
+    cannot be read or the date cannot be extracted.
+
+    Args:
+        session_manager: AWS session manager.
+        region: AWS region.
+        dashboard_name: Name of the dashboard to read.
+
+    Returns:
+        ISO 8601 creation date string, or None if not found.
+    """
+    import json
+    import re
+
+    try:
+        client = session_manager.get_client('cloudwatch', region_name=region)
+        response = client.get_dashboard(DashboardName=dashboard_name)
+        body = json.loads(response.get('DashboardBody', '{}'))
+        widgets = body.get('widgets', [])
+
+        # The creation date is in the first text widget's markdown
+        for widget in widgets:
+            if widget.get('type') == 'text':
+                markdown = widget.get('properties', {}).get('markdown', '')
+                # Look for "Dashboard Creation Date:" followed by an ISO timestamp
+                match = re.search(
+                    r'\*\*Dashboard Creation Date:\*\*\s*(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z)',
+                    markdown
+                )
+                if match:
+                    return match.group(1)
+                break  # Only check the first text widget
+    except Exception:
+        pass
+
+    return None
+
+
+def _manage_dashboard_lifecycle(
+    dlg,
+    session_manager: AWSSessionManager,
+    config,
+    region: str,
+    action: str,
+    all_configs_with_dashboard: Optional[List[str]] = None,
+    config_sources: Optional[Dict[str, List[str]]] = None,
+):
+    """Manage CloudWatch Dashboard lifecycle during deploy/remove operations.
+
+    Handles:
+    - Adding a config to an existing dashboard (update filter clauses)
+    - Removing a config when others remain (update filter clauses)
+    - Removing the last config (delete dashboard)
+    - create_dashboard changing from True to False (update or delete)
+
+    All operations are non-blocking: failures emit warnings but do not
+    raise exceptions or block the calling operation.
+
+    Args:
+        dlg: DeployProgressDialog instance for logging.
+        session_manager: AWS session manager.
+        config: The MRGConfig being deployed/removed/modified.
+        region: AWS region.
+        action: One of 'deploy', 'remove', 'opt_out'.
+            - 'deploy': config is being deployed with create_dashboard=True
+            - 'remove': config is being removed from AWS
+            - 'opt_out': config's create_dashboard changed from True to False
+        all_configs_with_dashboard: List of OTHER config names that still
+            have create_dashboard=True in this region (excluding the current
+            config for 'remove'/'opt_out' actions).
+
+    Requirements: 4.1, 4.2, 4.3, 4.4, 4.5, 4.6, 4.7, 4.8, 4.9
+    """
+    from datetime import datetime, timezone
+
+    try:
+        from src.mrg.aws.cloudwatch import (
+            CloudWatchDashboardError,
+            delete_dashboards,
+            generate_dashboard_body,
+            put_dashboard,
+        )
+    except ImportError as e:
+        dlg.log_message(
+            "  Warning: CloudWatch module not available: {}".format(str(e)), 'error'
+        )
+        return
+
+    dashboard_name = "MRG-Update-Analytics-{}".format(region)
+    if all_configs_with_dashboard is None:
+        all_configs_with_dashboard = []
+
+    try:
+        if action == 'deploy':
+            # Req 4.1: Deploying a config with create_dashboard=True
+            # Gather ALL config names that should be in the dashboard
+            config_names = _get_dashboard_config_names(
+                session_manager, region, config.name, all_configs_with_dashboard
+            )
+            source_arns = config.source_rule_groups
+
+            # Preserve existing creation date on re-deploy to retain historical data.
+            # Only set a new creation date on first-time dashboard creation.
+            if config.dashboard_name:
+                # Dashboard already exists — try to read its current creation date
+                creation_date = _get_existing_dashboard_creation_date(
+                    session_manager, region, dashboard_name
+                )
+                if not creation_date:
+                    # Fallback: use current time if we can't read the existing date
+                    creation_date = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+            else:
+                creation_date = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+
+            log_group = '/aws/lambda/ManagedRuleGenerator-{}'.format(region)
+            body = generate_dashboard_body(
+                region=region,
+                log_group_name=log_group,
+                config_names=config_names,
+                source_arns=source_arns,
+                creation_date=creation_date,
+                config_sources=config_sources or {config.name: config.source_rule_groups},
+            )
+
+            put_dashboard(
+                session_manager, region, dashboard_name, body,
+                tags=[{'Key': 'ManagedRuleGenerator', 'Value': 'update-analytics'}]
+            )
+            config.dashboard_name = dashboard_name
+            dlg.log_message(
+                "  Dashboard '{}' created/updated with configs: {}".format(
+                    dashboard_name, config_names
+                ), 'success'
+            )
+
+        elif action == 'remove':
+            # Config is being removed from AWS
+            if all_configs_with_dashboard:
+                # Req 4.2, 4.3: Other configs remain - update dashboard
+                # to remove the current config from filter clauses
+                config_names = [n for n in all_configs_with_dashboard if n != config.name]
+                if config_names:
+                    source_arns = config.source_rule_groups
+                    # Preserve existing creation date
+                    creation_date = _get_existing_dashboard_creation_date(
+                        session_manager, region, dashboard_name
+                    ) or datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+
+                    body = generate_dashboard_body(
+                        region=region,
+                        log_group_name='/aws/lambda/ManagedRuleGenerator-{}'.format(region),
+                        config_names=config_names,
+                        source_arns=source_arns,
+                        creation_date=creation_date,
+                    )
+
+                    put_dashboard(session_manager, region, dashboard_name, body)
+                    dlg.log_message(
+                        "  Dashboard updated - removed '{}' from filters.".format(
+                            config.name
+                        ), 'success'
+                    )
+                    # Req 4.3: Remove dashboard_name from removed config only
+                    config.dashboard_name = None
+                else:
+                    # Edge case: all_configs_with_dashboard only had the current config
+                    _delete_dashboard_and_clear(
+                        dlg, session_manager, region, dashboard_name, config
+                    )
+            else:
+                # Req 4.4, 4.5: Last config with create_dashboard=True - delete dashboard
+                _delete_dashboard_and_clear(
+                    dlg, session_manager, region, dashboard_name, config
+                )
+
+        elif action == 'opt_out':
+            # Req 4.8, 4.9: create_dashboard changed from True to False
+            if all_configs_with_dashboard:
+                # Req 4.8: Others remain - update dashboard to remove this config
+                config_names = [n for n in all_configs_with_dashboard if n != config.name]
+                if config_names:
+                    source_arns = config.source_rule_groups
+                    # Preserve existing creation date
+                    creation_date = _get_existing_dashboard_creation_date(
+                        session_manager, region, dashboard_name
+                    ) or datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+
+                    body = generate_dashboard_body(
+                        region=region,
+                        log_group_name='/aws/lambda/ManagedRuleGenerator-{}'.format(region),
+                        config_names=config_names,
+                        source_arns=source_arns,
+                        creation_date=creation_date,
+                    )
+
+                    put_dashboard(session_manager, region, dashboard_name, body)
+                    dlg.log_message(
+                        "  Dashboard updated - removed opted-out config '{}' from filters.".format(
+                            config.name
+                        ), 'success'
+                    )
+                else:
+                    _delete_dashboard_and_clear(
+                        dlg, session_manager, region, dashboard_name, config
+                    )
+            else:
+                # Req 4.9: Only config with create_dashboard=True - delete dashboard
+                _delete_dashboard_and_clear(
+                    dlg, session_manager, region, dashboard_name, config
+                )
+            # Clear dashboard_name from the opted-out config
+            config.dashboard_name = None
+
+    except CloudWatchDashboardError as e:
+        # Req 4.6, 4.7: Non-blocking warning on API failure
+        if action in ('remove', 'opt_out') and not all_configs_with_dashboard:
+            # Req 4.7: Include dashboard name in warning for manual cleanup
+            dlg.log_message(
+                "  Warning: Dashboard '{}' could not be removed: {}. "
+                "You may need to delete it manually.".format(dashboard_name, str(e)),
+                'error'
+            )
+        else:
+            dlg.log_message(
+                "  Warning: Dashboard could not be updated: {}".format(str(e)), 'error'
+            )
+    except Exception as e:
+        # Catch-all for unexpected errors - non-blocking
+        dlg.log_message(
+            "  Warning: Dashboard lifecycle error: {}".format(str(e)), 'error'
+        )
+
+
+def _delete_dashboard_and_clear(dlg, session_manager, region, dashboard_name, config):
+    """Delete a dashboard and clear dashboard_name from config.
+
+    Helper for _manage_dashboard_lifecycle.
+
+    Args:
+        dlg: DeployProgressDialog for logging.
+        session_manager: AWS session manager.
+        region: AWS region.
+        dashboard_name: Name of dashboard to delete.
+        config: MRGConfig to clear dashboard_name from.
+
+    Requirements: 4.4, 4.5
+    """
+    from src.mrg.aws.cloudwatch import delete_dashboards
+
+    delete_dashboards(session_manager, region, [dashboard_name])
+    config.dashboard_name = None
+    dlg.log_message(
+        "  Dashboard '{}' deleted (no remaining configs with dashboard enabled).".format(
+            dashboard_name
+        ), 'success'
+    )
+
+
 def _run_deploy_steps(dlg, session_manager, config, rules_string, build_results):
     """Internal: run all deploy steps. Called from background thread."""
     from src.mrg.aws.iam import create_lambda_role
@@ -250,6 +553,22 @@ def _run_deploy_steps(dlg, session_manager, config, rules_string, build_results)
         dlg.log_message("  Warning: Lambda may still be initializing.", 'error')
     else:
         dlg.log_message("  Lambda is Active.", 'success')
+
+    # Ensure the log group exists so dashboard queries don't error
+    # before the Lambda is first invoked
+    log_group_name = '/aws/lambda/ManagedRuleGenerator-{}'.format(region)
+    try:
+        logs_client = session_manager.get_client('logs', region_name=region)
+        logs_client.create_log_group(logGroupName=log_group_name)
+        dlg.log_message("  Log group '{}' created.".format(log_group_name), 'success')
+    except Exception as lg_err:
+        if 'ResourceAlreadyExistsException' in str(lg_err):
+            pass  # Already exists, no action needed
+        else:
+            dlg.log_message(
+                "  Warning: Could not create log group: {}".format(str(lg_err)), 'error'
+            )
+
     advance("Lambda function ready.")
 
     # Step 4: Notification topic (must be created BEFORE Lambda config
@@ -257,7 +576,7 @@ def _run_deploy_steps(dlg, session_manager, config, rules_string, build_results)
     notification_topic_arn = None
     if has_email:
         dlg.log_message("Creating notification topic...", 'info')
-        tr = create_notification_topic(session_manager, region)
+        tr = create_notification_topic(session_manager, region, config_name=config_name)
         notification_topic_arn = tr.get('TopicArn', '')
         config.notification_topic_arn = notification_topic_arn
         dlg.log_message("  Notification topic ready.", 'success')
@@ -286,6 +605,73 @@ def _run_deploy_steps(dlg, session_manager, config, rules_string, build_results)
         dlg.log_message("  The Lambda can still be triggered manually via Tools > Force Sync.", 'info')
     advance("SNS subscription step complete.")
     advance("SNS setup complete.")
+
+    # Step 7: CloudWatch Dashboard (optional, non-blocking)
+    if config.create_dashboard:
+        dlg.log_message("Creating/updating CloudWatch Dashboard...", 'info')
+        try:
+            from src.mrg.aws.lambda_deployer import get_lambda_configs, LambdaNotFoundError
+
+            # Gather all config names deployed in this region to include in dashboard
+            # This enables multi-config dashboard aggregation (Req 4.1)
+            other_dashboard_configs = []
+            existing_configs = []
+            try:
+                existing_configs = get_lambda_configs(session_manager, region)
+                for lc in existing_configs:
+                    lc_name = lc.get('name', '')
+                    if lc_name and lc_name != config.name:
+                        other_dashboard_configs.append(lc_name)
+            except (LambdaNotFoundError, Exception):
+                pass
+
+            # Include current config + any others already deployed in this region
+            all_configs_with_dashboard = [config.name] + other_dashboard_configs
+
+            # Build config_sources mapping for the monitored sources widget
+            config_sources = {config.name: config.source_rule_groups}
+            for lc in existing_configs:
+                lc_name = lc.get('name', '')
+                if lc_name and lc_name != config.name:
+                    config_sources[lc_name] = lc.get('source_rule_groups', [])
+
+            _manage_dashboard_lifecycle(
+                dlg, session_manager, config, region,
+                action='deploy',
+                all_configs_with_dashboard=all_configs_with_dashboard,
+                config_sources=config_sources,
+            )
+        except Exception as e:
+            dlg.log_message(
+                "  Warning: Dashboard could not be created: {}".format(str(e)), 'error'
+            )
+    elif not config.create_dashboard and config.dashboard_name:
+        # Req 4.8, 4.9: create_dashboard changed from True to False
+        # The config previously had a dashboard but user opted out
+        dlg.log_message("Handling dashboard opt-out...", 'info')
+        try:
+            from src.mrg.aws.lambda_deployer import get_lambda_configs, LambdaNotFoundError
+
+            # Find other configs in this region that might still want a dashboard
+            other_dashboard_configs = []
+            try:
+                existing_configs = get_lambda_configs(session_manager, region)
+                for lc in existing_configs:
+                    lc_name = lc.get('name', '')
+                    if lc_name and lc_name != config.name:
+                        other_dashboard_configs.append(lc_name)
+            except (LambdaNotFoundError, Exception):
+                pass
+
+            _manage_dashboard_lifecycle(
+                dlg, session_manager, config, region,
+                action='opt_out',
+                all_configs_with_dashboard=other_dashboard_configs,
+            )
+        except Exception as e:
+            dlg.log_message(
+                "  Warning: Dashboard opt-out could not be processed: {}".format(str(e)), 'error'
+            )
 
     # Update deployment metadata
     deploy_stats = {
@@ -408,10 +794,46 @@ def _run_remove_steps(dlg, session_manager, config, delete_rg, delete_backups):
                         break
             if not found:
                 dlg.log_message("  No matching subscription found.", 'info')
+
+            # Delete the per-config notification topic
+            from src.mrg.aws.sns import delete_notification_topic
+            try:
+                delete_notification_topic(session_manager, region, config.notification_topic_arn)
+                dlg.log_message("  Notification topic deleted.", 'success')
+            except Exception as dt_err:
+                dlg.log_message("  Warning: Could not delete topic: {}".format(str(dt_err)), 'error')
         except Exception as e:
             dlg.log_message("  Warning: {}".format(str(e)), 'error')
     else:
         dlg.log_message("  No subscription to remove.", 'info')
+
+    # Step 4: Dashboard lifecycle management (non-blocking)
+    # Req 4.2, 4.3, 4.4, 4.5: Update or delete dashboard when config is removed
+    if config.dashboard_name or config.create_dashboard:
+        dlg.update_progress(90, "Step 4: Managing CloudWatch Dashboard...")
+        dlg.log_message("Managing CloudWatch Dashboard...", 'info')
+
+        # Determine which other configs still have create_dashboard=True
+        # by checking remaining Lambda configs (after our config was removed)
+        other_dashboard_configs = []
+        try:
+            from src.mrg.aws.lambda_deployer import get_lambda_configs, LambdaNotFoundError
+            try:
+                remaining_configs = get_lambda_configs(session_manager, region)
+                for lc in remaining_configs:
+                    lc_name = lc.get('name', '')
+                    if lc_name and lc_name != name:
+                        other_dashboard_configs.append(lc_name)
+            except (LambdaNotFoundError, Exception):
+                pass
+        except ImportError:
+            pass
+
+        _manage_dashboard_lifecycle(
+            dlg, session_manager, config, region,
+            action='remove',
+            all_configs_with_dashboard=other_dashboard_configs,
+        )
 
     config.clear_deployment_metadata()
     return {'remaining_configs': remaining}
@@ -446,7 +868,7 @@ def _run_teardown_steps(dlg, session_manager, region, delete_rgs, delete_backups
                                           lambda_function_exists)
     from src.mrg.aws.network_firewall import (delete_rule_group as nf_delete_rg, list_user_rule_groups)
     from src.mrg.aws.sns import (delete_notification_topic, get_managed_threat_signatures_topic_arn,
-                              get_notification_topic,
+                              get_all_notification_topics,
                               list_topic_subscriptions, unsubscribe)
 
     # Collect config info before deleting Lambda
@@ -523,36 +945,39 @@ def _run_teardown_steps(dlg, session_manager, region, delete_rgs, delete_backups
     else:
         dlg.log_message("  No managed threat signatures topic found for region.", 'info')
 
-    # 3b: Remove subscriptions from the notification topic
-    nt = get_notification_topic(session_manager, region)
-    if nt:
-        try:
-            subs = list_topic_subscriptions(session_manager, region, nt['TopicArn'])
-            for s in subs:
-                sa = s.get('SubscriptionArn', '')
-                if sa and sa != 'PendingConfirmation':
-                    try:
-                        unsubscribe(session_manager, region, sa)
-                        dlg.log_message("  Removed: {} ({})".format(
-                            s.get('Endpoint', ''), s.get('Protocol', '')), 'success')
-                    except Exception:
-                        pass
-        except Exception as e:
-            dlg.log_message("  Warning: {}".format(str(e)), 'error')
+    # 3b: Remove subscriptions from all MRG notification topics (legacy + per-config)
+    all_notification_topics = get_all_notification_topics(session_manager, region)
+    if all_notification_topics:
+        for nt in all_notification_topics:
+            try:
+                subs = list_topic_subscriptions(session_manager, region, nt['TopicArn'])
+                for s in subs:
+                    sa = s.get('SubscriptionArn', '')
+                    if sa and sa != 'PendingConfirmation':
+                        try:
+                            unsubscribe(session_manager, region, sa)
+                            dlg.log_message("  Removed: {} ({}) from {}".format(
+                                s.get('Endpoint', ''), s.get('Protocol', ''),
+                                nt['TopicName']), 'success')
+                        except Exception:
+                            pass
+            except Exception as e:
+                dlg.log_message("  Warning: {}".format(str(e)), 'error')
     else:
-        dlg.log_message("  No notification topic found.", 'info')
+        dlg.log_message("  No notification topics found.", 'info')
 
-    # Step 4: Delete notification topic
-    dlg.update_progress(65, "Step 4: Deleting notification topic...")
-    dlg.log_message("Deleting notification topic...", 'info')
-    if nt:
-        try:
-            delete_notification_topic(session_manager, region, nt['TopicArn'])
-            dlg.log_message("  Topic deleted.", 'success')
-        except Exception as e:
-            dlg.log_message("  Warning: {}".format(str(e)), 'error')
+    # Step 4: Delete all MRG notification topics
+    dlg.update_progress(65, "Step 4: Deleting notification topics...")
+    dlg.log_message("Deleting notification topics...", 'info')
+    if all_notification_topics:
+        for nt in all_notification_topics:
+            try:
+                delete_notification_topic(session_manager, region, nt['TopicArn'])
+                dlg.log_message("  Deleted: {}".format(nt['TopicName']), 'success')
+            except Exception as e:
+                dlg.log_message("  Warning: {}".format(str(e)), 'error')
     else:
-        dlg.log_message("  No topic to delete.", 'info')
+        dlg.log_message("  No topics to delete.", 'info')
 
     # Step 5: Delete CloudWatch log group
     dlg.update_progress(75, "Step 5: Deleting CloudWatch log group...")

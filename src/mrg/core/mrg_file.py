@@ -101,6 +101,8 @@ class MRGConfig:
         self.last_deployment_stats: Optional[Dict] = None
         self.home_net: Optional[str] = None
         self.external_net: Optional[str] = None
+        self.create_dashboard: bool = False
+        self.dashboard_name: Optional[str] = None
 
     def get_filter_config(self) -> FilterConfig:
         """Convert the filters dict to a FilterConfig object.
@@ -139,6 +141,7 @@ class MRGConfig:
         self.lambda_function_arn = None
         self.notification_topic_arn = None
         self.last_deployment_stats = None
+        self.dashboard_name = None
 
     def update_deployment_stats(self, stats: Dict) -> None:
         """Update the deployment statistics and timestamp.
@@ -180,6 +183,8 @@ class MRGConfig:
             'last_deployment_stats': self.last_deployment_stats,
             'home_net': self.home_net,
             'external_net': self.external_net,
+            'create_dashboard': self.create_dashboard,
+            'dashboard_name': self.dashboard_name,
         }
 
     @classmethod
@@ -220,6 +225,8 @@ class MRGConfig:
         config.last_deployment_stats = data.get('last_deployment_stats')
         config.home_net = data.get('home_net')
         config.external_net = data.get('external_net')
+        config.create_dashboard = data.get('create_dashboard', False)
+        config.dashboard_name = data.get('dashboard_name')
 
         # Validate critical fields
         if config.missing_metadata_behavior not in ('exclude', 'include'):

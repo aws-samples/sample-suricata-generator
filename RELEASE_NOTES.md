@@ -1,5 +1,78 @@
 # Release Notes
 
+## Version 2.4.7 / MRG v1.1.4 - July 15, 2026
+
+### Improvements
+
+- **Dashboard: Monitored Sources reference widget**: Each config now shows a static text widget listing the friendly names of all monitored source rule groups, providing at-a-glance context without opening the .mrg file
+- **Dashboard: Friendly trigger_source names**: Lambda now logs the short rule group name (e.g., `ThreatSignaturesBotnetWebStrictOrder`) in `trigger_source` instead of the full ARN, making dashboard tables more readable
+- **Dashboard: Rule Changes Breakdown split per config**: Each config now gets its own stacked area chart showing adds/removes/modifications over time
+- **Dashboard: Removed redundant widgets**: Removed the "Updates per Source Rule Group" bar chart (duplicate of the Source Frequency table) and "Net Rule Count Over Time" (less useful than change breakdowns)
+- **Dashboard: Widget title updates**: "Pass-Through Rate" renamed to "Update Summary", "Recent Update Events" renamed to "Recent Events (Last 20)"
+- **Dashboard: Latest Changes widget now shows timestamp**: Includes the date of the last change for immediate context
+- **Dashboard: Source Frequency includes all events**: Now counts both `updated` and `no_change` triggers per source, not just successful updates
+
+---
+
+## Version 2.4.6 / MRG v1.1.3 - July 8, 2026
+
+### Bug Fixes
+
+- **Fixed "Net Rule Count Over Time" widget showing no data**: Replaced `filter ispresent(new_total)` with `filter status = 'updated'` — CloudWatch Logs Insights was not recognizing `ispresent()` on the `new_total` field in the log format, causing the query to return empty results despite data being present
+
+---
+
+## Version 2.4.5 / MRG v1.1.2 - July 7, 2026
+
+### Bug Fixes
+
+- **Fixed "Net Rule Count Over Time" widget not rendering**: Replaced `stats latest(new_total) by bin(1d)` query with direct `fields @timestamp, new_total, config_name` for proper time-series rendering with sparse data points
+- **Lambda now includes `new_total` in `no_change` events**: The structured log for `no_change` status now includes the current rule count, giving the Net Rule Count widget a continuous line even during quiet periods with no actual rule changes
+
+---
+
+## Version 2.4.4 / MRG v1.1.1 - June 29, 2026
+
+### Bug Fixes
+
+- **Fixed Lambda processing all configs on every SNS notification**: The `_extract_updated_rule_group_arns` function now correctly reads the rule group ARN from the SNS `MessageAttributes.managed_arn` field and from the plain-text `Message` body. Previously it only attempted JSON parsing of the Message (which is plain text), failed silently, and fell through to re-evaluating all configs on every trigger — including unrelated managed rule group updates
+- **Fixed duplicate SNS subscription attempts on deploy**: `subscribe_lambda_to_managed_topic` now checks for an existing subscription before calling `Subscribe`, preventing potential duplicate subscriptions on repeated deploys
+- **Removed "Reset Dashboard" menu item**: No longer needed since widgets use the CloudWatch console time picker for time range control
+
+### Improvements
+
+- **Pass-Through Rate widget columns renamed**: Changed from `updated_count` / `total` to `total_updates` / `total_source_rule_group_updates` for clarity
+- **Dashboard widget time ranges**: Removed hardcoded `start` timestamps from all widgets; users control the query window via the CloudWatch console time picker, which works correctly with log groups that have no expiration
+
+---
+
+## Version 2.4.3 / MRG v1.1.0 - June 28, 2026
+
+### New Features
+
+- **Analytics Dashboard**: Opt-in CloudWatch Dashboard deployed per-region showing update frequency, pass-through rates, rule change breakdowns, net rule counts, and per-SID change logs via Logs Insights queries
+- **Structured Logging**: Lambda handler emits JSON-structured `mrg_update_event` and `mrg_rule_change` log lines for every update cycle, enabling analytics and troubleshooting
+- **Dashboard Menu Items**: "Open Dashboard" added to the MRG Tools menu (opens CloudWatch console in browser)
+- **Per-Config SNS Notification Topics**: Each MRG configuration now gets its own notification topic (`ManagedRuleGenerator-Notifications-{config_name}`), so email notifications are scoped to the config that triggered the update — no more cross-talk between configs in the same region
+
+### Improvements
+
+- **Checkbox renamed**: "Create dashboard" → "Analytics dashboard" for clarity when multiple configs share a region
+- **Log group pre-creation**: The Lambda log group is now created during deployment so the dashboard doesn't error before the first Lambda invocation
+- **Dashboard preserves history on re-deploy**: Re-deploying a config no longer resets the dashboard creation date — historical data remains visible
+- **Full Teardown cleans up all notification topics**: Teardown now finds and deletes both legacy shared topics and per-config topics
+- **Remove Configuration deletes per-config topic**: Removing a config also removes its dedicated notification topic
+- **Removed "Save as .suricata" button**: Redundant now that "Send to Editor" serves the same purpose within the integrated tool
+- **Full Teardown info message**: When triggered from the main program menu, displays a note about potentially stale .mrg file metadata
+
+### Bug Fixes
+
+- **Fixed incorrect log group name in dashboard queries**: Was using a hardcoded placeholder; now correctly uses `/aws/lambda/ManagedRuleGenerator-{region}`
+- **Fixed MalformedQueryException in Source Frequency widget**: Removed `| fields` after `| stats` that caused "Ephemeral field already defined" error
+- **Fixed dashboard time range error**: Removed absolute `start` timestamps that conflicted with log group retention/creation boundaries
+
+---
+
 ## Version 2.4.2 / MRG v1.0.2 - June 26, 2026
 
 ### New Features

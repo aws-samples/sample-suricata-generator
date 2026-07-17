@@ -273,6 +273,16 @@ class ConfigPanel(ttk.Frame):
         ttk.Label(bottom_frame, text="(optional)", font=('TkDefaultFont', 8),
                   foreground='#888888').pack(side=tk.LEFT, padx=(0, 12))
 
+        # Dashboard creation option
+        self._create_dashboard_var = tk.BooleanVar(value=False)
+        self._create_dashboard_chk = ttk.Checkbutton(
+            bottom_frame,
+            text="Analytics dashboard",
+            variable=self._create_dashboard_var,
+            command=self._on_filter_changed,
+        )
+        self._create_dashboard_chk.pack(side=tk.LEFT, padx=(12, 0))
+
     def _setup_variables_row(self):
         """Create variables row: $HOME_NET and $EXTERNAL_NET with hover tooltips."""
         vars_frame = ttk.Frame(self._content_frame)
@@ -667,6 +677,11 @@ class ConfigPanel(ttk.Frame):
         # Set external_net
         self.set_external_net(config.external_net if hasattr(config, 'external_net') else None)
 
+        # Set create_dashboard checkbox
+        self._create_dashboard_var.set(
+            getattr(config, 'create_dashboard', False)
+        )
+
         return warnings
 
     def save_to_mrg_config(self, config):
@@ -690,6 +705,9 @@ class ConfigPanel(ttk.Frame):
 
         # Save external_net
         config.external_net = self.get_external_net()
+
+        # Save create_dashboard
+        config.create_dashboard = self._create_dashboard_var.get()
 
         # Save filter config
         filter_config = self.get_filter_config()
@@ -718,6 +736,7 @@ class ConfigPanel(ttk.Frame):
         self._email_var.set('')
         self._home_net_var.set('')
         self._external_net_var.set('')
+        self._create_dashboard_var.set(False)
         self._filter_builder.clear()
         self._source_browser.deselect_all()
         self._has_built = False

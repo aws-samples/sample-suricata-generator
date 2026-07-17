@@ -26,6 +26,7 @@ import os
 import platform
 import threading
 import tkinter as tk
+from datetime import datetime, timezone
 from tkinter import filedialog, messagebox, ttk
 from typing import Callable, Dict, List, Optional
 
@@ -214,6 +215,9 @@ class MRGWindow:
         self._tools_menu.add_separator()
         self._tools_menu.add_command(
             label="Logs", command=self._show_logs)
+        self._tools_menu.add_separator()
+        self._tools_menu.add_command(
+            label="Open Dashboard", command=self._open_dashboard, state=tk.DISABLED)
 
         # Help menu
         self._help_menu = tk.Menu(self._menubar, tearoff=0)
@@ -283,11 +287,6 @@ class MRGWindow:
             btn_bar, text="", foreground='#D32F2F', font=('TkDefaultFont', 9))
         self._deploy_warning_label.pack(side=tk.LEFT, padx=(0, 8))
 
-        self._save_suricata_btn = ttk.Button(
-            btn_bar, text="Save as .suricata",
-            command=self._save_as_suricata, state=tk.DISABLED)
-        self._save_suricata_btn.pack(side=tk.LEFT, padx=(0, 8))
-
         self._send_to_editor_btn = ttk.Button(
             btn_bar, text="Send to Editor",
             command=self._send_to_editor, state=tk.DISABLED)
@@ -346,6 +345,7 @@ class MRGWindow:
         self._update_summary_no_build()
         self._update_title()
         self._update_deploy_button_state()
+        self._update_dashboard_menu_state()
 
         self._status_bar.set_status_text("New configuration created.")
         self._status_bar.update_capacity(0, 0)
@@ -406,6 +406,7 @@ class MRGWindow:
         self._update_summary_no_build()
         self._update_title()
         self._update_deploy_button_state()
+        self._update_dashboard_menu_state()
         self._status_bar.set_status_text("Opened: {}".format(os.path.basename(filepath)))
 
         logger.info("Opened MRG config: %s (profile: %s)",
@@ -648,7 +649,6 @@ class MRGWindow:
         """Update Deploy/Send/Save buttons based on build results and constraints."""
         if not self._build_results:
             self._deploy_btn.config(state=tk.DISABLED)
-            self._save_suricata_btn.config(state=tk.DISABLED)
             self._send_to_editor_btn.config(state=tk.DISABLED)
             self._deploy_warning_label.config(text="Build a rule group first.")
             return
@@ -658,10 +658,8 @@ class MRGWindow:
 
         # Enable save/send whenever there are rules
         if rule_count > 0:
-            self._save_suricata_btn.config(state=tk.NORMAL)
             self._send_to_editor_btn.config(state=tk.NORMAL)
         else:
-            self._save_suricata_btn.config(state=tk.DISABLED)
             self._send_to_editor_btn.config(state=tk.DISABLED)
 
         # Check rules string size against AWS 2MB limit
@@ -811,49 +809,6 @@ class MRGWindow:
 
         # Close the MRG window after sending (same behavior as clicking close)
         self._on_close()
-
-    # ─── Save as .suricata ────────────────────────────────────
-
-    def _save_as_suricata(self):
-        """Export filtered rules to a .suricata file."""
-        if not self._build_results or not self._build_results.get('final_rules'):
-            messagebox.showinfo(
-                "No Rules", "No rules to export. Build the rule group first.",
-                parent=self._window)
-            return
-
-        # Suggest filename from rule group name
-        default_name = ""
-        if self._current_config and self._current_config.output_rule_group_name:
-            default_name = self._current_config.output_rule_group_name + ".suricata"
-
-        filepath = filedialog.asksaveasfilename(
-            title="Save as .suricata",
-            filetypes=[("Suricata Rules", "*.suricata"), ("All Files", "*.*")],
-            defaultextension=".suricata",
-            initialfile=default_name,
-            parent=self._window,
-        )
-        if not filepath:
-            return
-
-        from src.mrg.gui.help_dialogs import export_rules_to_suricata
-        try:
-            count = export_rules_to_suricata(self._build_results['final_rules'], filepath)
-            filename = os.path.basename(filepath)
-            self._status_bar.set_status_text(
-                "Exported {} rules to {}".format(count, filename))
-            messagebox.showinfo(
-                "Export Complete",
-                "Exported {} rules to:\n{}".format(count, filepath),
-                parent=self._window)
-            logger.info("Exported %d rules to %s", count, filename)
-        except Exception as e:
-            messagebox.showerror(
-                "Export Error",
-                "Failed to export rules:\n\n{}".format(str(e)),
-                parent=self._window)
-            logger.error("Export failed: %s", str(e))
 
     # ─── Tools Menu Actions ───────────────────────────────────
 
@@ -1136,6 +1091,40 @@ class MRGWindow:
             self._log_viewer_window.focus()
         else:
             self._log_viewer_window = LogViewerWindow(self._window, self._log_handler)
+
+    # ─── Dashboard Menu Actions ───────────────────────────────
+
+    def _open_dashboard(self):
+        """Open the CloudWatch Dashboard in the user's default browser."""
+        if not self._current_config:
+            messagebox.showinfo("Open Dashboard",
+                "A configuration must be opened first.", parent=self._window)
+            return
+        dashboard_name = self._current_config.dashboard_name
+        if not dashboard_name:
+            messagebox.showinfo("Open Dashboard",
+                "This configuration must be deployed with the 'Create dashboard' "
+                "option enabled before the dashboard is available.", parent=self._window)
+            return
+        from src.mrg.aws.cloudwatch import get_dashboard_url
+        url = get_dashboard_url(self._current_config.region, dashboard_name)
+        import webbrowser
+        try:
+            threading.Thread(
+                target=lambda: webbrowser.open(url), daemon=True
+            ).start()
+        except Exception:
+            messagebox.showerror("Open Dashboard",
+                f"Could not open browser.\nURL: {url}", parent=self._window)
+
+    def _update_dashboard_menu_state(self):
+        """Enable or disable dashboard menu items based on dashboard_name presence."""
+        has_dashboard = (
+            self._current_config is not None
+            and self._current_config.dashboard_name is not None
+        )
+        state = tk.NORMAL if has_dashboard else tk.DISABLED
+        self._tools_menu.entryconfigure("Open Dashboard", state=state)
 
     # ─── Help Menu ────────────────────────────────────────────
 

@@ -8826,10 +8826,19 @@ class SuricataRuleGenerator:
             parent=self.root)
         
         from src.mrg.gui.deploy_dialog import full_teardown
-        full_teardown(
+        success = full_teardown(
             self.root, self.aws_session, region,
             delete_rule_groups=delete_rgs, delete_backups=delete_rgs,
         )
+
+        if success:
+            messagebox.showinfo(
+                "Teardown Complete",
+                "All MRG infrastructure in '{}' has been removed.\n\n"
+                "Note: Any .mrg configuration files previously deployed to this "
+                "region will still show deployment metadata until they are "
+                "re-opened in the MRG window and re-saved or re-deployed.".format(region),
+                parent=self.root)
     
     def show_pcap_tester(self):
         """Open a file dialog to select rules and a PCAP file, then test."""

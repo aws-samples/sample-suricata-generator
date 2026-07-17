@@ -42,7 +42,7 @@ _MANAGED_TOPIC_ACCOUNT_IDS = {
     'ap-south-1': '429188163907',
 }
 
-# User notification topic name
+# User notification topic name prefix
 NOTIFICATION_TOPIC_NAME = 'ManagedRuleGenerator-Notifications'
 
 
@@ -116,26 +116,35 @@ def _discover_managed_topic_arn(session_manager: AWSSessionManager, region: str)
     return None
 
 
-def get_notification_topic_name() -> str:
-    """Get the standard notification topic name.
+def get_notification_topic_name(config_name: Optional[str] = None) -> str:
+    """Get the notification topic name for a config.
+
+    Args:
+        config_name: MRG configuration name. If provided, returns a per-config
+            topic name. If None, returns the legacy shared topic name.
 
     Returns:
         Topic name string.
     """
+    if config_name:
+        return '{}-{}'.format(NOTIFICATION_TOPIC_NAME, config_name)
     return NOTIFICATION_TOPIC_NAME
 
 
 def create_notification_topic(session_manager: AWSSessionManager,
-                              region: str) -> Dict:
-    """Create the notification SNS topic for user change alerts.
+                              region: str,
+                              config_name: Optional[str] = None) -> Dict:
+    """Create a notification SNS topic for user change alerts.
 
-    Creates the ManagedRuleGenerator-Notifications topic if it doesn't
-    already exist. SNS CreateTopic is idempotent — if the topic already
-    exists, it returns the existing topic's ARN.
+    Creates a per-config topic (ManagedRuleGenerator-Notifications-{config_name})
+    if config_name is provided, otherwise creates/returns the legacy shared topic.
+    SNS CreateTopic is idempotent — if the topic already exists, it returns the
+    existing topic's ARN.
 
     Args:
         session_manager: AWSSessionManager instance for client creation.
         region: AWS region.
+        config_name: MRG configuration name for per-config topic.
 
     Returns:
         Dict with keys:
@@ -146,10 +155,11 @@ def create_notification_topic(session_manager: AWSSessionManager,
         SNSError: If topic creation fails.
     """
     client = session_manager.get_client('sns', region_name=region)
+    topic_name = get_notification_topic_name(config_name)
 
     try:
         response = client.create_topic(
-            Name=NOTIFICATION_TOPIC_NAME,
+            Name=topic_name,
             Tags=[
                 {'Key': 'ManagedRuleGenerator', 'Value': 'notification-topic'},
             ],
@@ -158,11 +168,11 @@ def create_notification_topic(session_manager: AWSSessionManager,
         topic_arn = response.get('TopicArn', '')
 
         logger.info("Created/confirmed notification topic: %s (ARN: %s)",
-                     NOTIFICATION_TOPIC_NAME, topic_arn)
+                     topic_name, topic_arn)
 
         return {
             'TopicArn': topic_arn,
-            'TopicName': NOTIFICATION_TOPIC_NAME,
+            'TopicName': topic_name,
         }
 
     except Exception as e:
@@ -177,7 +187,8 @@ def subscribe_lambda_to_managed_topic(session_manager: AWSSessionManager,
     """Subscribe the Lambda function to the AWS-Managed-Threat-Signatures topic.
 
     This subscription triggers the Lambda whenever AWS updates a managed
-    threat signature rule group.
+    threat signature rule group. Checks for an existing subscription first
+    to avoid creating duplicates.
 
     Args:
         session_manager: AWSSessionManager instance for client creation.
@@ -200,6 +211,26 @@ def subscribe_lambda_to_managed_topic(session_manager: AWSSessionManager,
             "You can manually subscribe the Lambda to the AWS-Managed-Threat-Signatures "
             "topic using the AWS console.".format(region)
         )
+
+    # Check if subscription already exists to avoid duplicates
+    try:
+        paginator = client.get_paginator('list_subscriptions_by_topic')
+        for page in paginator.paginate(TopicArn=topic_arn):
+            for sub in page.get('Subscriptions', []):
+                if (sub.get('Protocol') == 'lambda'
+                        and sub.get('Endpoint') == lambda_function_arn
+                        and sub.get('SubscriptionArn', '') != 'PendingConfirmation'):
+                    logger.info(
+                        "Lambda %s already subscribed to managed topic (Subscription: %s)",
+                        lambda_function_arn, sub.get('SubscriptionArn'))
+                    return {
+                        'SubscriptionArn': sub.get('SubscriptionArn', ''),
+                        'TopicArn': topic_arn,
+                    }
+    except Exception:
+        # If we can't list subscriptions (e.g., cross-account access denied),
+        # proceed with Subscribe which is idempotent for same protocol+endpoint
+        pass
 
     try:
         response = client.subscribe(
@@ -369,19 +400,23 @@ def publish_notification(session_manager: AWSSessionManager,
 
 
 def get_notification_topic(session_manager: AWSSessionManager,
-                           region: str) -> Optional[Dict]:
+                           region: str,
+                           config_name: Optional[str] = None) -> Optional[Dict]:
     """Find the existing notification topic in a region, if it exists.
 
-    Searches for a topic named ManagedRuleGenerator-Notifications.
+    Searches for a per-config topic (ManagedRuleGenerator-Notifications-{config_name})
+    if config_name is provided, otherwise searches for the legacy shared topic.
 
     Args:
         session_manager: AWSSessionManager instance for client creation.
         region: AWS region.
+        config_name: MRG configuration name for per-config topic lookup.
 
     Returns:
         Dict with 'TopicArn' and 'TopicName' if found, None otherwise.
     """
     client = session_manager.get_client('sns', region_name=region)
+    target_name = get_notification_topic_name(config_name)
 
     try:
         # List topics and find ours by name
@@ -390,10 +425,10 @@ def get_notification_topic(session_manager: AWSSessionManager,
             for topic in page.get('Topics', []):
                 arn = topic.get('TopicArn', '')
                 # Topic ARN format: arn:aws:sns:region:account:name
-                if arn.endswith(':' + NOTIFICATION_TOPIC_NAME):
+                if arn.endswith(':' + target_name):
                     return {
                         'TopicArn': arn,
-                        'TopicName': NOTIFICATION_TOPIC_NAME,
+                        'TopicName': target_name,
                     }
 
         return None
@@ -401,6 +436,43 @@ def get_notification_topic(session_manager: AWSSessionManager,
     except Exception as e:
         logger.warning("Failed to find notification topic in %s: %s", region, str(e))
         return None
+
+
+def get_all_notification_topics(session_manager: AWSSessionManager,
+                                region: str) -> List[Dict]:
+    """Find all MRG notification topics in a region.
+
+    Searches for any topic with the ManagedRuleGenerator-Notifications prefix,
+    including the legacy shared topic and all per-config topics.
+
+    Args:
+        session_manager: AWSSessionManager instance for client creation.
+        region: AWS region.
+
+    Returns:
+        List of dicts with 'TopicArn' and 'TopicName' for each found topic.
+    """
+    client = session_manager.get_client('sns', region_name=region)
+    found = []
+
+    try:
+        paginator = client.get_paginator('list_topics')
+        for page in paginator.paginate():
+            for topic in page.get('Topics', []):
+                arn = topic.get('TopicArn', '')
+                # Extract topic name from ARN
+                topic_name = arn.rsplit(':', 1)[-1] if ':' in arn else ''
+                if topic_name.startswith(NOTIFICATION_TOPIC_NAME):
+                    found.append({
+                        'TopicArn': arn,
+                        'TopicName': topic_name,
+                    })
+
+        return found
+
+    except Exception as e:
+        logger.warning("Failed to list notification topics in %s: %s", region, str(e))
+        return []
 
 
 def list_topic_subscriptions(session_manager: AWSSessionManager,

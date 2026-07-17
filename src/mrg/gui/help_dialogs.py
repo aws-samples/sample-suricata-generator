@@ -60,7 +60,7 @@ IAM_POLICY_JSON = """{
       "Action": [
         "sns:Publish"
       ],
-      "Resource": "arn:aws:sns:*:*:ManagedRuleGenerator-Notifications"
+      "Resource": "arn:aws:sns:*:*:ManagedRuleGenerator-Notifications*"
     },
     {
       "Sid": "CloudWatchLogs",

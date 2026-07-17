@@ -21,6 +21,7 @@ not through AWSSessionManager which is for the local GUI tool).
 import json
 import logging
 import os
+import re
 import time
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Set, Tuple
@@ -104,6 +105,7 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
                 config_name = config.get('name', 'unnamed')
                 logger.error("Failed to process config '%s': %s", config_name, str(e))
                 _send_error_notification(config, region, str(e))
+                _emit_structured_logs(config_name, region, updated_arns, "error", error_msg=str(e))
                 results.append({
                     'config_name': config_name,
                     'status': 'error',
@@ -120,8 +122,10 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
 def _extract_updated_rule_group_arns(event: Dict[str, Any]) -> Set[str]:
     """Extract the ARNs of updated managed rule groups from the SNS event.
 
-    The SNS message from AWS-Managed-Threat-Signatures may contain information
-    about which rule group was updated. We parse the message to extract ARNs.
+    The SNS message from AWS-Managed-Threat-Signatures contains the updated
+    rule group ARN in MessageAttributes.managed_arn and also embedded in the
+    plain-text Message body. We check both locations.
+
     If we cannot determine specific ARNs, we return an empty set which signals
     that all configurations should be re-evaluated.
 
@@ -138,42 +142,58 @@ def _extract_updated_rule_group_arns(event: Dict[str, Any]) -> Set[str]:
         sns_data = record.get('Sns', {})
         message_str = sns_data.get('Message', '')
         subject = sns_data.get('Subject', '')
+        message_attributes = sns_data.get('MessageAttributes', {})
 
         logger.info("SNS Subject: %s", subject)
         logger.info("SNS Message: %s", message_str[:500])
 
-        # Try to parse the message as JSON
+        # Primary: Check MessageAttributes for managed_arn
+        # AWS format: {"managed_arn": {"Type": "String", "Value": "arn:aws:..."}}
+        managed_arn_attr = message_attributes.get('managed_arn', {})
+        managed_arn_value = managed_arn_attr.get('Value', '')
+        if managed_arn_value and ':stateful-rulegroup/' in managed_arn_value:
+            updated_arns.add(managed_arn_value)
+            logger.info("Found managed_arn in MessageAttributes: %s", managed_arn_value)
+
+        # Secondary: Extract ARN from the plain-text Message body
+        # AWS format: "...has a new version: arn:aws:network-firewall:REGION:aws-managed:stateful-rulegroup/NAME..."
+        arn_matches = re.findall(
+            r'arn:aws:network-firewall:[a-z0-9-]+:aws-managed:stateful-rulegroup/[A-Za-z0-9_-]+',
+            message_str
+        )
+        for arn in arn_matches:
+            updated_arns.add(arn)
+            logger.info("Found ARN in Message body: %s", arn)
+
+        # Tertiary: Try to parse Message as JSON (some formats may use JSON)
         try:
             message = json.loads(message_str)
+            if isinstance(message, dict):
+                for field_name in ('rule_group_arn', 'ruleGroupArn', 'RuleGroupArn',
+                                   'arn', 'Arn', 'resource', 'Resource',
+                                   'managed_arn'):
+                    arn_value = message.get(field_name, '')
+                    if arn_value and ':stateful-rulegroup/' in str(arn_value):
+                        updated_arns.add(str(arn_value))
+
+                for field_name in ('rule_groups', 'ruleGroups', 'RuleGroups',
+                                   'resources', 'Resources'):
+                    arns_list = message.get(field_name, [])
+                    if isinstance(arns_list, list):
+                        for arn in arns_list:
+                            if isinstance(arn, str) and ':stateful-rulegroup/' in arn:
+                                updated_arns.add(arn)
+                            elif isinstance(arn, dict):
+                                for k in ('arn', 'Arn', 'ARN'):
+                                    if k in arn and ':stateful-rulegroup/' in str(arn[k]):
+                                        updated_arns.add(str(arn[k]))
         except (json.JSONDecodeError, TypeError):
-            message = {}
+            pass
 
-        # Look for rule group ARN in the message
-        # AWS SNS messages for managed rule groups may contain the ARN
-        # in various fields depending on the message format
-        for field_name in ('rule_group_arn', 'ruleGroupArn', 'RuleGroupArn',
-                           'arn', 'Arn', 'resource', 'Resource'):
-            arn_value = message.get(field_name, '')
-            if arn_value and ':stateful-rulegroup/' in str(arn_value):
-                updated_arns.add(str(arn_value))
-
-        # Also check if the ARN is in a list format
-        for field_name in ('rule_groups', 'ruleGroups', 'RuleGroups',
-                           'resources', 'Resources'):
-            arns_list = message.get(field_name, [])
-            if isinstance(arns_list, list):
-                for arn in arns_list:
-                    if isinstance(arn, str) and ':stateful-rulegroup/' in arn:
-                        updated_arns.add(arn)
-                    elif isinstance(arn, dict):
-                        for k in ('arn', 'Arn', 'ARN'):
-                            if k in arn and ':stateful-rulegroup/' in str(arn[k]):
-                                updated_arns.add(str(arn[k]))
-
-        # Check the subject line for rule group names
-        if 'ThreatSignatures' in subject:
-            # Subject might mention the rule group name directly
-            logger.info("Subject contains ThreatSignatures reference")
+    if updated_arns:
+        logger.info("Extracted %d updated ARN(s): %s", len(updated_arns), updated_arns)
+    else:
+        logger.warning("Could not extract any rule group ARNs from SNS event")
 
     return updated_arns
 
@@ -363,6 +383,8 @@ def _process_config(config: Dict, region: str, trigger_arns: Set[str]) -> Dict:
 
     if new_rules_string.strip() == current_rules_string.strip():
         logger.info("No changes detected for '%s'. Skipping update.", config_name)
+        _emit_structured_logs(config_name, region, trigger_arns, "no_change",
+                              rule_count=len(deduped_rules))
         return {
             'config_name': config_name,
             'status': 'no_change',
@@ -412,6 +434,9 @@ def _process_config(config: Dict, region: str, trigger_arns: Set[str]) -> Dict:
             )
         except Exception as e:
             logger.warning("Failed to send change notification for '%s': %s", config_name, str(e))
+
+    # Step 10: Emit structured logs for analytics dashboard
+    _emit_structured_logs(config_name, region, trigger_arns, "updated", change_summary)
 
     return {
         'config_name': config_name,
@@ -723,6 +748,115 @@ def _compute_change_summary(old_rules_string: str, new_rules_string: str) -> Dic
         'removed': removed_details,
         'modified': modified_details,
     }
+
+
+def _emit_structured_logs(config_name: str, region: str, trigger_arns: Set[str],
+                          status: str, change_summary: Optional[Dict] = None,
+                          error_msg: Optional[str] = None,
+                          rule_count: Optional[int] = None) -> None:
+    """Emit a single structured JSON log line for an update event.
+
+    Emits an 'mrg_update_event' log line at INFO level. When status is
+    "updated", includes rule change counts. When status is "error",
+    includes error_description. When status is "no_change" and rule_count
+    is provided, includes new_total for dashboard continuity. Wrapped in
+    try/except so failures never abort rule group processing.
+
+    Args:
+        config_name: Name of the MRG configuration.
+        region: AWS region.
+        trigger_arns: Set of source ARNs that triggered this update.
+        status: One of "updated", "no_change", or "error".
+        change_summary: Dict with change counts (required when status="updated").
+        error_msg: Error description (used when status="error").
+        rule_count: Current total rule count (used when status="no_change").
+    """
+    try:
+        timestamp = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+        trigger_source = next(iter(trigger_arns)) if trigger_arns else ''
+        # Extract friendly name from ARN for dashboard display
+        trigger_source_name = trigger_source.rsplit('/', 1)[-1] if '/' in trigger_source else trigger_source
+
+        log_entry = {
+            "event_type": "mrg_update_event",
+            "config_name": config_name,
+            "timestamp": timestamp,
+            "trigger_source": trigger_source_name,
+            "trigger_source_arn": trigger_source,
+            "status": status,
+        }
+
+        if status == "updated" and change_summary:
+            log_entry["rules_added"] = change_summary.get('added_count', 0)
+            log_entry["rules_removed"] = change_summary.get('removed_count', 0)
+            log_entry["rules_modified"] = change_summary.get('modified_count', 0)
+            log_entry["previous_total"] = change_summary.get('old_total', 0)
+            log_entry["new_total"] = change_summary.get('new_total', 0)
+
+        if status == "no_change" and rule_count is not None:
+            log_entry["new_total"] = rule_count
+
+        if status == "error" and error_msg:
+            log_entry["error_description"] = error_msg
+
+        logger.info(json.dumps(log_entry))
+
+        # Emit per-rule change events when status is "updated"
+        if status == "updated" and change_summary:
+            _emit_rule_change_events(config_name, timestamp, trigger_source, change_summary)
+
+    except Exception as e:
+        logger.warning("Failed to emit structured logs: %s", str(e))
+
+
+def _emit_rule_change_events(config_name: str, timestamp: str, trigger_source: str,
+                             change_summary: Dict) -> None:
+    """Emit per-rule change log lines, capped at 200.
+
+    Each line is a JSON object with event_type="mrg_rule_change" containing
+    the SID, description, change type, timestamp, config name, and trigger
+    source. If total changes exceed 200, a truncation summary line is emitted.
+    Wrapped in try/except so failures never abort rule group processing.
+
+    Args:
+        config_name: Name of the MRG configuration.
+        timestamp: ISO 8601 UTC timestamp string.
+        trigger_source: Source ARN that triggered the update.
+        change_summary: Dict with 'added', 'removed', 'modified' lists.
+    """
+    try:
+        all_changes = []
+        for detail in change_summary.get('added', []):
+            all_changes.append(('added', detail))
+        for detail in change_summary.get('removed', []):
+            all_changes.append(('removed', detail))
+        for detail in change_summary.get('modified', []):
+            all_changes.append(('modified', detail))
+
+        cap = 200
+        for change_type, detail in all_changes[:cap]:
+            logger.info(json.dumps({
+                "event_type": "mrg_rule_change",
+                "sid": detail['sid'],
+                "description": detail.get('msg', ''),
+                "change_type": change_type,
+                "timestamp": timestamp,
+                "config_name": config_name,
+                "trigger_source": trigger_source,
+            }))
+
+        if len(all_changes) > cap:
+            logger.info(json.dumps({
+                "event_type": "mrg_rule_change",
+                "truncated": True,
+                "additional_changes_not_logged": len(all_changes) - cap,
+                "timestamp": timestamp,
+                "config_name": config_name,
+                "trigger_source": trigger_source,
+            }))
+
+    except Exception as e:
+        logger.warning("Failed to emit rule change events: %s", str(e))
 
 
 def _send_change_notification(sns_client: Any, topic_arn: str,

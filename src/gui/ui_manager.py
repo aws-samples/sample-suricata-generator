@@ -359,9 +359,10 @@ class UIManager:
         """Show configuration dialog for CloudWatch analysis"""
         dialog = tk.Toplevel(self.parent.root)
         dialog.title("Configure Rule Usage Analysis")
-        dialog.geometry("550x850")
-        dialog.transient(self.parent.root)
+        dialog.geometry("550x950")
         dialog.grab_set()
+        dialog.resizable(True, True)
+        dialog.minsize(550, 700)
         
         # Center dialog
         dialog.geometry("+%d+%d" % (
@@ -369,8 +370,54 @@ class UIManager:
             self.parent.root.winfo_rooty() + 100
         ))
         
-        main_frame = ttk.Frame(dialog)
-        main_frame.pack(fill=tk.BOTH, expand=True, padx=20, pady=20)
+        # Pack buttons BEFORE content (side=tk.BOTTOM) to ensure they're always visible
+        button_frame = ttk.Frame(dialog)
+        button_frame.pack(side=tk.BOTTOM, fill=tk.X, padx=20, pady=(10, 20))
+        
+        # Scrollable content area
+        scroll_container = ttk.Frame(dialog)
+        scroll_container.pack(fill=tk.BOTH, expand=True, padx=20, pady=(20, 0))
+        
+        dialog_canvas = tk.Canvas(scroll_container)
+        dialog_scrollbar = ttk.Scrollbar(scroll_container, orient=tk.VERTICAL, command=dialog_canvas.yview)
+        main_frame = ttk.Frame(dialog_canvas)
+        
+        main_frame.bind(
+            "<Configure>",
+            lambda e: dialog_canvas.configure(scrollregion=dialog_canvas.bbox("all"))
+        )
+        
+        dialog_canvas.create_window((0, 0), window=main_frame, anchor="nw")
+        dialog_canvas.configure(yscrollcommand=dialog_scrollbar.set)
+        
+        # Make main_frame width track canvas width
+        def _on_canvas_configure(event):
+            dialog_canvas.itemconfig(dialog_canvas.find_all()[0], width=event.width)
+        dialog_canvas.bind("<Configure>", _on_canvas_configure)
+        
+        dialog_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        dialog_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        
+        # Bind mouse wheel scrolling for cross-platform support
+        def _on_dialog_mousewheel(event):
+            try:
+                if event.num == 4:  # macOS scroll up
+                    dialog_canvas.yview_scroll(-3, "units")
+                elif event.num == 5:  # macOS scroll down
+                    dialog_canvas.yview_scroll(3, "units")
+                else:  # Windows/Linux
+                    dialog_canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+            except:
+                pass
+        
+        dialog_canvas.bind("<MouseWheel>", _on_dialog_mousewheel)
+        dialog_canvas.bind("<Button-4>", _on_dialog_mousewheel)
+        dialog_canvas.bind("<Button-5>", _on_dialog_mousewheel)
+        
+        # Also bind on main_frame so scrolling works when hovering over content
+        main_frame.bind("<MouseWheel>", _on_dialog_mousewheel)
+        main_frame.bind("<Button-4>", _on_dialog_mousewheel)
+        main_frame.bind("<Button-5>", _on_dialog_mousewheel)
         
         # Title
         ttk.Label(main_frame, text="CloudWatch Logs Analysis Configuration",
@@ -512,6 +559,240 @@ class UIManager:
                               font=("TkDefaultFont", 8), foreground="#666666",
                               justify=tk.LEFT)
         help_label.pack(anchor=tk.W)
+
+        # --- Additional Local Rule Files (Optional) --- NEW SECTION
+        local_files_frame = ttk.LabelFrame(main_frame, text="Additional Local Rule Files (Optional)")
+        local_files_frame.pack(fill=tk.X, pady=(0, 15))
+
+        local_files_content = ttk.Frame(local_files_frame)
+        local_files_content.pack(fill=tk.X, padx=10, pady=10)
+
+        ttk.Label(local_files_content,
+                  text="Include additional local .suricata files in the analysis\n"
+                       "to get unified visibility across all your rule files.",
+                  font=("TkDefaultFont", 8), foreground="#666666",
+                  justify=tk.LEFT).pack(anchor=tk.W, pady=(0, 8))
+
+        local_files_btn_frame = ttk.Frame(local_files_content)
+        local_files_btn_frame.pack(fill=tk.X)
+
+        # Initialize session state for local file selections
+        if not hasattr(self.parent, '_local_file_selections'):
+            self.parent._local_file_selections = []
+        if not hasattr(self.parent, '_local_file_browse_dir'):
+            self.parent._local_file_browse_dir = None
+
+        # Progress label for file loading feedback
+        local_files_progress_label = ttk.Label(local_files_content, text="",
+                                               font=("TkDefaultFont", 8), foreground="#1565C0")
+
+        # Informational note label for duplicate SIDs
+        local_files_info_label = ttk.Label(local_files_content, text="",
+                                           font=("TkDefaultFont", 8), foreground="#F57C00")
+
+        def on_browse_local_files():
+            """Open file dialog to select additional local .suricata files"""
+            from src.analysis.local_file_loader import LocalFileLoader
+
+            # Determine initial directory: preserved from previous browse, or current file's dir
+            initial_dir = self.parent._local_file_browse_dir
+            if not initial_dir:
+                if self.parent.current_file:
+                    initial_dir = os.path.dirname(self.parent.current_file)
+                else:
+                    initial_dir = os.path.expanduser("~")
+
+            selected_paths = filedialog.askopenfilenames(
+                title="Select Local Suricata Rule Files",
+                initialdir=initial_dir,
+                filetypes=[("Suricata Rules", "*.suricata"), ("All Files", "*.*")],
+                parent=dialog
+            )
+
+            if not selected_paths:
+                return
+
+            # Preserve the directory for next browse within this session
+            self.parent._local_file_browse_dir = os.path.dirname(selected_paths[0])
+
+            # Filter out the currently open file
+            current_file_path = self.parent.current_file
+            filtered_paths = []
+            excluded_count = 0
+            for path in selected_paths:
+                if current_file_path and os.path.normpath(path) == os.path.normpath(current_file_path):
+                    excluded_count += 1
+                else:
+                    filtered_paths.append(path)
+
+            if excluded_count > 0:
+                messagebox.showinfo(
+                    "File Excluded",
+                    f"The currently open file is already included as the primary file.\n"
+                    f"It has been excluded from the additional selections.",
+                    parent=dialog
+                )
+
+            if not filtered_paths:
+                return
+
+            # Show progress label and load files with progress callback
+            local_files_progress_label.pack(anchor=tk.W, pady=(4, 0))
+            local_files_info_label.pack_forget()  # Hide info label during loading
+
+            def progress_callback(current_index, total, filename):
+                """Update progress indicator during file loading"""
+                local_files_progress_label.config(
+                    text=f"Loading file {current_index} of {total}: {filename}"
+                )
+                dialog.update_idletasks()
+
+            # Load and parse the selected files using LocalFileLoader
+            loader = LocalFileLoader()
+            loaded_files = loader.load_files(filtered_paths, progress_callback=progress_callback)
+
+            # Hide progress label after loading completes
+            local_files_progress_label.config(text="")
+            local_files_progress_label.pack_forget()
+
+            # Check for files with errors and display warnings
+            error_files = [f for f in loaded_files if f.error]
+            if error_files:
+                warning_lines = []
+                for ef in error_files:
+                    warning_lines.append(f"• {ef.filename}: {ef.error}")
+                messagebox.showwarning(
+                    "File Loading Warnings",
+                    f"The following file(s) had issues:\n\n" + "\n".join(warning_lines),
+                    parent=dialog
+                )
+
+            # Build selection data from loaded results
+            new_selections = []
+            for loaded_file in loaded_files:
+                new_selections.append({
+                    'path': loaded_file.path,
+                    'filename': loaded_file.filename,
+                    'rule_count': loaded_file.rule_count,
+                    'sids': loaded_file.sids,
+                    'rules': loaded_file.rules,  # Store parsed rule objects for analysis
+                    'error': loaded_file.error
+                })
+
+            # Merge with existing selections (avoid duplicates by path)
+            existing_paths = {s['path'] for s in self.parent._local_file_selections}
+            for sel in new_selections:
+                if sel['path'] not in existing_paths:
+                    self.parent._local_file_selections.append(sel)
+                    existing_paths.add(sel['path'])
+
+            _update_local_files_summary()
+
+            # After loading, compute deduplication to show duplicate SID count
+            _show_duplicate_info(loader)
+
+        ttk.Button(local_files_btn_frame, text="Browse Local Rule Files...",
+                   command=on_browse_local_files).pack(side=tk.LEFT)
+
+        def on_clear_local_files():
+            """Clear all local file selections"""
+            self.parent._local_file_selections = []
+            local_files_info_label.config(text="")
+            local_files_info_label.pack_forget()
+            _update_local_files_summary()
+
+        local_clear_btn = ttk.Button(local_files_btn_frame, text="Clear",
+                                     command=on_clear_local_files)
+
+        # Summary label showing current selections
+        local_files_summary_label = ttk.Label(local_files_content, text="Selected: (none)",
+                                              font=("TkDefaultFont", 8))
+        local_files_summary_label.pack(anchor=tk.W, pady=(8, 0))
+
+        # Detail label for listing selected files
+        local_files_detail_label = ttk.Label(local_files_content, text="",
+                                             font=("TkDefaultFont", 8), foreground="#555555",
+                                             justify=tk.LEFT)
+
+        def _update_local_files_summary():
+            """Update the local files summary display"""
+            selections = self.parent._local_file_selections
+            if selections:
+                total_rules = sum(s.get('rule_count', 0) for s in selections)
+                local_files_summary_label.config(
+                    text=f"✓ {len(selections)} file{'s' if len(selections) != 1 else ''} "
+                         f"selected, {total_rules:,} total rules",
+                    foreground="#2E7D32"
+                )
+                # Show detail list (each file with rule count)
+                detail_lines = []
+                for s in selections:
+                    if s.get('error'):
+                        detail_lines.append(f"  ⚠️ {s['filename']} ({s['error']})")
+                    else:
+                        detail_lines.append(f"  • {s['filename']} ({s['rule_count']:,} rules)")
+                local_files_detail_label.config(text="\n".join(detail_lines))
+                local_files_detail_label.pack(anchor=tk.W, pady=(2, 0))
+                # Show clear button
+                local_clear_btn.pack(side=tk.LEFT, padx=(10, 0))
+            else:
+                local_files_summary_label.config(text="Selected: (none)", foreground="#333333")
+                local_files_detail_label.pack_forget()
+                local_clear_btn.pack_forget()
+
+        def _show_duplicate_info(loader):
+            """Compute and display duplicate SID count after deduplication"""
+            from src.analysis.local_file_loader import LocalFileLoader
+
+            selections = self.parent._local_file_selections
+            if not selections:
+                local_files_info_label.config(text="")
+                local_files_info_label.pack_forget()
+                return
+
+            # Gather current file SIDs
+            current_file_sids = set()
+            if self.parent.current_file and hasattr(self.parent, 'rules'):
+                for rule in self.parent.rules:
+                    if hasattr(rule, 'sid') and rule.sid:
+                        current_file_sids.add(rule.sid)
+
+            # Build LoadedFile-like objects for deduplication
+            from src.analysis.local_file_loader import LoadedFile
+            local_loaded_files = []
+            for sel in selections:
+                lf = LoadedFile(
+                    path=sel['path'],
+                    filename=sel['filename'],
+                    sids=sel.get('sids', []),
+                    rule_count=sel.get('rule_count', 0)
+                )
+                local_loaded_files.append(lf)
+
+            # Run deduplication
+            sid_to_source, unique_sids = loader.deduplicate_sids(
+                current_file_sids, local_loaded_files, set()
+            )
+
+            # Compute total raw SIDs across all local files
+            total_raw_local_sids = sum(len(sel.get('sids', [])) for sel in selections)
+            # Total raw SIDs across all sources (current + local)
+            total_raw_sids = len(current_file_sids) + total_raw_local_sids
+            # Duplicates = raw total minus unique count
+            duplicate_count = total_raw_sids - len(unique_sids)
+
+            if duplicate_count > 0:
+                local_files_info_label.config(
+                    text=f"ℹ️ Note: {duplicate_count:,} duplicate SID{'s' if duplicate_count != 1 else ''} "
+                         f"found across files (will be deduplicated)"
+                )
+                local_files_info_label.pack(anchor=tk.W, pady=(4, 0))
+            else:
+                local_files_info_label.config(text="")
+                local_files_info_label.pack_forget()
+
+        # Initialize display from session memory
+        _update_local_files_summary()
 
         # --- AWS Managed Rule Groups (Optional) --- NEW SECTION
         managed_frame = ttk.LabelFrame(main_frame, text="AWS Managed Rule Groups (Optional)")
@@ -681,9 +962,7 @@ class UIManager:
         ttk.Label(help_frame, text="Need help with setup?", foreground="#666666").pack(side=tk.LEFT)
         ttk.Button(help_frame, text="Setup Guide", command=lambda: self.show_aws_setup_help(default_tab='prerequisites')).pack(side=tk.LEFT, padx=(10, 0))
         
-        # Buttons
-        button_frame = ttk.Frame(main_frame)
-        button_frame.pack(pady=(20, 0))
+        # Buttons (use button_frame already packed at bottom of dialog)
         
         def on_analyze():
             log_group = log_group_var.get().strip()
@@ -700,6 +979,58 @@ class UIManager:
             
             # Get selected region
             selected_region = region_var.get()
+            
+            # --- SID count validation before query execution ---
+            # Calculate deduplicated unique SID count across all sources
+            from src.analysis.local_file_loader import LocalFileLoader, LoadedFile
+            
+            # Gather current file SIDs
+            current_file_sids = set()
+            for rule in self.parent.rules:
+                if not getattr(rule, 'is_comment', False) and not getattr(rule, 'is_blank', False):
+                    current_file_sids.add(rule.sid)
+            
+            # Gather local file SIDs from selections
+            local_loaded_files = []
+            for sel in self.parent._local_file_selections:
+                lf = LoadedFile(path=sel['path'], filename=sel['filename'])
+                lf.sids = sel.get('sids', [])
+                local_loaded_files.append(lf)
+            
+            # Gather managed group SIDs
+            managed_sids = set()
+            managed_selections = getattr(self.parent, '_managed_rule_group_selections', [])
+            for group in managed_selections:
+                for sid in group.get('sids', []):
+                    managed_sids.add(sid)
+            
+            # Deduplicate to get unique count
+            loader = LocalFileLoader()
+            _, unique_sids = loader.deduplicate_sids(current_file_sids, local_loaded_files, managed_sids)
+            unique_sid_count = len(unique_sids)
+            
+            # Display warning if count exceeds 30,000 (requires user confirmation)
+            if unique_sid_count > 30000:
+                proceed = messagebox.askokcancel(
+                    "Large SID Count Warning",
+                    f"The combined unique SID count is {unique_sid_count:,}.\n\n"
+                    f"Results may be incomplete due to CloudWatch Logs Insights "
+                    f"query limits (10,000 results per query).\n\n"
+                    f"Do you want to proceed with the analysis?",
+                    icon='warning',
+                    parent=dialog
+                )
+                if not proceed:
+                    return
+            # Display informational message if count exceeds 10,000 (pagination note)
+            elif unique_sid_count > 10000:
+                messagebox.showinfo(
+                    "Pagination Notice",
+                    f"The combined unique SID count is {unique_sid_count:,}.\n\n"
+                    f"Results will be paginated across multiple queries to accommodate "
+                    f"CloudWatch Logs Insights limits.",
+                    parent=dialog
+                )
             
             days_value = time_var.get()
             
@@ -1506,6 +1837,38 @@ class UIManager:
                         'rule_count': group.get('rule_count', 0)
                     })
                 
+                # Gather local file data from session memory
+                local_selections = getattr(self.parent, '_local_file_selections', [])
+                local_file_sids = {}
+                local_file_rules = {}
+                local_file_metadata = []
+                local_file_rule_ages = {}
+                local_file_last_modified = {}
+                
+                if local_selections:
+                    from src.analysis.local_file_loader import LocalFileLoader
+                    loader = LocalFileLoader()
+                    
+                    for sel in local_selections:
+                        filename = sel['filename']
+                        local_file_sids[filename] = sel.get('sids', [])
+                        local_file_rules[filename] = sel.get('rules', [])
+                        local_file_metadata.append({
+                            'path': sel['path'],
+                            'filename': filename,
+                            'rule_count': sel.get('rule_count', 0),
+                            'sids': sel.get('sids', [])
+                        })
+                        
+                        # Load rule ages and last modified dates from companion .history files
+                        history_path = loader._get_history_path(sel['path'])
+                        for sid in sel.get('sids', []):
+                            creation_days, last_mod_date = loader.get_rule_history_dates(history_path, sid)
+                            if creation_days is not None:
+                                local_file_rule_ages[sid] = creation_days
+                            if last_mod_date is not None:
+                                local_file_last_modified[sid] = last_mod_date
+                
                 # Run CloudWatch query with selected region
                 analysis_results = self.parent.usage_analyzer.analyze_rules(
                     rule_sids=rule_sids,
@@ -1522,13 +1885,21 @@ class UIManager:
                     aws_session=self.parent.aws_session,  # Pass session manager for profile support
                     managed_rule_sids=managed_rule_sids if managed_rule_sids else None,
                     managed_rule_groups=managed_rule_groups_meta if managed_rule_groups_meta else None,
-                    managed_rule_metadata=managed_rule_metadata if managed_rule_metadata else None
+                    managed_rule_metadata=managed_rule_metadata if managed_rule_metadata else None,
+                    local_file_sids=local_file_sids if local_file_sids else None,
+                    local_file_rules=local_file_rules if local_file_rules else None,
+                    local_file_metadata=local_file_metadata if local_file_metadata else None,
+                    local_file_rule_ages=local_file_rule_ages if local_file_rule_ages else None
                 )
                 
                 # Check if analysis was cancelled (returns None)
                 if cancel_flag[0] or analysis_results is None:
                     progress_dialog.destroy()
                     return
+                
+                # Inject local file last modified dates into results for use in show_usage_results_window
+                if local_file_last_modified:
+                    analysis_results['local_file_last_modified'] = local_file_last_modified
                 
                 # Close progress dialog
                 progress_dialog.destroy()
@@ -1759,9 +2130,12 @@ Would you like to run a complete analysis?"""
         
         results_window.after(60000, update_timestamp)
         
-        # Metadata
+        # Metadata - "Rules:" shows total unique rules across all sources (Requirement 22.1-22.5)
+        total_your_rules = analysis_results.get('total_your_rules', analysis_results['total_rules'])
+        total_managed_rules_header = analysis_results.get('total_managed_rules', 0)
+        total_rules_all_sources = total_your_rules + total_managed_rules_header
         metadata_text = (f"Time Range: Last {analysis_results['time_range_days']} days | "
-                        f"Rules: {analysis_results['total_rules']:,} | "
+                        f"Rules: {total_rules_all_sources:,} | "
                         f"Records: {analysis_results['records_analyzed']:,} | "
                         f"Log Group: {analysis_results['log_group']}")
         ttk.Label(header_frame, text=metadata_text,
@@ -1794,6 +2168,23 @@ Would you like to run a complete analysis?"""
                 sid_stats[sid]['days_since_last_modified'] = days_since_mod
             else:
                 sid_stats[sid]['days_since_last_modified'] = days  # Fallback to creation date
+        
+        # Also populate days_in_production for local file rules using local_file_rule_ages
+        # This ensures rules from additional local files with companion .history files
+        # get properly categorized into "Recently Deployed" or "Confirmed Unused"
+        local_file_rule_ages = analysis_results.get('local_file_rule_ages', {})
+        local_file_last_modified = analysis_results.get('local_file_last_modified', {})
+        for sid, age in local_file_rule_ages.items():
+            if sid in sid_stats:
+                if sid_stats[sid].get('days_in_production') is None:
+                    sid_stats[sid]['days_in_production'] = age
+                # Use last_modified from local file history if available
+                last_mod_date = local_file_last_modified.get(sid)
+                if last_mod_date is not None and sid_stats[sid].get('last_modified') is None:
+                    sid_stats[sid]['last_modified'] = datetime.combine(last_mod_date, datetime.min.time())
+                    sid_stats[sid]['days_since_last_modified'] = (datetime.now().date() - last_mod_date).days
+                elif sid_stats[sid].get('days_since_last_modified') is None:
+                    sid_stats[sid]['days_since_last_modified'] = age
         
         # Tab notebook
         notebook = ttk.Notebook(main_frame)
@@ -1859,91 +2250,129 @@ Would you like to run a complete analysis?"""
         
         self._draw_health_gauge(gauge_canvas, health_score)
         
-        # Analysis Scope section (shows custom + managed breakdown when managed groups present)
+        # Analysis Scope section (shows when additional local files OR managed groups present)
         managed_rule_groups = analysis_results.get('managed_rule_groups', [])
         total_managed_rules = analysis_results.get('total_managed_rules', 0)
         managed_sid_to_group = analysis_results.get('managed_sid_to_group', {})
+        local_file_metadata = analysis_results.get('local_file_metadata', [])
+        total_your_rules_display = analysis_results.get('total_your_rules', analysis_results['total_rules'])
         
-        if managed_rule_groups:
+        # Show "Analysis Scope" when additional local files are included (Req 17.1)
+        # OR when managed rule groups are selected
+        if local_file_metadata or managed_rule_groups:
             scope_frame = ttk.LabelFrame(left_column, text="Analysis Scope")
             scope_frame.pack(fill=tk.X, pady=(0, 10))
             
             scope_content = ttk.Frame(scope_frame)
             scope_content.pack(padx=15, pady=10)
             
-            # Custom rules count
-            custom_rule_count = analysis_results['total_rules']
-            custom_filename = os.path.basename(self.parent.current_file) if self.parent.current_file else "loaded file"
+            # "Your Rules" category - unified pool of current file + additional local files (Req 17.2, 17.3)
+            # M = 1 (current file) + number of additional local files
+            your_rules_file_count = 1 + len(local_file_metadata)
             ttk.Label(scope_content, 
-                     text=f"Custom Rules: {custom_rule_count:,} rules (from {custom_filename})",
-                     font=("TkDefaultFont", 9)).pack(anchor=tk.W, pady=2)
+                     text=f"Your Rules: {total_your_rules_display:,} rules across {your_rules_file_count} files",
+                     font=("TkDefaultFont", 9, "bold")).pack(anchor=tk.W, pady=2)
             
-            # Managed rule groups breakdown
+            # Sub-list showing each individual file with filename and rule count (Req 17.4)
+            current_filename = os.path.basename(self.parent.current_file) if self.parent.current_file else "loaded file"
+            current_file_rule_count = analysis_results['total_rules']
             ttk.Label(scope_content, 
-                     text=f"Managed Rule Groups: {len(managed_rule_groups)} groups, {total_managed_rules:,} rules",
-                     font=("TkDefaultFont", 9)).pack(anchor=tk.W, pady=2)
+                     text=f"  • {current_filename}  ({current_file_rule_count:,} rules)",
+                     font=("TkDefaultFont", 8)).pack(anchor=tk.W, pady=1)
             
-            for mg in managed_rule_groups:
-                ttk.Label(scope_content,
-                         text=f"  • {mg['name']}  ({mg.get('rule_count', 0):,} rules)",
-                         font=("TkDefaultFont", 8), foreground="#2E8B8B").pack(anchor=tk.W, pady=1)
+            for lf_meta in local_file_metadata:
+                lf_filename = lf_meta.get('filename', 'unknown')
+                lf_rule_count = lf_meta.get('rule_count', 0)
+                lf_path = lf_meta.get('path', '')
+                # Check if file still exists on disk (Requirement 14.2)
+                lf_exists = lf_meta.get('exists_on_disk', True)
+                if lf_path and not os.path.isfile(lf_path):
+                    lf_exists = False
+                
+                if lf_exists:
+                    ttk.Label(scope_content,
+                             text=f"  \u2022 {lf_filename}  ({lf_rule_count:,} rules)",
+                             font=("TkDefaultFont", 8)).pack(anchor=tk.W, pady=1)
+                else:
+                    # Warning indicator for missing files (Requirement 14.2)
+                    missing_row = ttk.Frame(scope_content)
+                    missing_row.pack(anchor=tk.W, pady=1)
+                    ttk.Label(missing_row,
+                             text=f"  \u26a0 {lf_filename}  ({lf_rule_count:,} rules)",
+                             font=("TkDefaultFont", 8), foreground="#D32F2F").pack(side=tk.LEFT)
+                    ttk.Label(missing_row,
+                             text="  (file missing)",
+                             font=("TkDefaultFont", 7), foreground="#999999").pack(side=tk.LEFT)
             
-            # Separator and total
+            # "Managed Rule Groups" category (Req 17.5, 17.6)
+            if managed_rule_groups:
+                ttk.Label(scope_content, 
+                         text=f"Managed Rule Groups: {len(managed_rule_groups)} groups, {total_managed_rules:,} rules",
+                         font=("TkDefaultFont", 9, "bold")).pack(anchor=tk.W, pady=(8, 2))
+                
+                for mg in managed_rule_groups:
+                    ttk.Label(scope_content,
+                             text=f"  • {mg['name']}  ({mg.get('rule_count', 0):,} rules)",
+                             font=("TkDefaultFont", 8), foreground="#2E8B8B").pack(anchor=tk.W, pady=1)
+            
+            # Separator and total (Req 17.13)
             ttk.Separator(scope_content, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=5)
-            total_all = custom_rule_count + total_managed_rules
+            total_all = total_your_rules_display + total_managed_rules
             ttk.Label(scope_content,
                      text=f"Total Rules Analyzed: {total_all:,}",
                      font=("TkDefaultFont", 9, "bold")).pack(anchor=tk.W, pady=2)
             
-            # Managed Rule Group Effectiveness Summary
-            managed_rule_sids_dict = analysis_results.get('managed_rule_sids', {})
-            sid_stats = analysis_results.get('sid_stats', {})
-            
-            eff_frame = ttk.LabelFrame(left_column, text="Managed Rule Group Effectiveness")
-            eff_frame.pack(fill=tk.X, pady=(0, 10))
-            
-            eff_content = ttk.Frame(eff_frame)
-            eff_content.pack(padx=15, pady=10)
-            
-            # Table header
-            eff_header = ttk.Frame(eff_content)
-            eff_header.pack(fill=tk.X, pady=(0, 5))
-            ttk.Label(eff_header, text="Group", width=35, font=("TkDefaultFont", 8, "bold")).pack(side=tk.LEFT)
-            ttk.Label(eff_header, text="Total", width=8, font=("TkDefaultFont", 8, "bold")).pack(side=tk.LEFT)
-            ttk.Label(eff_header, text="w/Hits", width=8, font=("TkDefaultFont", 8, "bold")).pack(side=tk.LEFT)
-            ttk.Label(eff_header, text="Unused", width=8, font=("TkDefaultFont", 8, "bold")).pack(side=tk.LEFT)
-            ttk.Label(eff_header, text="Total Hits", width=10, font=("TkDefaultFont", 8, "bold")).pack(side=tk.LEFT)
-            
-            for mg in managed_rule_groups:
-                group_name = mg['name']
-                group_sids = managed_rule_sids_dict.get(group_name, [])
-                group_total = len(group_sids)
-                group_with_hits = sum(1 for sid in group_sids if sid in sid_stats and sid_stats[sid].get('hits', 0) > 0)
-                group_unused = group_total - group_with_hits
-                group_total_hits = sum(sid_stats.get(sid, {}).get('hits', 0) for sid in group_sids)
+            # Managed Rule Group Effectiveness Summary (Req 17.11 - unchanged for managed groups)
+            if managed_rule_groups:
+                managed_rule_sids_dict = analysis_results.get('managed_rule_sids', {})
+                sid_stats = analysis_results.get('sid_stats', {})
                 
-                row = ttk.Frame(eff_content)
-                row.pack(fill=tk.X, pady=1)
+                eff_frame = ttk.LabelFrame(left_column, text="Managed Rule Group Effectiveness")
+                eff_frame.pack(fill=tk.X, pady=(0, 10))
                 
-                # Truncate long group names
-                display_name = group_name[:33] + ".." if len(group_name) > 35 else group_name
-                ttk.Label(row, text=display_name, width=35, font=("TkDefaultFont", 8),
-                         foreground="#2E8B8B").pack(side=tk.LEFT)
-                ttk.Label(row, text=f"{group_total:,}", width=8, font=("TkDefaultFont", 8)).pack(side=tk.LEFT)
-                ttk.Label(row, text=f"{group_with_hits:,}", width=8, font=("TkDefaultFont", 8),
-                         foreground="#2E7D32").pack(side=tk.LEFT)
-                ttk.Label(row, text=f"{group_unused:,}", width=8, font=("TkDefaultFont", 8),
-                         foreground="#999999").pack(side=tk.LEFT)
-                ttk.Label(row, text=f"{group_total_hits:,}", width=10, font=("TkDefaultFont", 8)).pack(side=tk.LEFT)
+                eff_content = ttk.Frame(eff_frame)
+                eff_content.pack(padx=15, pady=10)
+                
+                # Table header
+                eff_header = ttk.Frame(eff_content)
+                eff_header.pack(fill=tk.X, pady=(0, 5))
+                ttk.Label(eff_header, text="Group", width=35, font=("TkDefaultFont", 8, "bold")).pack(side=tk.LEFT)
+                ttk.Label(eff_header, text="Total", width=8, font=("TkDefaultFont", 8, "bold")).pack(side=tk.LEFT)
+                ttk.Label(eff_header, text="w/Hits", width=8, font=("TkDefaultFont", 8, "bold")).pack(side=tk.LEFT)
+                ttk.Label(eff_header, text="Unused", width=8, font=("TkDefaultFont", 8, "bold")).pack(side=tk.LEFT)
+                ttk.Label(eff_header, text="Total Hits", width=10, font=("TkDefaultFont", 8, "bold")).pack(side=tk.LEFT)
+                
+                for mg in managed_rule_groups:
+                    group_name = mg['name']
+                    group_sids = managed_rule_sids_dict.get(group_name, [])
+                    group_total = len(group_sids)
+                    group_with_hits = sum(1 for sid in group_sids if sid in sid_stats and sid_stats[sid].get('hits', 0) > 0)
+                    group_unused = group_total - group_with_hits
+                    group_total_hits = sum(sid_stats.get(sid, {}).get('hits', 0) for sid in group_sids)
+                    
+                    row = ttk.Frame(eff_content)
+                    row.pack(fill=tk.X, pady=1)
+                    
+                    # Truncate long group names
+                    display_name = group_name[:33] + ".." if len(group_name) > 35 else group_name
+                    ttk.Label(row, text=display_name, width=35, font=("TkDefaultFont", 8),
+                             foreground="#2E8B8B").pack(side=tk.LEFT)
+                    ttk.Label(row, text=f"{group_total:,}", width=8, font=("TkDefaultFont", 8)).pack(side=tk.LEFT)
+                    ttk.Label(row, text=f"{group_with_hits:,}", width=8, font=("TkDefaultFont", 8),
+                             foreground="#2E7D32").pack(side=tk.LEFT)
+                    ttk.Label(row, text=f"{group_unused:,}", width=8, font=("TkDefaultFont", 8),
+                             foreground="#999999").pack(side=tk.LEFT)
+                    ttk.Label(row, text=f"{group_total_hits:,}", width=10, font=("TkDefaultFont", 8)).pack(side=tk.LEFT)
             
-            # Color legend
+            # Color legend distinguishing "Your Rules" from "Managed Rules" (Req 17.12)
             legend_frame = ttk.Frame(left_column)
             legend_frame.pack(fill=tk.X, pady=(0, 10))
             ttk.Label(legend_frame, text="Legend:", font=("TkDefaultFont", 8, "bold")).pack(side=tk.LEFT, padx=(0, 5))
-            ttk.Label(legend_frame, text="■ Custom rules", font=("TkDefaultFont", 8),
+            ttk.Label(legend_frame, text="■ Your Rules", font=("TkDefaultFont", 8),
                      foreground="#000000").pack(side=tk.LEFT, padx=(0, 10))
-            ttk.Label(legend_frame, text="■ Managed rules", font=("TkDefaultFont", 8),
-                     foreground="#2E8B8B").pack(side=tk.LEFT)
+            if managed_rule_groups:
+                ttk.Label(legend_frame, text="■ Managed Rules", font=("TkDefaultFont", 8),
+                         foreground="#2E8B8B").pack(side=tk.LEFT)
         
         # Get categories early for use in Quick Stats
         categories = analysis_results['categories']
@@ -2057,10 +2486,10 @@ Would you like to run a complete analysis?"""
         # Add scoring explanation content
         self._populate_scoring_explanation(scoring_content, analysis_results)
         
-        # Tab 2: All Rules (complete view of custom + managed rules)
+        # Tab 2: All Rules (complete view of custom + local + managed rules)
         managed_rule_groups_data = analysis_results.get('managed_rule_groups', [])
         total_managed = analysis_results.get('total_managed_rules', 0)
-        total_all_rules = analysis_results['total_rules'] + total_managed
+        total_all_rules = analysis_results.get('total_your_rules', analysis_results['total_rules']) + total_managed
         
         all_rules_tab = ttk.Frame(notebook)
         notebook.add(all_rules_tab, text=f"All Rules ({total_all_rules:,})")
@@ -2099,7 +2528,20 @@ Would you like to run a complete analysis?"""
         
         # Helper function to create sub-tab with treeview, actions, and stats
         def create_unused_sub_tab(parent_notebook, title, sids_list, bg_color):
-            """Create a sub-tab for unused rules with specified confidence level"""
+            """Create a sub-tab for unused rules with specified confidence level.
+            
+            Supports mixed-source rules: current file rules get checkboxes,
+            local file rules are read-only (no checkbox) with distinct styling.
+            """
+            # Determine source attribution for each SID
+            sid_to_source = analysis_results.get('sid_to_source', {})
+            local_file_rule_ages = analysis_results.get('local_file_rule_ages', {})
+            local_file_rules_text_map = analysis_results.get('local_file_rules_text', {})
+            local_file_sids_dict = analysis_results.get('local_file_sids', {})
+            
+            # Build reverse mapping: SID -> message for local file rules
+            local_file_rules_all = analysis_results.get('local_file_rules', {}) if 'local_file_rules' in analysis_results else {}
+            
             sub_tab = ttk.Frame(parent_notebook)
             parent_notebook.add(sub_tab, text=f"{title} ({len(sids_list)})")
             
@@ -2114,11 +2556,11 @@ Would you like to run a complete analysis?"""
             # Select All checkbox
             select_all_var = tk.BooleanVar(value=False)
             
-            # Treeview for rules
+            # Treeview for rules - add Source column for mixed-source display
             tree_container = ttk.Frame(content_frame)
             tree_container.pack(fill=tk.BOTH, expand=True, pady=(0, 10))
             
-            columns = ("☐", "Line", "SID", "Message", "Age of Rule (days)", "Last Modified")
+            columns = ("☐", "Line", "SID", "Message", "Age of Rule (days)", "Last Modified", "Source")
             tree = ttk.Treeview(tree_container, columns=columns, show="headings", height=10)
             
             tree.heading("☐", text="☐")
@@ -2127,13 +2569,15 @@ Would you like to run a complete analysis?"""
             tree.heading("Message", text="Message")
             tree.heading("Age of Rule (days)", text="Age of Rule (days)", command=lambda: self._sort_treeview(tree, "Age of Rule (days)", False))
             tree.heading("Last Modified", text="Last Modified", command=lambda: self._sort_treeview(tree, "Last Modified", False))
+            tree.heading("Source", text="Source", command=lambda: self._sort_treeview(tree, "Source", False))
             
             tree.column("☐", width=30, stretch=False, anchor=tk.CENTER)
             tree.column("Line", width=50, stretch=False)
             tree.column("SID", width=70, stretch=False)
-            tree.column("Message", width=400, stretch=True)
+            tree.column("Message", width=350, stretch=False)
             tree.column("Age of Rule (days)", width=120, stretch=False)
             tree.column("Last Modified", width=110, stretch=False)
+            tree.column("Source", width=130, stretch=False)
             
             # Scrollbars
             v_scrollbar = ttk.Scrollbar(tree_container, orient=tk.VERTICAL, command=tree.yview)
@@ -2147,8 +2591,9 @@ Would you like to run a complete analysis?"""
             tree_container.grid_rowconfigure(0, weight=1)
             tree_container.grid_columnconfigure(0, weight=1)
             
-            # Configure row colors
+            # Configure row colors - current file rows and local file rows (read-only)
             tree.tag_configure("row_color", background=bg_color)
+            tree.tag_configure("local_file_row", background="#E8EAF6", foreground="#5C6BC0")
             
             # Show placeholder message if sub-tab is empty
             if not sids_list:
@@ -2260,43 +2705,85 @@ Would you like to run a complete analysis?"""
                          font=("TkDefaultFont", 9), justify=tk.LEFT,
                          wraplength=600).pack(padx=20)
             else:
-                # Populate treeview with rule data
+                # Populate treeview with rule data (current file + local file rules)
                 for sid in sorted(sids_list):
-                    # Find rule in main rule list
-                    rule = next((r for r in self.parent.rules 
-                               if hasattr(r, 'sid') and r.sid == sid), None)
+                    source = sid_to_source.get(sid, "current_file")
+                    is_local_file = source.startswith("local:")
                     
-                    if rule:
-                        line_num = self.parent.rules.index(rule) + 1
-                        message = rule.message[:60] + "..." if len(rule.message) > 60 else rule.message
+                    if not is_local_file:
+                        # Current file rule - find in parent.rules
+                        rule = next((r for r in self.parent.rules 
+                                   if hasattr(r, 'sid') and r.sid == sid), None)
                         
-                        # Get stats from analysis results
+                        if rule:
+                            line_num = self.parent.rules.index(rule) + 1
+                            message = rule.message[:60] + "..." if len(rule.message) > 60 else rule.message
+                            
+                            # Get stats from analysis results
+                            sid_stat = sid_stats.get(sid, {})
+                            days = sid_stat.get('days_in_production')
+                            days_str = str(days) if days is not None else 'Unknown'
+                            
+                            last_mod = sid_stat.get('last_modified')
+                            if last_mod:
+                                if isinstance(last_mod, str):
+                                    last_mod_str = last_mod[:10]
+                                else:
+                                    last_mod_str = last_mod.strftime('%Y-%m-%d')
+                            else:
+                                last_mod_str = 'Unknown'
+                            
+                            source_label = "(current file)"
+                            tree.insert("", tk.END, 
+                                      values=("☐", line_num, sid, message, days_str, last_mod_str, source_label),
+                                      tags=("row_color",))
+                    else:
+                        # Local file rule - read-only, no checkbox
+                        source_filename = source[len("local:"):]  # Strip "local:" prefix
+                        
+                        # Get message from local_file_rules_text or parse from rule text
+                        rule_text = local_file_rules_text_map.get(sid, "")
+                        message = ""
+                        if rule_text:
+                            # Extract message from rule text using msg keyword
+                            import re
+                            msg_match = re.search(r'msg\s*:\s*"([^"]*)"', rule_text)
+                            if msg_match:
+                                message = msg_match.group(1)
+                        message = message[:60] + "..." if len(message) > 60 else message
+                        
+                        # Get rule age from local_file_rule_ages
                         sid_stat = sid_stats.get(sid, {})
-                        days = sid_stat.get('days_in_production')
+                        days = local_file_rule_ages.get(sid)
+                        if days is None:
+                            days = sid_stat.get('days_in_production')
                         days_str = str(days) if days is not None else 'Unknown'
                         
                         last_mod = sid_stat.get('last_modified')
                         if last_mod:
                             if isinstance(last_mod, str):
-                                last_mod_str = last_mod[:10]  # Just date part
+                                last_mod_str = last_mod[:10]
                             else:
                                 last_mod_str = last_mod.strftime('%Y-%m-%d')
                         else:
                             last_mod_str = 'Unknown'
                         
+                        # No checkbox for local file rules, line shows "—"
                         tree.insert("", tk.END, 
-                                  values=("☐", line_num, sid, message, days_str, last_mod_str),
-                                  tags=("row_color",))
+                                  values=("", "—", sid, message, days_str, last_mod_str, source_filename),
+                                  tags=("local_file_row",))
             
-            # Checkbox toggle handler
+            # Checkbox toggle handler - only for current file rules
             def on_tree_click(event):
                 item = tree.identify_row(event.y)
                 col = tree.identify_column(event.x)
                 
                 if col == '#1' and item:  # Checkbox column
                     values = tree.item(item, 'values')
-                    new_check = "☑" if values[0] == "☐" else "☐"
-                    tree.item(item, values=(new_check,) + values[1:])
+                    # Only toggle if this row has a checkbox (current file rules)
+                    if values[0] in ("☐", "☑"):
+                        new_check = "☑" if values[0] == "☐" else "☐"
+                        tree.item(item, values=(new_check,) + values[1:])
             
             tree.bind("<Button-1>", on_tree_click)
             
@@ -2306,9 +2793,119 @@ Would you like to run a complete analysis?"""
                 if not item:
                     return
                 
-                # Get the line number from the clicked item (column index 1, after checkbox)
+                # Get the values from the clicked item
                 values = tree.item(item, 'values')
-                if not values or len(values) < 2:
+                if not values or len(values) < 7:
+                    return
+                
+                # Check if this is a local file rule (no checkbox, line is "—")
+                tags = tree.item(item, 'tags')
+                if "local_file_row" in tags:
+                    # Local file rule — show detail popup (Requirement 9.1, 12.5)
+                    try:
+                        sid = int(str(values[2]).replace(',', ''))  # SID column
+                    except (ValueError, TypeError):
+                        return
+                    
+                    source_filename = str(values[6])  # Source column
+                    
+                    # Find source file path from local_file_metadata
+                    local_file_metadata_list = analysis_results.get('local_file_metadata', [])
+                    source_path = ''
+                    for meta in local_file_metadata_list:
+                        if meta.get('filename', '') == source_filename:
+                            source_path = meta.get('path', '')
+                            break
+                    
+                    # Get rule text and stats
+                    rule_text = local_file_rules_text_map.get(sid, '(rule text not available)')
+                    rule_stats = sid_stats.get(sid, {})
+                    
+                    # Show detail popup
+                    detail = tk.Toplevel(results_window)
+                    detail.title(f"Local File Rule Detail \u2014 SID {sid}")
+                    detail.geometry("700x400")
+                    detail.transient(results_window)
+                    detail.grab_set()
+                    detail.resizable(True, True)
+                    detail.minsize(500, 300)
+                    detail.geometry("+%d+%d" % (
+                        results_window.winfo_rootx() + 80,
+                        results_window.winfo_rooty() + 120
+                    ))
+                    
+                    df = ttk.Frame(detail)
+                    df.pack(fill=tk.BOTH, expand=True, padx=20, pady=20)
+                    
+                    # SID header in warm orange (distinct from teal managed rules)
+                    ttk.Label(df, text=f"SID {sid}",
+                             font=("TkDefaultFont", 12, "bold"),
+                             foreground="#C75000").pack(anchor=tk.W, pady=(0, 5))
+                    ttk.Label(df, text=f"Source: {source_filename}",
+                             font=("TkDefaultFont", 9), foreground="#C75000").pack(anchor=tk.W, pady=(0, 5))
+                    
+                    # Hit statistics (unused rules have 0 hits)
+                    hits = rule_stats.get('hits', 0)
+                    hits_per_day = rule_stats.get('hits_per_day', 0.0)
+                    percent = rule_stats.get('percent', 0.0)
+                    ttk.Label(df, text=f"Hits: {hits:,}  |  Hits/Day: {hits_per_day:.1f}  |  Traffic: {percent:.1f}%",
+                             font=("TkDefaultFont", 9)).pack(anchor=tk.W, pady=(0, 10))
+                    
+                    # Full rule text
+                    ttk.Label(df, text="Full Rule Text:",
+                             font=("TkDefaultFont", 10, "bold")).pack(anchor=tk.W, pady=(0, 5))
+                    
+                    rule_text_widget = tk.Text(df, height=6, wrap=tk.WORD,
+                                              font=("Consolas", 9), bg="#F5F5F5")
+                    rule_text_widget.pack(fill=tk.BOTH, expand=True, pady=(0, 10))
+                    rule_text_widget.insert(tk.END, rule_text)
+                    rule_text_widget.config(state=tk.DISABLED)
+                    rule_text_widget.bind("<Control-c>", lambda e: None)
+                    rule_text_widget.bind("<Command-c>", lambda e: None)
+                    
+                    # Buttons frame
+                    btn_frame = ttk.Frame(df)
+                    btn_frame.pack(fill=tk.X, pady=(5, 0))
+                    
+                    def open_in_editor_unused(s_path=source_path, s_filename=source_filename, s_sid=sid):
+                        if s_path and os.path.isfile(s_path):
+                            if self.parent.modified:
+                                response = messagebox.askyesnocancel(
+                                    "Unsaved Changes",
+                                    "The current file has unsaved changes.\n\n"
+                                    "Save before opening the local file?",
+                                    parent=detail
+                                )
+                                if response is None:
+                                    return
+                                elif response:
+                                    self.parent.save_file()
+                            detail.destroy()
+                            results_window.destroy()
+                            self.parent.load_rules_from_file(s_path)
+                            # Navigate to the rule in the main editor treeview
+                            all_items = self.parent.tree.get_children()
+                            for i, r in enumerate(self.parent.rules):
+                                if hasattr(r, 'sid') and r.sid == s_sid:
+                                    if i < len(all_items):
+                                        self.parent.tree.selection_set(all_items[i])
+                                        self.parent.tree.focus(all_items[i])
+                                        self.parent.tree.see(all_items[i])
+                                    break
+                        else:
+                            messagebox.showwarning("File Unavailable",
+                                                f"The file '{s_filename}' is no longer available at:\n{s_path}",
+                                                parent=detail)
+                    
+                    if source_path and os.path.isfile(source_path):
+                        ttk.Button(btn_frame, text="Open in Editor", command=open_in_editor_unused).pack(side=tk.LEFT, padx=(0, 10))
+                    else:
+                        btn = ttk.Button(btn_frame, text="Open in Editor", state=tk.DISABLED)
+                        btn.pack(side=tk.LEFT, padx=(0, 10))
+                        ttk.Label(btn_frame, text="(file no longer available)",
+                                 font=("TkDefaultFont", 8), foreground="#999999").pack(side=tk.LEFT)
+                    
+                    ttk.Button(btn_frame, text="Close", command=detail.destroy).pack(side=tk.RIGHT)
                     return
                 
                 try:
@@ -2321,16 +2918,16 @@ Would you like to run a complete analysis?"""
             
             tree.bind("<Double-1>", on_unused_tree_double_click)
             
-            # Spacebar handler to toggle checkboxes for all selected rows
+            # Spacebar handler to toggle checkboxes for selected rows (current file only)
             def on_tree_spacebar(event):
                 selection = tree.selection()
                 if not selection:
                     return 'break'
                 
-                # Toggle all selected rows
+                # Toggle only current file rows (those with checkboxes)
                 for item in selection:
                     values = tree.item(item, 'values')
-                    if values and len(values) > 0:
+                    if values and len(values) > 0 and values[0] in ("☐", "☑"):
                         new_check = "☑" if values[0] == "☐" else "☐"
                         tree.item(item, values=(new_check,) + values[1:])
                 
@@ -2338,12 +2935,14 @@ Would you like to run a complete analysis?"""
             
             tree.bind("<space>", on_tree_spacebar)
             
-            # Select All handler
+            # Select All handler - only toggles current file rules
             def on_select_all():
                 check_state = "☑" if select_all_var.get() else "☐"
                 for item in tree.get_children():
                     values = tree.item(item, 'values')
-                    tree.item(item, values=(check_state,) + values[1:])
+                    # Only toggle rows that have a checkbox (current file rules)
+                    if values[0] in ("☐", "☑"):
+                        tree.item(item, values=(check_state,) + values[1:])
             
             ttk.Checkbutton(controls_frame, text="Select All", 
                           variable=select_all_var,
@@ -2359,11 +2958,11 @@ Would you like to run a complete analysis?"""
             
             # Apply Action button
             def on_apply_action():
-                # Get checked items
+                # Get checked items - only current file rules can be checked
                 checked_sids = []
                 for item in tree.get_children():
                     values = tree.item(item, 'values')
-                    if values[0] == "☑":  # Checked
+                    if values[0] == "☑":  # Checked (only current file rules have checkboxes)
                         checked_sids.append(int(values[2]))  # SID column
                 
                 if not checked_sids:
@@ -2493,11 +3092,11 @@ Would you like to run a complete analysis?"""
         
         low_freq_select_all_var = tk.BooleanVar(value=False)
         
-        # Treeview for low-frequency rules
+        # Treeview for low-frequency rules - with Source column for mixed-source display
         low_freq_tree_container = ttk.Frame(low_freq_content)
         low_freq_tree_container.pack(fill=tk.BOTH, expand=True, pady=(0, 10))
         
-        low_freq_columns = ("☐", "Line", "SID", "Hits", "Hits/Day", "Last Hit", "Message")
+        low_freq_columns = ("☐", "Line", "SID", "Hits", "Hits/Day", "Last Hit", "Message", "Source")
         low_freq_tree = ttk.Treeview(low_freq_tree_container, columns=low_freq_columns, 
                                      show="headings", height=12)
         
@@ -2508,6 +3107,7 @@ Would you like to run a complete analysis?"""
         low_freq_tree.heading("Hits/Day", text="Hits/Day", command=lambda: self._sort_treeview(low_freq_tree, "Hits/Day", False))
         low_freq_tree.heading("Last Hit", text="Last Hit", command=lambda: self._sort_treeview(low_freq_tree, "Last Hit", False))
         low_freq_tree.heading("Message", text="Message")
+        low_freq_tree.heading("Source", text="Source", command=lambda: self._sort_treeview(low_freq_tree, "Source", False))
         
         low_freq_tree.column("☐", width=30, stretch=False, anchor=tk.CENTER)
         low_freq_tree.column("Line", width=50, stretch=False)
@@ -2515,7 +3115,8 @@ Would you like to run a complete analysis?"""
         low_freq_tree.column("Hits", width=70, stretch=False)
         low_freq_tree.column("Hits/Day", width=80, stretch=False)
         low_freq_tree.column("Last Hit", width=90, stretch=False)
-        low_freq_tree.column("Message", width=450, stretch=True)
+        low_freq_tree.column("Message", width=350, stretch=False)
+        low_freq_tree.column("Source", width=130, stretch=False)
         
         # Scrollbars
         low_freq_v_scrollbar = ttk.Scrollbar(low_freq_tree_container, orient=tk.VERTICAL, 
@@ -2532,18 +3133,69 @@ Would you like to run a complete analysis?"""
         low_freq_tree_container.grid_rowconfigure(0, weight=1)
         low_freq_tree_container.grid_columnconfigure(0, weight=1)
         
+        # Configure tag for local file rows (read-only styling)
+        low_freq_tree.tag_configure("local_file_row", background="#E8EAF6", foreground="#5C6BC0")
+        
+        # Get sid_to_source and local file data for mixed-source display
+        low_freq_sid_to_source = analysis_results.get('sid_to_source', {})
+        low_freq_local_file_rules_text = analysis_results.get('local_file_rules_text', {})
+        
         # Populate with low-frequency rules (exclude untracked SIDs - already set above)
         low_freq_sids = [sid for sid, stat in sid_stats.items() 
                         if stat.get('category') == 'low_freq' and sid not in untracked_sids_set]
         
         for sid in sorted(low_freq_sids):
-            # Find rule in main rule list
-            rule = next((r for r in self.parent.rules 
-                       if hasattr(r, 'sid') and r.sid == sid), None)
+            source = low_freq_sid_to_source.get(sid, "current_file")
+            is_local_file = source.startswith("local:")
             
-            if rule:
-                line_num = self.parent.rules.index(rule) + 1
-                message = rule.message[:50] + "..." if len(rule.message) > 50 else rule.message
+            if not is_local_file:
+                # Current file rule - find in parent.rules
+                rule = next((r for r in self.parent.rules 
+                           if hasattr(r, 'sid') and r.sid == sid), None)
+                
+                if rule:
+                    line_num = self.parent.rules.index(rule) + 1
+                    message = rule.message[:50] + "..." if len(rule.message) > 50 else rule.message
+                    
+                    # Get stats
+                    stat = sid_stats.get(sid, {})
+                    hits = stat.get('hits', 0)
+                    hits_per_day = stat.get('hits_per_day', 0.0)
+                    hits_per_day_str = f"{hits_per_day:.1f}"
+                    last_hit_days = stat.get('last_hit_days', 999)
+                    last_hit_str = f"{last_hit_days}d ago" if last_hit_days < 999 else 'Unknown'
+                    
+                    # Determine color gradient by staleness
+                    if last_hit_days >= 21:
+                        bg_color_row = "#ffcc66"  # Orange (>21d)
+                    elif last_hit_days >= 14:
+                        bg_color_row = "#ffdd88"  # Yellow-orange (14-21d)
+                    elif last_hit_days >= 7:
+                        bg_color_row = "#ffeeaa"  # Light yellow (7-14d)
+                    else:
+                        bg_color_row = "#ffffcc"  # Very light yellow (<7d)
+                    
+                    # Configure unique tag for this row's color
+                    tag_name = f"low_freq_{bg_color_row}"
+                    low_freq_tree.tag_configure(tag_name, background=bg_color_row)
+                    
+                    source_label = "(current file)"
+                    low_freq_tree.insert("", tk.END, 
+                                        values=("☐", line_num, sid, hits, hits_per_day_str, last_hit_str, message, source_label),
+                                        tags=(tag_name,))
+            else:
+                # Local file rule - read-only, no checkbox
+                source_filename = source[len("local:"):]
+                
+                # Get message from local file rules text
+                rule_text = low_freq_local_file_rules_text.get(sid, "")
+                message = ""
+                if rule_text:
+                    import re
+                    msg_match = re.search(r'msg\s*:\s*"([^"]*)"', rule_text)
+                    if msg_match:
+                        message = msg_match.group(1)
+                message = message[:50] + "..." if len(message) > 50 else message
                 
                 # Get stats
                 stat = sid_stats.get(sid, {})
@@ -2553,33 +3205,22 @@ Would you like to run a complete analysis?"""
                 last_hit_days = stat.get('last_hit_days', 999)
                 last_hit_str = f"{last_hit_days}d ago" if last_hit_days < 999 else 'Unknown'
                 
-                # Determine color gradient by staleness
-                if last_hit_days >= 21:
-                    bg_color = "#ffcc66"  # Orange (>21d)
-                elif last_hit_days >= 14:
-                    bg_color = "#ffdd88"  # Yellow-orange (14-21d)
-                elif last_hit_days >= 7:
-                    bg_color = "#ffeeaa"  # Light yellow (7-14d)
-                else:
-                    bg_color = "#ffffcc"  # Very light yellow (<7d)
-                
-                # Configure unique tag for this row's color
-                tag_name = f"low_freq_{bg_color}"
-                low_freq_tree.tag_configure(tag_name, background=bg_color)
-                
+                # No checkbox for local file rules, line shows "—"
                 low_freq_tree.insert("", tk.END, 
-                                    values=("☐", line_num, sid, hits, hits_per_day_str, last_hit_str, message),
-                                    tags=(tag_name,))
+                                    values=("", "—", sid, hits, hits_per_day_str, last_hit_str, message, source_filename),
+                                    tags=("local_file_row",))
         
-        # Checkbox toggle handler
+        # Checkbox toggle handler - only for current file rules
         def on_low_freq_tree_click(event):
             item = low_freq_tree.identify_row(event.y)
             col = low_freq_tree.identify_column(event.x)
             
             if col == '#1' and item:  # Checkbox column
                 values = low_freq_tree.item(item, 'values')
-                new_check = "☑" if values[0] == "☐" else "☐"
-                low_freq_tree.item(item, values=(new_check,) + values[1:])
+                # Only toggle if this row has a checkbox (current file rules)
+                if values[0] in ("☐", "☑"):
+                    new_check = "☑" if values[0] == "☐" else "☐"
+                    low_freq_tree.item(item, values=(new_check,) + values[1:])
         
         low_freq_tree.bind("<Button-1>", on_low_freq_tree_click)
         
@@ -2589,9 +3230,119 @@ Would you like to run a complete analysis?"""
             if not item:
                 return
             
-            # Get the line number from the clicked item (column index 1, after checkbox)
+            # Get the values from the clicked item
             values = low_freq_tree.item(item, 'values')
             if not values or len(values) < 2:
+                return
+            
+            # Check if this is a local file rule (no checkbox, line is "—")
+            tags = low_freq_tree.item(item, 'tags')
+            if "local_file_row" in tags:
+                # Local file rule — show detail popup (Requirement 9.1)
+                try:
+                    sid = int(str(values[2]).replace(',', ''))  # SID column
+                except (ValueError, TypeError):
+                    return
+                
+                source_filename = str(values[7])  # Source column
+                
+                # Find source file path from local_file_metadata
+                local_file_metadata_list = analysis_results.get('local_file_metadata', [])
+                source_path = ''
+                for meta in local_file_metadata_list:
+                    if meta.get('filename', '') == source_filename:
+                        source_path = meta.get('path', '')
+                        break
+                
+                # Get rule text and stats
+                rule_text = low_freq_local_file_rules_text.get(sid, '(rule text not available)')
+                rule_stats = sid_stats.get(sid, {})
+                
+                # Show detail popup
+                detail = tk.Toplevel(results_window)
+                detail.title(f"Local File Rule Detail \u2014 SID {sid}")
+                detail.geometry("700x400")
+                detail.transient(results_window)
+                detail.grab_set()
+                detail.resizable(True, True)
+                detail.minsize(500, 300)
+                detail.geometry("+%d+%d" % (
+                    results_window.winfo_rootx() + 80,
+                    results_window.winfo_rooty() + 120
+                ))
+                
+                df = ttk.Frame(detail)
+                df.pack(fill=tk.BOTH, expand=True, padx=20, pady=20)
+                
+                # SID header in warm orange
+                ttk.Label(df, text=f"SID {sid}",
+                         font=("TkDefaultFont", 12, "bold"),
+                         foreground="#C75000").pack(anchor=tk.W, pady=(0, 5))
+                ttk.Label(df, text=f"Source: {source_filename}",
+                         font=("TkDefaultFont", 9), foreground="#C75000").pack(anchor=tk.W, pady=(0, 5))
+                
+                # Hit statistics
+                hits = rule_stats.get('hits', 0)
+                hits_per_day = rule_stats.get('hits_per_day', 0.0)
+                percent = rule_stats.get('percent', 0.0)
+                ttk.Label(df, text=f"Hits: {hits:,}  |  Hits/Day: {hits_per_day:.1f}  |  Traffic: {percent:.1f}%",
+                         font=("TkDefaultFont", 9)).pack(anchor=tk.W, pady=(0, 10))
+                
+                # Full rule text
+                ttk.Label(df, text="Full Rule Text:",
+                         font=("TkDefaultFont", 10, "bold")).pack(anchor=tk.W, pady=(0, 5))
+                
+                rule_text_widget = tk.Text(df, height=6, wrap=tk.WORD,
+                                          font=("Consolas", 9), bg="#F5F5F5")
+                rule_text_widget.pack(fill=tk.BOTH, expand=True, pady=(0, 10))
+                rule_text_widget.insert(tk.END, rule_text)
+                rule_text_widget.config(state=tk.DISABLED)
+                rule_text_widget.bind("<Control-c>", lambda e: None)
+                rule_text_widget.bind("<Command-c>", lambda e: None)
+                
+                # Buttons frame
+                btn_frame = ttk.Frame(df)
+                btn_frame.pack(fill=tk.X, pady=(5, 0))
+                
+                def open_in_editor_low_freq(s_path=source_path, s_filename=source_filename, s_sid=sid):
+                    if s_path and os.path.isfile(s_path):
+                        if self.parent.modified:
+                            response = messagebox.askyesnocancel(
+                                "Unsaved Changes",
+                                "The current file has unsaved changes.\n\n"
+                                "Save before opening the local file?",
+                                parent=detail
+                            )
+                            if response is None:
+                                return
+                            elif response:
+                                self.parent.save_file()
+                        detail.destroy()
+                        results_window.destroy()
+                        self.parent.load_rules_from_file(s_path)
+                        # Navigate to the rule in the main editor treeview
+                        all_items = self.parent.tree.get_children()
+                        for i, r in enumerate(self.parent.rules):
+                            if hasattr(r, 'sid') and r.sid == s_sid:
+                                if i < len(all_items):
+                                    self.parent.tree.selection_set(all_items[i])
+                                    self.parent.tree.focus(all_items[i])
+                                    self.parent.tree.see(all_items[i])
+                                break
+                    else:
+                        messagebox.showwarning("File Unavailable",
+                                            f"The file '{s_filename}' is no longer available at:\n{s_path}",
+                                            parent=detail)
+                
+                if source_path and os.path.isfile(source_path):
+                    ttk.Button(btn_frame, text="Open in Editor", command=open_in_editor_low_freq).pack(side=tk.LEFT, padx=(0, 10))
+                else:
+                    btn = ttk.Button(btn_frame, text="Open in Editor", state=tk.DISABLED)
+                    btn.pack(side=tk.LEFT, padx=(0, 10))
+                    ttk.Label(btn_frame, text="(file no longer available)",
+                             font=("TkDefaultFont", 8), foreground="#999999").pack(side=tk.LEFT)
+                
+                ttk.Button(btn_frame, text="Close", command=detail.destroy).pack(side=tk.RIGHT)
                 return
             
             try:
@@ -2604,16 +3355,16 @@ Would you like to run a complete analysis?"""
         
         low_freq_tree.bind("<Double-1>", on_low_freq_double_click)
         
-        # Spacebar handler to toggle checkboxes for all selected rows
+        # Spacebar handler to toggle checkboxes for selected rows (current file only)
         def on_low_freq_spacebar(event):
             selection = low_freq_tree.selection()
             if not selection:
                 return 'break'
             
-            # Toggle all selected rows
+            # Toggle only current file rows (those with checkboxes)
             for item in selection:
                 values = low_freq_tree.item(item, 'values')
-                if values and len(values) > 0:
+                if values and len(values) > 0 and values[0] in ("☐", "☑"):
                     new_check = "☑" if values[0] == "☐" else "☐"
                     low_freq_tree.item(item, values=(new_check,) + values[1:])
             
@@ -2621,12 +3372,14 @@ Would you like to run a complete analysis?"""
         
         low_freq_tree.bind("<space>", on_low_freq_spacebar)
         
-        # Select All handler
+        # Select All handler - only toggles current file rules
         def on_low_freq_select_all():
             check_state = "☑" if low_freq_select_all_var.get() else "☐"
             for item in low_freq_tree.get_children():
                 values = low_freq_tree.item(item, 'values')
-                low_freq_tree.item(item, values=(check_state,) + values[1:])
+                # Only toggle rows that have a checkbox (current file rules)
+                if values[0] in ("☐", "☑"):
+                    low_freq_tree.item(item, values=(check_state,) + values[1:])
         
         ttk.Checkbutton(low_freq_controls, text="Select All", 
                        variable=low_freq_select_all_var,
@@ -2642,11 +3395,11 @@ Would you like to run a complete analysis?"""
         
         # Apply Action button
         def on_low_freq_apply_action():
-            # Get checked items
+            # Get checked items - only current file rules can be checked
             checked_sids = []
             for item in low_freq_tree.get_children():
                 values = low_freq_tree.item(item, 'values')
-                if values[0] == "☑":  # Checked
+                if values[0] == "☑":  # Checked (only current file rules have checkboxes)
                     checked_sids.append(int(values[2]))  # SID column
             
             if not checked_sids:
@@ -2783,18 +3536,39 @@ Would you like to run a complete analysis?"""
                  text="Top Performing Rules (Pareto Analysis):",
                  font=("TkDefaultFont", 11, "bold")).pack(anchor=tk.W, pady=(0, 10))
         
-        # Get top 20 rules sorted by hits descending
-        sorted_rules = sorted(sid_stats.items(), key=lambda x: x[1]['hits'], reverse=True)
+        # Build unified "Your Rules" pool for Pareto analysis
+        # This includes both current file rules AND local file rules (Requirement 18.3)
+        sid_to_source = analysis_results.get('sid_to_source', {})
+        local_file_sids_dict = analysis_results.get('local_file_sids', {})
+        local_file_rules_text = analysis_results.get('local_file_rules_text', {})
+        managed_sid_to_group = analysis_results.get('managed_sid_to_group', {})
+        
+        # Collect all "Your Rules" SIDs (current file + local files)
+        your_rules_sids = set()
+        for sid in sid_stats:
+            source = sid_to_source.get(sid, '')
+            if source == 'current_file' or source.startswith('local:'):
+                your_rules_sids.add(sid)
+            elif not source.startswith('managed:') and sid not in managed_sid_to_group:
+                # Backward compat: SIDs in current file rules without sid_to_source
+                rule = next((r for r in self.parent.rules 
+                           if hasattr(r, 'sid') and r.sid == sid), None)
+                if rule:
+                    your_rules_sids.add(sid)
+        
+        # Get top 20 "Your Rules" sorted by hits descending (unified Pareto)
+        your_rules_stats = [(sid, sid_stats[sid]) for sid in your_rules_sids if sid in sid_stats]
+        sorted_rules = sorted(your_rules_stats, key=lambda x: x[1]['hits'], reverse=True)
         top_20 = sorted_rules[:20]
         
-        # Calculate total hits for percentage calculations
+        # Calculate total hits for percentage calculations (across ALL rules for accurate %)
         total_hits = sum(stat['hits'] for stat in sid_stats.values())
         
         # Treeview for top 20 rules (read-only, no checkboxes)
         eff_tree_container = ttk.Frame(eff_content)
         eff_tree_container.pack(fill=tk.BOTH, expand=False, pady=(0, 10))
         
-        eff_columns = ("Line", "SID", "Hits", "Hits/Day", "% Traffic", "Cumulative %", "Broad", "Message")
+        eff_columns = ("Line", "SID", "Hits", "Hits/Day", "% Traffic", "Cumulative %", "Broad", "Source", "Message")
         eff_tree = ttk.Treeview(eff_tree_container, columns=eff_columns, show="headings", height=20)
         
         eff_tree.heading("Line", text="Line", command=lambda: self._sort_treeview(eff_tree, "Line", False))
@@ -2804,6 +3578,7 @@ Would you like to run a complete analysis?"""
         eff_tree.heading("% Traffic", text="% Traffic", command=lambda: self._sort_treeview(eff_tree, "% Traffic", False))
         eff_tree.heading("Cumulative %", text="Cumulative %", command=lambda: self._sort_treeview(eff_tree, "Cumulative %", False))
         eff_tree.heading("Broad", text="Broad")
+        eff_tree.heading("Source", text="Source")
         eff_tree.heading("Message", text="Message")
         
         eff_tree.column("Line", width=50, stretch=False)
@@ -2813,7 +3588,8 @@ Would you like to run a complete analysis?"""
         eff_tree.column("% Traffic", width=80, stretch=False)
         eff_tree.column("Cumulative %", width=100, stretch=False)
         eff_tree.column("Broad", width=60, stretch=False, anchor=tk.CENTER)
-        eff_tree.column("Message", width=350, stretch=True)
+        eff_tree.column("Source", width=140, stretch=False)
+        eff_tree.column("Message", width=300, stretch=False)
         
         # Scrollbars
         eff_v_scrollbar = ttk.Scrollbar(eff_tree_container, orient=tk.VERTICAL, command=eff_tree.yview)
@@ -2832,15 +3608,143 @@ Would you like to run a complete analysis?"""
         eff_tree.tag_configure("high_broad", foreground="#FF6F00")      # Orange
         eff_tree.tag_configure("medium_broad", foreground="#FFA000")    # Amber
         eff_tree.tag_configure("normal", foreground="#2E7D32")          # Green
+        # Local file rules use a distinct warm orange color (NOT teal which is for managed rules)
+        eff_tree.tag_configure("local_file_rule", foreground="#C75000")  # Warm orange for local file rules
+        eff_tree.tag_configure("local_critical_broad", foreground="#D32F2F")  # Red (broadness takes priority)
+        eff_tree.tag_configure("local_high_broad", foreground="#FF6F00")
+        eff_tree.tag_configure("local_medium_broad", foreground="#FFA000")
         
-        # Double-click handler to jump to rule in main editor
+        # Double-click handler: current-file rules jump to editor, local file rules show detail popup
         def on_eff_tree_double_click(event):
             item = eff_tree.identify_row(event.y)
             if not item:
                 return
             
-            # Get the line number from the clicked item (first column)
             values = eff_tree.item(item, 'values')
+            if not values:
+                return
+            
+            tags = eff_tree.item(item, 'tags')
+            
+            # Check if this is a local file rule
+            if 'local_file_rule' in tags or 'local_critical_broad' in tags or 'local_high_broad' in tags or 'local_medium_broad' in tags:
+                # Local file rule — show detail popup (Requirement 18.4, 18.5)
+                try:
+                    sid = int(str(values[1]).replace(',', ''))  # SID column (index 1)
+                except (ValueError, TypeError):
+                    return
+                
+                source_label = str(values[7]) if len(values) > 7 else ''  # Source column
+                # Extract filename from source label like "[extra.suricata]"
+                source_filename = source_label.replace('[', '').replace(']', '').strip()
+                
+                # Find source file path from local_file_metadata
+                local_file_metadata = analysis_results.get('local_file_metadata', [])
+                source_path = ''
+                for meta in local_file_metadata:
+                    if meta.get('filename', '') == source_filename:
+                        source_path = meta.get('path', '')
+                        break
+                
+                # Get rule text and stats
+                rule_text = local_file_rules_text.get(sid, '(rule text not available)')
+                rule_stats = sid_stats.get(sid, {})
+                
+                # Show detail popup
+                detail = tk.Toplevel(results_window)
+                detail.title(f"Local File Rule Detail — SID {sid}")
+                detail.geometry("700x400")
+                detail.transient(results_window)
+                detail.grab_set()
+                detail.resizable(True, True)
+                detail.minsize(500, 300)
+                detail.geometry("+%d+%d" % (
+                    results_window.winfo_rootx() + 80,
+                    results_window.winfo_rooty() + 120
+                ))
+                
+                df = ttk.Frame(detail)
+                df.pack(fill=tk.BOTH, expand=True, padx=20, pady=20)
+                
+                # SID header in warm orange (distinct from teal managed rules)
+                ttk.Label(df, text=f"SID {sid}",
+                         font=("TkDefaultFont", 12, "bold"),
+                         foreground="#C75000").pack(anchor=tk.W, pady=(0, 5))
+                ttk.Label(df, text=f"Source: {source_filename}",
+                         font=("TkDefaultFont", 9), foreground="#C75000").pack(anchor=tk.W, pady=(0, 5))
+                
+                # Hit statistics
+                hits = rule_stats.get('hits', 0)
+                hits_per_day = rule_stats.get('hits_per_day', 0.0)
+                percent = rule_stats.get('percent', 0.0)
+                ttk.Label(df, text=f"Hits: {hits:,}  |  Hits/Day: {hits_per_day:.1f}  |  Traffic: {percent:.1f}%",
+                         font=("TkDefaultFont", 9)).pack(anchor=tk.W, pady=(0, 10))
+                
+                # Full rule text
+                ttk.Label(df, text="Full Rule Text:",
+                         font=("TkDefaultFont", 10, "bold")).pack(anchor=tk.W, pady=(0, 5))
+                
+                rule_text_widget = tk.Text(df, height=6, wrap=tk.WORD,
+                                          font=("Consolas", 9), bg="#F5F5F5")
+                rule_text_widget.pack(fill=tk.BOTH, expand=True, pady=(0, 10))
+                rule_text_widget.insert(tk.END, rule_text)
+                rule_text_widget.config(state=tk.DISABLED)
+                # Enable copy bindings for read-only text
+                rule_text_widget.bind("<Control-c>", lambda e: None)
+                rule_text_widget.bind("<Command-c>", lambda e: None)
+                
+                # Buttons frame - packed at bottom before expandable content
+                btn_frame = ttk.Frame(df)
+                btn_frame.pack(fill=tk.X, pady=(5, 0))
+                
+                # "Open in Editor" button (Requirement 18.5)
+                def open_in_editor():
+                    if source_path and os.path.isfile(source_path):
+                        # Check for unsaved changes
+                        if self.parent.modified:
+                            response = messagebox.askyesnocancel(
+                                "Unsaved Changes",
+                                "The current file has unsaved changes.\n\n"
+                                "Save before opening the local file?",
+                                parent=detail
+                            )
+                            if response is None:
+                                # Cancel — keep popup open
+                                return
+                            elif response:
+                                # Save first
+                                self.parent.save_file()
+                        
+                        # Load the local file and navigate to rule
+                        detail.destroy()
+                        results_window.destroy()
+                        self.parent.load_rules_from_file(source_path)
+                        # Navigate to the rule in the main editor treeview
+                        all_items = self.parent.tree.get_children()
+                        for i, r in enumerate(self.parent.rules):
+                            if hasattr(r, 'sid') and r.sid == sid:
+                                if i < len(all_items):
+                                    self.parent.tree.selection_set(all_items[i])
+                                    self.parent.tree.focus(all_items[i])
+                                    self.parent.tree.see(all_items[i])
+                                break
+                    else:
+                        messagebox.showwarning("File Unavailable",
+                                            f"The file '{source_filename}' is no longer available at:\n{source_path}",
+                                            parent=detail)
+                
+                if source_path and os.path.isfile(source_path):
+                    ttk.Button(btn_frame, text="Open in Editor", command=open_in_editor).pack(side=tk.LEFT, padx=(0, 10))
+                else:
+                    btn = ttk.Button(btn_frame, text="Open in Editor", state=tk.DISABLED)
+                    btn.pack(side=tk.LEFT, padx=(0, 10))
+                    ttk.Label(btn_frame, text="(file no longer available)",
+                             font=("TkDefaultFont", 8), foreground="#999999").pack(side=tk.LEFT)
+                
+                ttk.Button(btn_frame, text="Close", command=detail.destroy).pack(side=tk.RIGHT)
+                return
+            
+            # Current file rule — jump to line in main editor (existing behavior)
             if not values or not values[0]:
                 return
             
@@ -2854,47 +3758,76 @@ Would you like to run a complete analysis?"""
         
         eff_tree.bind("<Double-1>", on_eff_tree_double_click)
         
-        # Populate with top 20 rules
+        # Populate with top 20 rules from unified "Your Rules" pool
         cumulative_percent = 0.0
         broad_rules = []  # Track rules >10% for detailed analysis
         
         for idx, (sid, stats) in enumerate(top_20):
-            # Find rule in main rule list
+            # Determine the source of this rule
+            source = sid_to_source.get(sid, 'current_file')
+            is_local_file_rule = source.startswith('local:')
+            
+            # Find rule — check current file rules first, then local file rules
             rule = next((r for r in self.parent.rules 
                        if hasattr(r, 'sid') and r.sid == sid), None)
             
             if rule:
+                # Current file rule
                 line_num = self.parent.rules.index(rule) + 1
                 message = rule.message[:50] + "..." if len(rule.message) > 50 else rule.message
-                
-                hits = stats.get('hits', 0)
-                hits_per_day = stats.get('hits_per_day', 0.0)
-                percent = stats.get('percent', 0.0)
-                cumulative_percent += percent
-                
-                # Determine broadness indicator
-                if percent > 30:
-                    indicator = "🔴"
-                    tag = "critical_broad"
-                    if percent > 10:
-                        broad_rules.append((sid, stats, rule, percent, "CRITICAL"))
-                elif percent > 15:
-                    indicator = "🟡"
-                    tag = "high_broad"
-                    if percent > 10:
-                        broad_rules.append((sid, stats, rule, percent, "HIGH"))
-                elif percent > 10:
-                    indicator = "🟠"
-                    tag = "medium_broad"
-                    broad_rules.append((sid, stats, rule, percent, "MEDIUM"))
-                else:
-                    indicator = "✓"
-                    tag = "normal"
-                
-                eff_tree.insert("", tk.END,
-                              values=(line_num, sid, f"{hits:,}", f"{hits_per_day:.1f}", f"{percent:.1f}%", 
-                                     f"{cumulative_percent:.1f}%", indicator, message),
-                              tags=(tag,))
+                source_display = "Current file"
+            elif is_local_file_rule:
+                # Local file rule — extract filename from source label
+                source_filename = source[len('local:'):]  # Strip "local:" prefix
+                line_num = ""  # No line number for local file rules
+                # Get message from local file rules if available
+                rule_text = local_file_rules_text.get(sid, '')
+                # Try to extract msg from rule text
+                message = ''
+                if rule_text:
+                    import re
+                    msg_match = re.search(r'msg\s*:\s*"([^"]*)"', rule_text)
+                    if msg_match:
+                        message = msg_match.group(1)
+                    if not message:
+                        message = rule_text[:50] + "..." if len(rule_text) > 50 else rule_text
+                source_display = f"[{source_filename}]"
+            else:
+                # Skip rules that can't be identified
+                continue
+            
+            hits = stats.get('hits', 0)
+            hits_per_day = stats.get('hits_per_day', 0.0)
+            percent = stats.get('percent', 0.0)
+            cumulative_percent += percent
+            
+            # Determine broadness indicator and tag
+            if percent > 30:
+                indicator = "🔴"
+                tag = "local_critical_broad" if is_local_file_rule else "critical_broad"
+                if percent > 10:
+                    broad_rules.append((sid, stats, rule, percent, "CRITICAL"))
+            elif percent > 15:
+                indicator = "🟡"
+                tag = "local_high_broad" if is_local_file_rule else "high_broad"
+                if percent > 10:
+                    broad_rules.append((sid, stats, rule, percent, "HIGH"))
+            elif percent > 10:
+                indicator = "🟠"
+                tag = "local_medium_broad" if is_local_file_rule else "medium_broad"
+                broad_rules.append((sid, stats, rule, percent, "MEDIUM"))
+            else:
+                indicator = "✓"
+                tag = "local_file_rule" if is_local_file_rule else "normal"
+            
+            # For local file rules, ensure the local_file_rule tag is included for double-click handling
+            tags_list = (tag,) if not is_local_file_rule else (tag, "local_file_rule")
+            
+            eff_tree.insert("", tk.END,
+                          values=(line_num, sid, f"{hits:,}", f"{hits_per_day:.1f}", f"{percent:.1f}%", 
+                                 f"{cumulative_percent:.1f}%", indicator, source_display,
+                                 message[:50] + "..." if len(message) > 50 else message),
+                          tags=tags_list)
         
         # Broadness analysis section (if any rules >10% traffic)
         if broad_rules:
@@ -2916,8 +3849,14 @@ Would you like to run a complete analysis?"""
                 rule_frame = ttk.Frame(broad_content)
                 rule_frame.pack(fill=tk.X, pady=(0, 15))
                 
+                # Determine source for display
+                source = sid_to_source.get(sid, 'current_file')
+                source_note = ""
+                if source.startswith('local:'):
+                    source_note = f" [from: {source[len('local:'):]}]"
+                
                 # Header with severity
-                header_text = f"{severity_emoji} SID {sid} - {severity} ({percent:.1f}% of traffic):"
+                header_text = f"{severity_emoji} SID {sid} - {severity} ({percent:.1f}% of traffic){source_note}:"
                 ttk.Label(rule_frame, text=header_text,
                          font=("TkDefaultFont", 10, "bold"),
                          foreground={"CRITICAL": "#D32F2F", "HIGH": "#FF6F00", "MEDIUM": "#FFA000"}.get(severity, "#000000")).pack(anchor=tk.W)
@@ -2927,7 +3866,11 @@ Would you like to run a complete analysis?"""
                 details_frame.pack(fill=tk.X, padx=20, pady=(5, 0))
                 
                 # Display full rule text with wrapping to use available screen space
-                rule_full_text = rule.to_string()
+                if rule:
+                    rule_full_text = rule.to_string()
+                else:
+                    # Local file rule — use stored rule text
+                    rule_full_text = local_file_rules_text.get(sid, f'(rule text not available for SID {sid})')
                 ttk.Label(details_frame, text=f"• Rule: {rule_full_text}",
                          font=("TkDefaultFont", 9), wraplength=900, justify=tk.LEFT).pack(anchor=tk.W, pady=2)
                 
@@ -2949,7 +3892,12 @@ Would you like to run a complete analysis?"""
                 impact_text = f"• Impact: {percent:.1f}% of all traffic hits this single rule"
                 
                 # Check if rule action is a blocking action (drop/reject) vs allowing (pass/alert)
-                is_blocking_action = rule.action.lower() in ['drop', 'reject']
+                if rule:
+                    is_blocking_action = rule.action.lower() in ['drop', 'reject']
+                else:
+                    # For local file rules, try to detect action from rule text
+                    _rule_text = local_file_rules_text.get(sid, '')
+                    is_blocking_action = _rule_text.startswith('drop ') or _rule_text.startswith('reject ')
                 
                 if percent > 30:
                     if is_blocking_action:
@@ -2968,52 +3916,58 @@ Would you like to run a complete analysis?"""
                 # Recommendations - protocol-aware and action-aware
                 rec_text = "• Recommendation: "
                 
-                # Get base rule components for building examples
-                action = rule.action  # Use actual rule action
-                src = rule.src_net
-                src_port = rule.src_port
-                dst = rule.dst_net
-                dst_port = rule.dst_port
-                direction = rule.direction
-                protocol = rule.protocol.lower()
-                
-                # Check if rule is using HTTP/TLS protocol already vs generic TCP
-                if protocol == 'http':
-                    # HTTP rule that's too broad - recommend more specific domain matching
-                    rec_text += "Make domain matching more specific:\n"
-                    rec_text += f"    - Instead of broad domains like \".example.com\", use more specific subdomains\n"
-                    rec_text += f"    - Example: {action} http {src} {src_port} {direction} {dst} {dst_port} (http.host; content:\".api.example.com\"; endswith; flow:to_server; sid:XXXXX; rev:1;)\n"
-                    rec_text += f"    - Example: {action} http {src} {src_port} {direction} {dst} {dst_port} (http.host; content:\".app.example.com\"; endswith; flow:to_server; sid:XXXXX; rev:1;)\n"
-                    rec_text += f"    - Or split by specific domains instead of wildcard matching"
-                elif protocol in ['tls', 'https']:
-                    # TLS rule that's too broad - recommend more specific domain matching
-                    rec_text += "Make domain matching more specific:\n"
-                    rec_text += f"    - Instead of broad domains like \".example.com\", use more specific subdomains\n"
-                    rec_text += f"    - Example: {action} tls {src} {src_port} {direction} {dst} {dst_port} (tls.sni; content:\".api.example.com\"; nocase; endswith; flow:to_server; sid:XXXXX; rev:1;)\n"
-                    rec_text += f"    - Example: {action} tls {src} {src_port} {direction} {dst} {dst_port} (tls.sni; content:\".app.example.com\"; nocase; endswith; flow:to_server; sid:XXXXX; rev:1;)\n"
-                    rec_text += f"    - Or split by specific domains instead of wildcard matching"
-                elif protocol == 'tcp' and dst_port == '80':
-                    # Generic TCP on port 80 - recommend switching to HTTP protocol
-                    rec_text += "Split into specific domain-based HTTP rules:\n"
-                    rec_text += f"    - Example: {action} http {src} {src_port} {direction} {dst} 80 (http.host; content:\".example.com\"; endswith; flow:to_server; sid:XXXXX; rev:1;)\n"
-                    rec_text += f"    - Example: {action} http {src} {src_port} {direction} {dst} 80 (http.host; content:\".amazonaws.com\"; endswith; flow:to_server; sid:XXXXX; rev:1;)"
-                elif protocol == 'tcp' and dst_port == '443':
-                    # Generic TCP on port 443 - recommend switching to TLS protocol
-                    rec_text += "Split into specific domain-based TLS rules:\n"
-                    rec_text += f"    - Example: {action} tls {src} {src_port} {direction} {dst} 443 (tls.sni; content:\".example.com\"; nocase; endswith; flow:to_server; sid:XXXXX; rev:1;)\n"
-                    rec_text += f"    - Example: {action} tls {src} {src_port} {direction} {dst} 443 (tls.sni; content:\".amazonaws.com\"; nocase; endswith; flow:to_server; sid:XXXXX; rev:1;)"
-                elif 'any' in [rule.src_net.lower(), rule.dst_net.lower()]:
-                    rec_text += "Replace 'any' with specific network variables:\n"
-                    rec_text += "    - Use $HOME_NET, $DMZ_NET, or specific CIDR blocks\n"
-                    rec_text += "    - Consider creating network-specific rules"
-                elif 'any' in [rule.src_port.lower(), rule.dst_port.lower()]:
-                    rec_text += "Replace 'any' port with specific port ranges:\n"
-                    rec_text += "    - Use specific ports like [80,443] or port variables\n"
-                    rec_text += "    - Limit scope to necessary services"
+                if rule:
+                    # Get base rule components for building examples
+                    action = rule.action  # Use actual rule action
+                    src = rule.src_net
+                    src_port = rule.src_port
+                    dst = rule.dst_net
+                    dst_port = rule.dst_port
+                    direction = rule.direction
+                    protocol = rule.protocol.lower()
+                    
+                    # Check if rule is using HTTP/TLS protocol already vs generic TCP
+                    if protocol == 'http':
+                        # HTTP rule that's too broad - recommend more specific domain matching
+                        rec_text += "Make domain matching more specific:\n"
+                        rec_text += f"    - Instead of broad domains like \".example.com\", use more specific subdomains\n"
+                        rec_text += f"    - Example: {action} http {src} {src_port} {direction} {dst} {dst_port} (http.host; content:\".api.example.com\"; endswith; flow:to_server; sid:XXXXX; rev:1;)\n"
+                        rec_text += f"    - Example: {action} http {src} {src_port} {direction} {dst} {dst_port} (http.host; content:\".app.example.com\"; endswith; flow:to_server; sid:XXXXX; rev:1;)\n"
+                        rec_text += f"    - Or split by specific domains instead of wildcard matching"
+                    elif protocol in ['tls', 'https']:
+                        # TLS rule that's too broad - recommend more specific domain matching
+                        rec_text += "Make domain matching more specific:\n"
+                        rec_text += f"    - Instead of broad domains like \".example.com\", use more specific subdomains\n"
+                        rec_text += f"    - Example: {action} tls {src} {src_port} {direction} {dst} {dst_port} (tls.sni; content:\".api.example.com\"; nocase; endswith; flow:to_server; sid:XXXXX; rev:1;)\n"
+                        rec_text += f"    - Example: {action} tls {src} {src_port} {direction} {dst} {dst_port} (tls.sni; content:\".app.example.com\"; nocase; endswith; flow:to_server; sid:XXXXX; rev:1;)\n"
+                        rec_text += f"    - Or split by specific domains instead of wildcard matching"
+                    elif protocol == 'tcp' and dst_port == '80':
+                        # Generic TCP on port 80 - recommend switching to HTTP protocol
+                        rec_text += "Split into specific domain-based HTTP rules:\n"
+                        rec_text += f"    - Example: {action} http {src} {src_port} {direction} {dst} 80 (http.host; content:\".example.com\"; endswith; flow:to_server; sid:XXXXX; rev:1;)\n"
+                        rec_text += f"    - Example: {action} http {src} {src_port} {direction} {dst} 80 (http.host; content:\".amazonaws.com\"; endswith; flow:to_server; sid:XXXXX; rev:1;)"
+                    elif protocol == 'tcp' and dst_port == '443':
+                        # Generic TCP on port 443 - recommend switching to TLS protocol
+                        rec_text += "Split into specific domain-based TLS rules:\n"
+                        rec_text += f"    - Example: {action} tls {src} {src_port} {direction} {dst} 443 (tls.sni; content:\".example.com\"; nocase; endswith; flow:to_server; sid:XXXXX; rev:1;)\n"
+                        rec_text += f"    - Example: {action} tls {src} {src_port} {direction} {dst} 443 (tls.sni; content:\".amazonaws.com\"; nocase; endswith; flow:to_server; sid:XXXXX; rev:1;)"
+                    elif 'any' in [rule.src_net.lower(), rule.dst_net.lower()]:
+                        rec_text += "Replace 'any' with specific network variables:\n"
+                        rec_text += "    - Use $HOME_NET, $DMZ_NET, or specific CIDR blocks\n"
+                        rec_text += "    - Consider creating network-specific rules"
+                    elif 'any' in [rule.src_port.lower(), rule.dst_port.lower()]:
+                        rec_text += "Replace 'any' port with specific port ranges:\n"
+                        rec_text += "    - Use specific ports like [80,443] or port variables\n"
+                        rec_text += "    - Limit scope to necessary services"
+                    else:
+                        rec_text += "Add more specific matching criteria:\n"
+                        rec_text += "    - Use content matching for protocol fields\n"
+                        rec_text += "    - Add flow keywords for direction specificity"
                 else:
-                    rec_text += "Add more specific matching criteria:\n"
-                    rec_text += "    - Use content matching for protocol fields\n"
-                    rec_text += "    - Add flow keywords for direction specificity"
+                    # Local file rule — provide generic recommendation
+                    rec_text += "This rule is from an additional local file. Open it in the editor to review and refine:\n"
+                    rec_text += "    - Consider adding more specific content matching\n"
+                    rec_text += "    - Review network scope and port ranges for excessive breadth"
                 
                 # Display recommendations in a selectable Text widget instead of Label
                 rec_text_widget = tk.Text(details_frame, height=6, wrap=tk.WORD,
@@ -3053,18 +4007,23 @@ Would you like to run a complete analysis?"""
         insights_content_frame = ttk.Frame(insights_frame)
         insights_content_frame.pack(fill=tk.X, padx=15, pady=10)
         
-        # Calculate top 5 percentage
+        # Calculate top 5 percentage from unified "Your Rules" pool
         top_5_percent = sum(stat['percent'] for _, stat in sorted_rules[:5])
         
-        # Get Pareto 10% from analysis results (already calculated)
-        sorted_all = sorted(sid_stats.items(), key=lambda x: x[1]['hits'], reverse=True)
-        top_10_count = max(1, len(sorted_all) // 10)
-        top_10_hits = sum(stat['hits'] for _, stat in sorted_all[:top_10_count])
+        # Get Pareto 10% from "Your Rules" pool (unified current + local file rules)
+        top_10_count = max(1, len(sorted_rules) // 10)
+        top_10_hits = sum(stat['hits'] for _, stat in sorted_rules[:top_10_count])
         top_10_pct = int((top_10_hits / total_hits * 100)) if total_hits > 0 else 0
         
         insights_text = f"• Top 5 rules handle {top_5_percent:.1f}% of traffic\n"
-        insights_text += f"• Top 10% of rules ({top_10_count} rules) handle {top_10_pct}% of traffic\n"
+        insights_text += f"• Top 10% of Your Rules ({top_10_count} rules) handle {top_10_pct}% of traffic\n"
         insights_text += f"• {len(broad_rules)} rule{'s' if len(broad_rules) != 1 else ''} flagged as potentially too broad (>{10}% traffic)"
+        
+        # Add note about local file rules if present
+        local_file_count = sum(1 for sid in your_rules_sids 
+                              if sid_to_source.get(sid, '').startswith('local:'))
+        if local_file_count > 0:
+            insights_text += f"\n• Analysis includes {local_file_count} rules from additional local files"
         
         ttk.Label(insights_content_frame, text=insights_text,
                  font=("TkDefaultFont", 10), justify=tk.LEFT).pack(anchor=tk.W)
@@ -3091,25 +4050,48 @@ Would you like to run a complete analysis?"""
                     f.write(f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
                     f.write(f"Time Range: Last {analysis_results['time_range_days']} days\n\n")
                     
-                    f.write("Top 20 Performing Rules:\n")
+                    f.write("Top 20 Performing Rules (Your Rules - Unified Pareto):\n")
                     f.write("-" * 60 + "\n")
                     cumul = 0.0
                     for idx, (sid, stats) in enumerate(top_20):
+                        source = sid_to_source.get(sid, 'current_file')
                         rule = next((r for r in self.parent.rules 
                                    if hasattr(r, 'sid') and r.sid == sid), None)
+                        
+                        hits = stats.get('hits', 0)
+                        percent = stats.get('percent', 0.0)
+                        cumul += percent
+                        
                         if rule:
-                            hits = stats.get('hits', 0)
-                            percent = stats.get('percent', 0.0)
-                            cumul += percent
                             f.write(f"{idx+1}. SID {sid}: {hits:,} hits ({percent:.1f}%, cumulative {cumul:.1f}%)\n")
+                            f.write(f"   Source: Current file\n")
                             f.write(f"   {rule.message}\n\n")
+                        elif source.startswith('local:'):
+                            source_filename = source[len('local:'):]
+                            rule_text = local_file_rules_text.get(sid, '')
+                            # Extract message from rule text
+                            message = ''
+                            if rule_text:
+                                import re
+                                msg_match = re.search(r'msg\s*:\s*"([^"]*)"', rule_text)
+                                if msg_match:
+                                    message = msg_match.group(1)
+                            f.write(f"{idx+1}. SID {sid}: {hits:,} hits ({percent:.1f}%, cumulative {cumul:.1f}%)\n")
+                            f.write(f"   Source: {source_filename}\n")
+                            f.write(f"   {message}\n\n")
                     
                     if broad_rules:
                         f.write("\nBroadness Analysis:\n")
                         f.write("-" * 60 + "\n")
                         for sid, stats, rule, percent, severity in broad_rules:
-                            f.write(f"{severity} - SID {sid} ({percent:.1f}% of traffic)\n")
-                            f.write(f"Rule: {rule.to_string()}\n\n")
+                            source = sid_to_source.get(sid, 'current_file')
+                            source_label = "Current file" if source == 'current_file' else source[len('local:'):] if source.startswith('local:') else source
+                            f.write(f"{severity} - SID {sid} ({percent:.1f}% of traffic) [Source: {source_label}]\n")
+                            if rule:
+                                f.write(f"Rule: {rule.to_string()}\n\n")
+                            else:
+                                rule_text = local_file_rules_text.get(sid, '(text not available)')
+                                f.write(f"Rule: {rule_text}\n\n")
                 
                 messagebox.showinfo("Export Complete", f"Effectiveness analysis exported to:\n{filename}")
             except Exception as e:
@@ -3502,8 +4484,134 @@ Would you like to run a complete analysis?"""
                               command=lambda: self._export_search_result(sid, stats, analysis_results)).pack(side=tk.LEFT, padx=5)
 
                 elif not rule:
-                    ttk.Label(results_content, text=f"SID {sid} found in analysis but not in current rule file",
-                             foreground="orange").pack(padx=10, pady=20)
+                    # Check if SID belongs to a local file
+                    sid_to_source = analysis_results.get('sid_to_source', {})
+                    local_file_rules_text = analysis_results.get('local_file_rules_text', {})
+                    source_label = sid_to_source.get(sid, '')
+
+                    if source_label.startswith('local:') and sid in local_file_rules_text:
+                        # --- Local file rule SID: show local file rule details with stats ---
+                        local_filename = source_label[len('local:'):]
+                        rule_text_str = local_file_rules_text[sid]
+
+                        # Parse rule text to extract action and message
+                        from src.core.suricata_rule import SuricataRule
+                        parsed_rule = SuricataRule.from_string(rule_text_str)
+                        local_action = parsed_rule.action if parsed_rule else 'unknown'
+                        local_msg = parsed_rule.message if parsed_rule else ''
+
+                        # Create results display
+                        result_panel = ttk.Frame(results_content)
+                        result_panel.pack(fill=tk.BOTH, expand=True, padx=15, pady=15)
+
+                        # SID header in distinct color for local file rules (not teal - that's managed)
+                        ttk.Label(result_panel, text=f"SID {sid}",
+                                 font=("TkDefaultFont", 12, "bold"),
+                                 foreground="#6A1B9A").pack(anchor=tk.W, pady=(0, 5))
+
+                        # Source indicator
+                        ttk.Label(result_panel, text=f"Source: Additional local file: {local_filename}",
+                                 font=("TkDefaultFont", 10), foreground="#6A1B9A").pack(anchor=tk.W, pady=(0, 10))
+
+                        # Usage Statistics section
+                        ttk.Label(result_panel, text=f"Usage Statistics (Last {analysis_results['time_range_days']} days):",
+                                 font=("TkDefaultFont", 10, "bold")).pack(anchor=tk.W, pady=(0, 5))
+
+                        stats_grid = ttk.Frame(result_panel)
+                        stats_grid.pack(fill=tk.X, pady=(0, 10))
+
+                        stat_items = [
+                            ("Total hits:", f"{stats.get('hits', 0):,}"),
+                            ("Percentage of traffic:", f"{stats.get('percent', 0.0):.2f}%"),
+                            ("Hits per day:", f"{stats.get('hits_per_day', 0.0):.1f} avg"),
+                        ]
+
+                        if stats.get('last_hit_days') is not None:
+                            stat_items.append(("Last hit:", f"{stats['last_hit_days']} days ago"))
+
+                        for label, value in stat_items:
+                            row = ttk.Frame(stats_grid)
+                            row.pack(fill=tk.X, pady=2)
+                            ttk.Label(row, text=f"• {label}", width=25).pack(side=tk.LEFT)
+                            ttk.Label(row, text=value, font=("TkDefaultFont", 9, "bold")).pack(side=tk.LEFT)
+
+                        # Rule Information section
+                        ttk.Label(result_panel, text="Rule Information:",
+                                 font=("TkDefaultFont", 10, "bold")).pack(anchor=tk.W, pady=(15, 5))
+
+                        rule_info_grid = ttk.Frame(result_panel)
+                        rule_info_grid.pack(fill=tk.X, pady=(0, 10))
+
+                        rule_items = [
+                            ("Source:", f"Additional local file: {local_filename}"),
+                            ("Action:", local_action.upper()),
+                            ("Message:", local_msg[:80] + "..." if len(local_msg) > 80 else local_msg),
+                        ]
+
+                        for label, value in rule_items:
+                            row = ttk.Frame(rule_info_grid)
+                            row.pack(fill=tk.X, pady=2)
+                            ttk.Label(row, text=f"• {label}", width=25).pack(side=tk.LEFT)
+                            ttk.Label(row, text=value).pack(side=tk.LEFT)
+
+                        # Full Rule Text
+                        ttk.Label(result_panel, text="Full Rule:",
+                                 font=("TkDefaultFont", 10, "bold")).pack(anchor=tk.W, pady=(15, 5))
+
+                        rule_text_widget = tk.Text(result_panel, height=4, wrap=tk.WORD,
+                                                   font=("Consolas", 9), bg="#F5F5F5")
+                        rule_text_widget.pack(fill=tk.X, pady=(0, 10))
+                        rule_text_widget.insert(tk.END, rule_text_str)
+                        rule_text_widget.config(state=tk.DISABLED)
+
+                        # Navigation buttons - "Open in Editor" instead of "Jump to Line X"
+                        nav_frame = ttk.Frame(result_panel)
+                        nav_frame.pack(fill=tk.X, pady=(10, 0))
+
+                        # Find the source file path from local_file_metadata
+                        local_file_metadata = analysis_results.get('local_file_metadata', [])
+                        source_path = None
+                        for meta in local_file_metadata:
+                            if meta.get('filename') == local_filename:
+                                source_path = meta.get('path')
+                                break
+
+                        def open_local_file_in_editor(path=source_path, target_sid=sid):
+                            """Open the local file in editor - delegates to detail popup behavior"""
+                            if path and os.path.exists(path):
+                                # Check for unsaved changes before opening
+                                if hasattr(self.parent, 'modified') and self.parent.modified:
+                                    if not self.parent.ask_save_changes():
+                                        return
+                                # Close results window and open file
+                                results_window.destroy()
+                                self.parent.load_rules_from_file(path)
+                                self.parent.current_file = path
+                                self.parent.modified = False
+                            else:
+                                import tkinter.messagebox as messagebox
+                                messagebox.showwarning(
+                                    "File Unavailable",
+                                    f"The file '{local_filename}' is no longer available at its stored path."
+                                )
+
+                        open_btn = ttk.Button(nav_frame, text="Open in Editor",
+                                            command=open_local_file_in_editor)
+                        open_btn.pack(side=tk.LEFT, padx=5)
+
+                        # Disable button if file doesn't exist
+                        if not source_path or not os.path.exists(source_path):
+                            open_btn.config(state=tk.DISABLED)
+                            ttk.Label(nav_frame, text="(file no longer available)",
+                                     font=("TkDefaultFont", 8), foreground="#999999").pack(side=tk.LEFT, padx=5)
+
+                        # Export button
+                        ttk.Button(nav_frame, text="Export This Result",
+                                  command=lambda: self._export_search_result(sid, stats, analysis_results)).pack(side=tk.LEFT, padx=5)
+
+                    else:
+                        ttk.Label(results_content, text=f"SID {sid} found in analysis but not in current rule file",
+                                 foreground="orange").pack(padx=10, pady=20)
                     return
 
                 else:
@@ -3514,7 +4622,12 @@ Would you like to run a complete analysis?"""
 
                     # SID header
                     ttk.Label(result_panel, text=f"SID {sid}",
-                             font=("TkDefaultFont", 12, "bold")).pack(anchor=tk.W, pady=(0, 10))
+                             font=("TkDefaultFont", 12, "bold")).pack(anchor=tk.W, pady=(0, 5))
+
+                    # Source indicator for current file
+                    current_filename = os.path.basename(self.parent.current_file) if self.parent.current_file else "Current file"
+                    ttk.Label(result_panel, text=f"Source: Current file: {current_filename}",
+                             font=("TkDefaultFont", 10), foreground="#333333").pack(anchor=tk.W, pady=(0, 10))
 
                     # Usage Statistics section
                     ttk.Label(result_panel, text=f"Usage Statistics (Last {analysis_results['time_range_days']} days):",
@@ -3646,6 +4759,11 @@ Would you like to run a complete analysis?"""
                     ttk.Label(results_content, text=f"SID {sid} - No hits recorded",
                              font=("TkDefaultFont", 11, "bold"), foreground="#FF6600").pack(anchor=tk.W, padx=10, pady=(10, 5))
 
+                    # Source indicator for current file
+                    current_filename = os.path.basename(self.parent.current_file) if self.parent.current_file else "Current file"
+                    ttk.Label(results_content, text=f"Source: Current file: {current_filename}",
+                             font=("TkDefaultFont", 10), foreground="#333333").pack(anchor=tk.W, padx=10, pady=(0, 5))
+
                     ttk.Label(results_content,
                              text=f"This rule exists in your file but had 0 hits during the\n"
                                   f"{analysis_results['time_range_days']}-day analysis period.\n\n"
@@ -3700,6 +4818,97 @@ Would you like to run a complete analysis?"""
                                           font=("TkDefaultFont", 9, "underline"))
                     link_label.pack(anchor=tk.W, padx=10, pady=5)
                     link_label.bind('<Button-1>', lambda e: notebook.select(1))
+
+                elif sid in analysis_results.get('local_file_rules_text', {}):
+                    # SID belongs to a local file but had 0 hits
+                    sid_to_source = analysis_results.get('sid_to_source', {})
+                    local_file_rules_text = analysis_results.get('local_file_rules_text', {})
+                    source_label = sid_to_source.get(sid, '')
+                    local_filename = source_label[len('local:'):] if source_label.startswith('local:') else 'unknown'
+                    rule_text_str = local_file_rules_text[sid]
+
+                    # Parse rule text to extract action and message
+                    from src.core.suricata_rule import SuricataRule
+                    parsed_rule = SuricataRule.from_string(rule_text_str)
+                    local_action = parsed_rule.action if parsed_rule else 'unknown'
+                    local_msg = parsed_rule.message if parsed_rule else ''
+
+                    ttk.Label(results_content, text=f"SID {sid} - No hits recorded",
+                             font=("TkDefaultFont", 11, "bold"), foreground="#6A1B9A").pack(anchor=tk.W, padx=10, pady=(10, 5))
+
+                    ttk.Label(results_content, text=f"Source: Additional local file: {local_filename}",
+                             font=("TkDefaultFont", 10), foreground="#6A1B9A").pack(anchor=tk.W, padx=10, pady=(0, 5))
+
+                    info_text = (
+                        f"This rule from '{local_filename}' had 0 hits during the "
+                        f"{analysis_results['time_range_days']}-day analysis period.\n\n"
+                        f"Action: {local_action.upper()}\n"
+                    )
+                    if local_msg:
+                        info_text += f"Message: {local_msg}\n\n"
+                    info_text += (
+                        "It may be an unused rule. Check the Unused Rules tab for more details."
+                    )
+
+                    ttk.Label(results_content, text=info_text,
+                             font=("TkDefaultFont", 9), justify=tk.LEFT).pack(anchor=tk.W, padx=10, pady=5)
+
+                    # Full Rule Text
+                    ttk.Label(results_content, text="Full Rule:",
+                             font=("TkDefaultFont", 10, "bold")).pack(anchor=tk.W, padx=10, pady=(10, 5))
+
+                    rule_text_widget = tk.Text(results_content, height=4, wrap=tk.WORD,
+                                              font=("Consolas", 9), bg="#F5F5F5")
+                    rule_text_widget.pack(fill=tk.X, padx=10, pady=(0, 10))
+                    rule_text_widget.insert(tk.END, rule_text_str)
+                    rule_text_widget.config(state=tk.DISABLED)
+
+                    # Navigation - "Open in Editor" button
+                    nav_frame = ttk.Frame(results_content)
+                    nav_frame.pack(fill=tk.X, padx=10, pady=(5, 0))
+
+                    # Find the source file path from local_file_metadata
+                    local_file_metadata = analysis_results.get('local_file_metadata', [])
+                    source_path = None
+                    for meta in local_file_metadata:
+                        if meta.get('filename') == local_filename:
+                            source_path = meta.get('path')
+                            break
+
+                    def open_local_file_in_editor_nohits(path=source_path):
+                        """Open the local file in editor"""
+                        if path and os.path.exists(path):
+                            # Check for unsaved changes before opening
+                            if hasattr(self.parent, 'modified') and self.parent.modified:
+                                if not self.parent.ask_save_changes():
+                                    return
+                            results_window.destroy()
+                            self.parent.load_rules_from_file(path)
+                            self.parent.current_file = path
+                            self.parent.modified = False
+                        else:
+                            import tkinter.messagebox as messagebox
+                            messagebox.showwarning(
+                                "File Unavailable",
+                                f"The file '{local_filename}' is no longer available at its stored path."
+                            )
+
+                    open_btn = ttk.Button(nav_frame, text="Open in Editor",
+                                         command=open_local_file_in_editor_nohits)
+                    open_btn.pack(side=tk.LEFT, padx=5)
+
+                    # Disable button if file doesn't exist
+                    if not source_path or not os.path.exists(source_path):
+                        open_btn.config(state=tk.DISABLED)
+                        ttk.Label(nav_frame, text="(file no longer available)",
+                                 font=("TkDefaultFont", 8), foreground="#999999").pack(side=tk.LEFT, padx=5)
+
+                    # Show link to Unused tab
+                    link_label = ttk.Label(results_content, text="→ View in Unused Rules Tab",
+                                          foreground="blue", cursor="hand2",
+                                          font=("TkDefaultFont", 9, "underline"))
+                    link_label.pack(anchor=tk.W, padx=10, pady=5)
+                    link_label.bind('<Button-1>', lambda e: notebook.select(2))
 
                 else:
                     # SID not in file at all
@@ -3801,7 +5010,7 @@ Would you like to run a complete analysis?"""
         unlogged_tree.column("Action", width=70, stretch=False)
         unlogged_tree.column("Protocol", width=80, stretch=False)
         unlogged_tree.column("Keyword", width=120, stretch=False)
-        unlogged_tree.column("Message", width=450, stretch=True)
+        unlogged_tree.column("Message", width=450, stretch=False)
         
         # Scrollbars
         unlogged_v_scrollbar = ttk.Scrollbar(unlogged_tree_container, orient=tk.VERTICAL,
@@ -3820,6 +5029,14 @@ Would you like to run a complete analysis?"""
         
         # Populate with unlogged rules
         from src.analysis.rule_usage_analyzer import RuleUsageAnalyzer
+        
+        # Also include local file unlogged SIDs (Requirement 12.5)
+        local_file_unlogged_sids_set = analysis_results.get('local_file_unlogged_sids', set())
+        unlogged_local_file_rules_text = analysis_results.get('local_file_rules_text', {})
+        unlogged_sid_to_source = analysis_results.get('sid_to_source', {})
+        
+        # Configure tag for local file rows
+        unlogged_tree.tag_configure("local_file_row", background="#E8EAF6", foreground="#5C6BC0")
         
         for sid in sorted(unlogged_sids):
             # Find rule in main rule list
@@ -3853,6 +5070,54 @@ Would you like to run a complete analysis?"""
                                    values=(line_num, sid, rule.action.upper(),
                                           rule.protocol.upper(), reason, message))
         
+        # Add local file unlogged rules (Requirement 12.4, 12.5)
+        for sid in sorted(local_file_unlogged_sids_set):
+            # Skip SIDs that are already in the current file unlogged set (dedup)
+            if sid in unlogged_sids:
+                continue
+            
+            rule_text_str = unlogged_local_file_rules_text.get(sid, '')
+            if not rule_text_str:
+                continue
+            
+            # Parse the rule text to get action, protocol, message
+            import re
+            action_match = re.match(r'^(\w+)', rule_text_str)
+            action_str = action_match.group(1).upper() if action_match else 'UNKNOWN'
+            
+            # Extract protocol
+            proto_match = re.match(r'^\w+\s+(\w+)', rule_text_str)
+            protocol_str = proto_match.group(1).upper() if proto_match else 'ANY'
+            
+            # Extract message
+            msg_match = re.search(r'msg\s*:\s*"([^"]*)"', rule_text_str)
+            message = msg_match.group(1) if msg_match else ''
+            message = message[:60] + "..." if len(message) > 60 else message
+            
+            # Determine reason
+            options_lower = rule_text_str.lower()
+            if action_str.lower() == "pass":
+                if re.search(r'\balert\b', options_lower):
+                    reason = "Pass with 'alert' (LOGS)"
+                else:
+                    reason = "Pass without 'alert'"
+            elif action_str.lower() in ["drop", "reject"]:
+                if "noalert" in options_lower:
+                    reason = f"{action_str.capitalize()} with 'noalert'"
+                else:
+                    reason = f"{action_str.capitalize()} (LOGS)"
+            else:
+                reason = "Unknown"
+            
+            # Get source filename from sid_to_source
+            source_label = unlogged_sid_to_source.get(sid, '')
+            source_filename = source_label[len('local:'):] if source_label.startswith('local:') else source_label
+            
+            unlogged_tree.insert("", tk.END,
+                               values=(f"\u2014", sid, action_str,
+                                      protocol_str, reason, message),
+                               tags=("local_file_row",))
+        
         # Double-click handler to jump to rule in main editor
         def on_unlogged_tree_double_click(event):
             item = unlogged_tree.identify_row(event.y)
@@ -3862,6 +5127,114 @@ Would you like to run a complete analysis?"""
             # Get the line number from the clicked item (first column)
             values = unlogged_tree.item(item, 'values')
             if not values or not values[0]:
+                return
+            
+            # Check if this is a local file rule (Requirement 12.5)
+            tags = unlogged_tree.item(item, 'tags')
+            if "local_file_row" in tags:
+                # Local file rule — show detail popup
+                try:
+                    sid = int(str(values[1]).replace(',', ''))  # SID column
+                except (ValueError, TypeError):
+                    return
+                
+                # Get source filename from sid_to_source
+                source_label = unlogged_sid_to_source.get(sid, '')
+                source_filename = source_label[len('local:'):] if source_label.startswith('local:') else source_label
+                
+                # Find source file path from local_file_metadata
+                local_file_metadata_list = analysis_results.get('local_file_metadata', [])
+                source_path = ''
+                for meta in local_file_metadata_list:
+                    if meta.get('filename', '') == source_filename:
+                        source_path = meta.get('path', '')
+                        break
+                
+                # Get rule text
+                rule_text = unlogged_local_file_rules_text.get(sid, '(rule text not available)')
+                
+                # Show detail popup
+                detail = tk.Toplevel(results_window)
+                detail.title(f"Local File Rule Detail \u2014 SID {sid}")
+                detail.geometry("700x400")
+                detail.transient(results_window)
+                detail.grab_set()
+                detail.resizable(True, True)
+                detail.minsize(500, 300)
+                detail.geometry("+%d+%d" % (
+                    results_window.winfo_rootx() + 80,
+                    results_window.winfo_rooty() + 120
+                ))
+                
+                df = ttk.Frame(detail)
+                df.pack(fill=tk.BOTH, expand=True, padx=20, pady=20)
+                
+                # SID header in warm orange
+                ttk.Label(df, text=f"SID {sid}",
+                         font=("TkDefaultFont", 12, "bold"),
+                         foreground="#C75000").pack(anchor=tk.W, pady=(0, 5))
+                ttk.Label(df, text=f"Source: {source_filename}",
+                         font=("TkDefaultFont", 9), foreground="#C75000").pack(anchor=tk.W, pady=(0, 5))
+                
+                # Rule status
+                ttk.Label(df, text="Status: Unlogged (does not write to CloudWatch Logs)",
+                         font=("TkDefaultFont", 9)).pack(anchor=tk.W, pady=(0, 10))
+                
+                # Full rule text
+                ttk.Label(df, text="Full Rule Text:",
+                         font=("TkDefaultFont", 10, "bold")).pack(anchor=tk.W, pady=(0, 5))
+                
+                rule_text_widget = tk.Text(df, height=6, wrap=tk.WORD,
+                                          font=("Consolas", 9), bg="#F5F5F5")
+                rule_text_widget.pack(fill=tk.BOTH, expand=True, pady=(0, 10))
+                rule_text_widget.insert(tk.END, rule_text)
+                rule_text_widget.config(state=tk.DISABLED)
+                rule_text_widget.bind("<Control-c>", lambda e: None)
+                rule_text_widget.bind("<Command-c>", lambda e: None)
+                
+                # Buttons frame
+                btn_frame = ttk.Frame(df)
+                btn_frame.pack(fill=tk.X, pady=(5, 0))
+                
+                def open_in_editor_unlogged(s_path=source_path, s_filename=source_filename, s_sid=sid):
+                    if s_path and os.path.isfile(s_path):
+                        if self.parent.modified:
+                            response = messagebox.askyesnocancel(
+                                "Unsaved Changes",
+                                "The current file has unsaved changes.\n\n"
+                                "Save before opening the local file?",
+                                parent=detail
+                            )
+                            if response is None:
+                                return
+                            elif response:
+                                self.parent.save_file()
+                        detail.destroy()
+                        results_window.destroy()
+                        self.parent.load_rules_from_file(s_path)
+                        # Navigate to the rule in the main editor treeview
+                        all_items = self.parent.tree.get_children()
+                        for i, r in enumerate(self.parent.rules):
+                            if hasattr(r, 'sid') and r.sid == s_sid:
+                                if i < len(all_items):
+                                    self.parent.tree.selection_set(all_items[i])
+                                    self.parent.tree.focus(all_items[i])
+                                    self.parent.tree.see(all_items[i])
+                                break
+                    else:
+                        messagebox.showwarning("File Unavailable",
+                                            f"The file '{s_filename}' is no longer available at:\n{s_path}",
+                                            parent=detail)
+                
+                if source_path and os.path.isfile(source_path):
+                    ttk.Button(btn_frame, text="Open in Editor", command=open_in_editor_unlogged).pack(side=tk.LEFT, padx=(0, 10))
+                else:
+                    btn = ttk.Button(btn_frame, text="Open in Editor", state=tk.DISABLED)
+                    btn.pack(side=tk.LEFT, padx=(0, 10))
+                    ttk.Label(btn_frame, text="(file no longer available)",
+                             font=("TkDefaultFont", 8), foreground="#999999").pack(side=tk.LEFT)
+                
+                ttk.Button(btn_frame, text="Close", command=detail.destroy).pack(side=tk.RIGHT)
                 return
             
             try:
@@ -3998,11 +5371,35 @@ Would you like to run a complete analysis?"""
         untracked_canvas.bind("<Enter>", lambda e: untracked_canvas.bind_all("<MouseWheel>", on_untracked_mousewheel))
         untracked_canvas.bind("<Leave>", lambda e: untracked_canvas.unbind_all("<MouseWheel>"))
         
-        # Description
-        description_text = (
-            "These SIDs were found in CloudWatch logs but do not exist in your current rules file.\n"
-            "They may have triggered during the analysis period but are not part of your rule group."
-        )
+        # Description - adjust text based on whether local files and/or managed groups are included
+        local_file_meta = analysis_results.get('local_file_metadata', [])
+        managed_rule_groups_for_untracked = analysis_results.get('managed_rule_groups', [])
+        has_local_files = len(local_file_meta) > 0
+        has_managed_groups = len(managed_rule_groups_for_untracked) > 0
+
+        if has_local_files and has_managed_groups:
+            description_text = (
+                "These SIDs appear in CloudWatch but are not found in your current file, "
+                "additional local files, or selected managed rule groups.\n"
+                "They may have triggered during the analysis period but are not part of any included rule source."
+            )
+        elif has_local_files:
+            description_text = (
+                "These SIDs appear in CloudWatch but are not found in your current file "
+                "or additional local files.\n"
+                "They may have triggered during the analysis period but are not part of any included rule source."
+            )
+        elif has_managed_groups:
+            description_text = (
+                "These SIDs were found in CloudWatch logs but do not exist in your current rules file "
+                "or selected managed rule groups.\n"
+                "They may have triggered during the analysis period but are not part of your rule group."
+            )
+        else:
+            description_text = (
+                "These SIDs were found in CloudWatch logs but do not exist in your current rules file.\n"
+                "They may have triggered during the analysis period but are not part of your rule group."
+            )
         ttk.Label(untracked_content, text=description_text,
                  font=("TkDefaultFont", 10)).pack(anchor=tk.W, padx=10, pady=(10, 10))
         
@@ -4070,8 +5467,32 @@ Would you like to run a complete analysis?"""
         info_content = ttk.Frame(info_frame)
         info_content.pack(padx=15, pady=15)
         
+        # Build the "known sources" description based on what's included
+        if has_local_files and has_managed_groups:
+            local_file_count = len(local_file_meta)
+            known_sources_desc = (
+                f"These SIDs exist in CloudWatch logs but not in any included rule source\n"
+                f"(your current file, {local_file_count} additional local file{'s' if local_file_count != 1 else ''}, "
+                f"or {len(managed_rule_groups_for_untracked)} managed rule group{'s' if len(managed_rule_groups_for_untracked) != 1 else ''})."
+            )
+        elif has_local_files:
+            local_file_count = len(local_file_meta)
+            known_sources_desc = (
+                f"These SIDs exist in CloudWatch logs but not in your current file or\n"
+                f"{local_file_count} additional local file{'s' if local_file_count != 1 else ''} included in this analysis."
+            )
+        elif has_managed_groups:
+            known_sources_desc = (
+                "These SIDs exist in CloudWatch logs but not in your current rules file\n"
+                f"or {len(managed_rule_groups_for_untracked)} selected managed rule group{'s' if len(managed_rule_groups_for_untracked) != 1 else ''}."
+            )
+        else:
+            known_sources_desc = (
+                "These SIDs exist in CloudWatch logs but not in your current rules file."
+            )
+
         info_text = (
-            "These SIDs exist in CloudWatch logs but not in your current rules file.\n\n"
+            f"{known_sources_desc}\n\n"
             "Common reasons:\n"
             "• Rules were recently deleted or commented out from your file\n"
             "  (but still exist in CloudWatch logs during the analysis timeframe)\n\n"
@@ -4122,6 +5543,36 @@ Would you like to run a complete analysis?"""
         for sid, cats in sid_to_cats.items():
             for cat in cats:
                 cat_to_rule_count[cat] = cat_to_rule_count.get(cat, 0) + 1
+        
+        # Also parse local file rules for category keywords (Req 21.1, 21.2)
+        import re as _cat_re
+        local_file_rules_text_for_cats = analysis_results.get('local_file_rules_text', {})
+        local_file_category_sids = set()  # SIDs from local files that use category keywords
+        local_file_sid_to_cats = {}  # SID -> set of categories for local file rules
+        for lf_sid, lf_rule_text in local_file_rules_text_for_cats.items():
+            targeted_cats = set()
+            for match in _cat_re.finditer(r'aws_(?:domain|url)_category:([^;]+)', lf_rule_text):
+                cat_str = match.group(1).strip()
+                for cat in cat_str.split(','):
+                    cat = cat.strip()
+                    if cat:
+                        targeted_cats.add(cat)
+            if targeted_cats:
+                local_file_category_sids.add(lf_sid)
+                local_file_sid_to_cats[lf_sid] = targeted_cats
+                # Add to rule_defined_categories and cat_to_rule_count
+                for cat in targeted_cats:
+                    rule_defined_categories.add(cat)
+                    cat_to_rule_count[cat] = cat_to_rule_count.get(cat, 0) + 1
+        
+        # Merge sid_to_cats with local file category SIDs for unified lookup
+        sid_to_cats.update(local_file_sid_to_cats)
+        
+        # Update rule_count for categories that ARE already in category_data
+        # (the analyzer computed rule_count only from current-file rules)
+        for cat_name in category_data:
+            if cat_name in cat_to_rule_count:
+                category_data[cat_name]['rule_count'] = cat_to_rule_count[cat_name]
         
         # Merge rule-defined categories (add entries with correct rule_count for categories not in CloudWatch data)
         for rule_cat in rule_defined_categories:
@@ -4289,9 +5740,20 @@ Would you like to run a complete analysis?"""
         # Info priority: Untracked rules detected
         if categories.get('untracked', 0) > 0:
             untracked_count = categories['untracked']
+            local_meta = results.get('local_file_metadata', [])
+            if local_meta:
+                untracked_rec_text = (
+                    f"{untracked_count} untracked SID{'s' if untracked_count != 1 else ''} "
+                    f"in CloudWatch (not in your file or additional local files)."
+                )
+            else:
+                untracked_rec_text = (
+                    f"{untracked_count} untracked SID{'s' if untracked_count != 1 else ''} "
+                    f"in CloudWatch (not in your file)."
+                )
             recommendations.append({
                 'priority': 'LOW',
-                'text': f"{untracked_count} untracked SID{'s' if untracked_count != 1 else ''} in CloudWatch (not in your file).",
+                'text': untracked_rec_text,
                 'link_text': '[View Details]',
                 'tab_index': 8  # Untracked tab
             })
@@ -4430,6 +5892,77 @@ Would you like to run a complete analysis?"""
         except Exception as e:
             messagebox.showerror("Export Error", f"Failed to export report:\n{str(e)}")
     
+    def _get_source_summary(self, results):
+        """Build a source summary dict listing all sources with rule counts.
+        
+        Returns:
+            dict with keys:
+                'sources': list of (label, count) tuples
+                'has_local_files': bool
+                'has_managed_groups': bool
+                'total_your_rules': int
+        """
+        sid_to_source = results.get('sid_to_source', {})
+        local_file_metadata = results.get('local_file_metadata', [])
+        managed_rule_groups = results.get('managed_rule_groups', [])
+        total_your_rules = results.get('total_your_rules', results.get('total_rules', 0))
+        total_managed = results.get('total_managed_rules', 0)
+        
+        sources = []
+        
+        # Current file
+        current_file_name = ''
+        if self.parent.current_file:
+            current_file_name = os.path.basename(self.parent.current_file)
+        current_file_count = results.get('total_rules', 0)
+        sources.append((f"Current file ({current_file_name})" if current_file_name else "Current file",
+                       current_file_count))
+        
+        # Additional local files
+        has_local_files = bool(local_file_metadata)
+        for lf_meta in local_file_metadata:
+            lf_name = lf_meta.get('filename', 'unknown')
+            lf_count = lf_meta.get('rule_count', 0)
+            sources.append((f"Local file: {lf_name}", lf_count))
+        
+        # Managed rule groups
+        has_managed_groups = bool(managed_rule_groups)
+        managed_rule_sids = results.get('managed_rule_sids', {})
+        for mg in managed_rule_groups:
+            mg_name = mg.get('name', 'unknown')
+            mg_count = len(managed_rule_sids.get(mg_name, []))
+            sources.append((f"Managed group: {mg_name}", mg_count))
+        
+        return {
+            'sources': sources,
+            'has_local_files': has_local_files,
+            'has_managed_groups': has_managed_groups,
+            'total_your_rules': total_your_rules,
+            'total_managed': total_managed,
+        }
+
+    def _get_source_label_for_sid(self, sid, results):
+        """Get a human-readable source label for a SID.
+        
+        Args:
+            sid: The SID to look up
+            results: Analysis results dictionary
+            
+        Returns:
+            str: Source label like 'Current file', 'extra.suricata', or 'ManagedGroupName'
+        """
+        sid_to_source = results.get('sid_to_source', {})
+        source = sid_to_source.get(sid, 'current_file')
+        
+        if source == 'current_file':
+            return 'Current file'
+        elif source.startswith('local:'):
+            return source[len('local:'):]
+        elif source.startswith('managed:'):
+            return source[len('managed:'):]
+        else:
+            return source if source else 'Current file'
+
     def _export_summary_text(self, filename, results):
         """Export Summary tab as plain text
         
@@ -4447,6 +5980,15 @@ Would you like to run a complete analysis?"""
             f.write(f"Log Group: {results['log_group']}\n")
             f.write(f"Total Rules: {results['total_rules']:,}\n")
             f.write(f"Records Analyzed: {results['records_analyzed']:,}\n\n")
+            
+            # Analysis Sources summary (Requirement 15.2, 15.4)
+            source_summary = self._get_source_summary(results)
+            if source_summary['has_local_files'] or source_summary['has_managed_groups']:
+                f.write("ANALYSIS SOURCES\n")
+                f.write("-" * 70 + "\n")
+                for source_label, source_count in source_summary['sources']:
+                    f.write(f"  {source_label}: {source_count:,} rules\n")
+                f.write(f"\n  Total unique rules analyzed: {source_summary['total_your_rules'] + source_summary['total_managed']:,}\n\n")
             
             # Health Score
             f.write("RULE GROUP HEALTH\n")
@@ -4666,6 +6208,32 @@ Would you like to run a complete analysis?"""
             <strong>Total Rules Analyzed:</strong> {results['total_rules']:,}
         </div>
     </div>
+    '''
+        
+        # Analysis Sources section (Requirement 15.2, 15.4)
+        source_summary = self._get_source_summary(results)
+        if source_summary['has_local_files'] or source_summary['has_managed_groups']:
+            html += '''
+    <h2>Analysis Sources</h2>
+    <div class="section info">
+        <table>
+            <thead>
+                <tr><th>Source</th><th>Rule Count</th></tr>
+            </thead>
+            <tbody>'''
+            for source_label, source_count in source_summary['sources']:
+                html += f'''
+                <tr><td>{source_label}</td><td>{source_count:,}</td></tr>'''
+            total_unique = source_summary['total_your_rules'] + source_summary['total_managed']
+            html += f'''
+            </tbody>
+            <tfoot>
+                <tr><td><strong>Total unique rules analyzed</strong></td><td><strong>{total_unique:,}</strong></td></tr>
+            </tfoot>
+        </table>
+    </div>'''
+        
+        html += f'''
     
     <h2>Rule Group Health</h2>
     <div class="section success">
@@ -4827,14 +6395,27 @@ Would you like to run a complete analysis?"""
             else:
                 f.write("These rules have unknown age with 0 hits - manual review recommended.\n\n")
             
+            # Source summary section (Requirement 15.4)
+            source_summary = self._get_source_summary(results)
+            if source_summary['has_local_files'] or source_summary['has_managed_groups']:
+                f.write("SOURCES\n")
+                f.write("-" * 70 + "\n")
+                for source_label, source_count in source_summary['sources']:
+                    f.write(f"  {source_label}: {source_count:,} rules\n")
+                f.write("\n")
+            
             f.write("UNUSED RULES LIST\n")
             f.write("-" * 70 + "\n")
-            f.write(f"{'Line':<6} {'SID':<8} {'Age':<8} {'Message':<40}\n")
+            f.write(f"{'Line':<6} {'SID':<8} {'Age':<8} {'Source':<25} {'Message':<40}\n")
             f.write("-" * 70 + "\n")
             
             sid_stats = results.get('sid_stats', {})
+            local_file_rules_text = results.get('local_file_rules_text', {})
             
             for sid in sorted(unused_sids):
+                # Determine source (Requirement 15.1)
+                source_label = self._get_source_label_for_sid(sid, results)
+                
                 rule = next((r for r in self.parent.rules 
                            if hasattr(r, 'sid') and r.sid == sid), None)
                 
@@ -4844,8 +6425,22 @@ Would you like to run a complete analysis?"""
                     days = stat.get('days_in_production')
                     days_str = f"{days}d" if days is not None else 'Unknown'
                     message = rule.message[:40] + "..." if len(rule.message) > 40 else rule.message
+                    source_display = source_label[:23] + '..' if len(source_label) > 25 else source_label
                     
-                    f.write(f"{line_num:<6} {sid:<8} {days_str:<8} {message:<40}\n")
+                    f.write(f"{line_num:<6} {sid:<8} {days_str:<8} {source_display:<25} {message:<40}\n")
+                elif sid in local_file_rules_text:
+                    # Local file rule not in current editor
+                    stat = sid_stats.get(sid, {})
+                    days = stat.get('days_in_production')
+                    days_str = f"{days}d" if days is not None else 'Unknown'
+                    source_display = source_label[:23] + '..' if len(source_label) > 25 else source_label
+                    # Extract message from rule text
+                    rule_text = local_file_rules_text[sid]
+                    import re
+                    msg_match = re.search(r'msg:"([^"]*)"', rule_text)
+                    message = msg_match.group(1)[:40] if msg_match else ''
+                    
+                    f.write(f"{'—':<6} {sid:<8} {days_str:<8} {source_display:<25} {message:<40}\n")
             
             # Statistics
             f.write("\n")
@@ -4953,12 +6548,17 @@ Would you like to run a complete analysis?"""
                 <th>Line</th>
                 <th>SID</th>
                 <th>Age</th>
+                <th>Source</th>
                 <th>Message</th>
             </tr>
         </thead>
         <tbody>'''
         
+        local_file_rules_text = results.get('local_file_rules_text', {})
+        
         for sid in sorted(unused_sids):
+            source_label = self._get_source_label_for_sid(sid, results)
+            
             rule = next((r for r in self.parent.rules 
                        if hasattr(r, 'sid') and r.sid == sid), None)
             
@@ -4974,6 +6574,25 @@ Would you like to run a complete analysis?"""
                 <td>{line_num}</td>
                 <td>{sid}</td>
                 <td>{days_str}</td>
+                <td>{source_label}</td>
+                <td>{message}</td>
+            </tr>'''
+            elif sid in local_file_rules_text:
+                # Local file rule
+                stat = sid_stats.get(sid, {})
+                days = stat.get('days_in_production')
+                days_str = f"{days} days" if days is not None else 'Unknown'
+                rule_text = local_file_rules_text[sid]
+                import re
+                msg_match = re.search(r'msg:"([^"]*)"', rule_text)
+                message = msg_match.group(1) if msg_match else ''
+                
+                html += f'''
+            <tr>
+                <td>&mdash;</td>
+                <td>{sid}</td>
+                <td>{days_str}</td>
+                <td>{source_label}</td>
                 <td>{message}</td>
             </tr>'''
         
@@ -5051,14 +6670,27 @@ Would you like to run a complete analysis?"""
             
             f.write("Rules that trigger rarely (potential shadow rules).\n\n")
             
+            # Source summary section (Requirement 15.4)
+            source_summary = self._get_source_summary(results)
+            if source_summary['has_local_files'] or source_summary['has_managed_groups']:
+                f.write("SOURCES\n")
+                f.write("-" * 70 + "\n")
+                for source_label, source_count in source_summary['sources']:
+                    f.write(f"  {source_label}: {source_count:,} rules\n")
+                f.write("\n")
+            
             f.write("LOW-FREQUENCY RULES LIST\n")
             f.write("-" * 70 + "\n")
-            f.write(f"{'Line':<6} {'SID':<8} {'Hits':<6} {'Last Hit':<12} {'Message':<40}\n")
+            f.write(f"{'Line':<6} {'SID':<8} {'Hits':<6} {'Last Hit':<12} {'Source':<25} {'Message':<30}\n")
             f.write("-" * 70 + "\n")
             
             sid_stats = results.get('sid_stats', {})
+            local_file_rules_text = results.get('local_file_rules_text', {})
             
             for sid in sorted(low_freq_sids):
+                source_label = self._get_source_label_for_sid(sid, results)
+                source_display = source_label[:23] + '..' if len(source_label) > 25 else source_label
+                
                 rule = next((r for r in self.parent.rules 
                            if hasattr(r, 'sid') and r.sid == sid), None)
                 
@@ -5068,9 +6700,21 @@ Would you like to run a complete analysis?"""
                     hits = stat.get('hits', 0)
                     last_hit_days = stat.get('last_hit_days', 999)
                     last_hit_str = f"{last_hit_days}d ago" if last_hit_days < 999 else 'Unknown'
-                    message = rule.message[:40] + "..." if len(rule.message) > 40 else rule.message
+                    message = rule.message[:30] + "..." if len(rule.message) > 30 else rule.message
                     
-                    f.write(f"{line_num:<6} {sid:<8} {hits:<6} {last_hit_str:<12} {message:<40}\n")
+                    f.write(f"{line_num:<6} {sid:<8} {hits:<6} {last_hit_str:<12} {source_display:<25} {message:<30}\n")
+                elif sid in local_file_rules_text:
+                    # Local file rule
+                    stat = sid_stats.get(sid, {})
+                    hits = stat.get('hits', 0)
+                    last_hit_days = stat.get('last_hit_days', 999)
+                    last_hit_str = f"{last_hit_days}d ago" if last_hit_days < 999 else 'Unknown'
+                    rule_text = local_file_rules_text[sid]
+                    import re
+                    msg_match = re.search(r'msg:"([^"]*)"', rule_text)
+                    message = msg_match.group(1)[:30] if msg_match else ''
+                    
+                    f.write(f"{'—':<6} {sid:<8} {hits:<6} {last_hit_str:<12} {source_display:<25} {message:<30}\n")
             
             # Statistics
             f.write("\n")
@@ -5168,12 +6812,17 @@ Would you like to run a complete analysis?"""
                 <th>SID</th>
                 <th>Hits</th>
                 <th>Last Hit</th>
+                <th>Source</th>
                 <th>Message</th>
             </tr>
         </thead>
         <tbody>'''
         
+        local_file_rules_text = results.get('local_file_rules_text', {})
+        
         for sid in sorted(low_freq_sids):
+            source_label = self._get_source_label_for_sid(sid, results)
+            
             rule = next((r for r in self.parent.rules 
                        if hasattr(r, 'sid') and r.sid == sid), None)
             
@@ -5201,6 +6850,36 @@ Would you like to run a complete analysis?"""
                 <td>{sid}</td>
                 <td>{hits}</td>
                 <td>{last_hit_str}</td>
+                <td>{source_label}</td>
+                <td>{message}</td>
+            </tr>'''
+            elif sid in local_file_rules_text:
+                # Local file rule
+                stat = sid_stats.get(sid, {})
+                hits = stat.get('hits', 0)
+                last_hit_days = stat.get('last_hit_days', 999)
+                last_hit_str = f"{last_hit_days} days ago" if last_hit_days < 999 else 'Unknown'
+                rule_text = local_file_rules_text[sid]
+                import re
+                msg_match = re.search(r'msg:"([^"]*)"', rule_text)
+                message = msg_match.group(1) if msg_match else ''
+                
+                if last_hit_days >= 21:
+                    row_class = 'stale_high'
+                elif last_hit_days >= 14:
+                    row_class = 'stale_medium'
+                elif last_hit_days >= 7:
+                    row_class = 'stale_low'
+                else:
+                    row_class = 'stale_none'
+                
+                html += f'''
+            <tr class="{row_class}">
+                <td>&mdash;</td>
+                <td>{sid}</td>
+                <td>{hits}</td>
+                <td>{last_hit_str}</td>
+                <td>{source_label}</td>
                 <td>{message}</td>
             </tr>'''
         
@@ -5470,14 +7149,22 @@ Would you like to run a complete analysis?"""
     
     def _export_search_text(self, filename, sid, stats, results):
         """Export search result as plain text"""
-        # Find the rule
+        # Find the rule in current file
         rule = next((r for r in self.parent.rules 
                    if hasattr(r, 'sid') and r.sid == sid), None)
         
-        if not rule:
+        # Get source attribution (Requirement 15.1, 15.3)
+        source_label = self._get_source_label_for_sid(sid, results)
+        local_file_rules_text = results.get('local_file_rules_text', {})
+        
+        # If not in current file, check local files
+        rule_text_str = None
+        if not rule and sid in local_file_rules_text:
+            rule_text_str = local_file_rules_text[sid]
+        
+        if not rule and not rule_text_str:
             return
         
-        line_num = self.parent.rules.index(rule) + 1
         category = stats.get('category', 'Unknown')
         
         with open(filename, 'w', encoding='utf-8') as f:
@@ -5485,7 +7172,8 @@ Would you like to run a complete analysis?"""
             f.write("=" * 70 + "\n\n")
             
             f.write(f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
-            f.write(f"Analysis Period: Last {results['time_range_days']} days\n\n")
+            f.write(f"Analysis Period: Last {results['time_range_days']} days\n")
+            f.write(f"Source: {source_label}\n\n")
             
             f.write("USAGE STATISTICS\n")
             f.write("-" * 70 + "\n")
@@ -5502,20 +7190,34 @@ Would you like to run a complete analysis?"""
             f.write("\n")
             f.write("RULE INFORMATION\n")
             f.write("-" * 70 + "\n")
-            f.write(f"Line #: {line_num}\n")
-            f.write(f"Action: {rule.action.upper()}\n")
-            f.write(f"Protocol: {rule.protocol.upper()}\n")
-            f.write(f"Message: {rule.message}\n")
             
-            if hasattr(rule, 'rev'):
-                f.write(f"Revision: {rule.rev}\n")
+            if rule:
+                line_num = self.parent.rules.index(rule) + 1
+                f.write(f"Line #: {line_num}\n")
+                f.write(f"Action: {rule.action.upper()}\n")
+                f.write(f"Protocol: {rule.protocol.upper()}\n")
+                f.write(f"Message: {rule.message}\n")
+                if hasattr(rule, 'rev'):
+                    f.write(f"Revision: {rule.rev}\n")
+            else:
+                # Local file rule - parse from text
+                import re
+                action_match = re.match(r'(\w+)\s', rule_text_str)
+                if action_match:
+                    f.write(f"Action: {action_match.group(1).upper()}\n")
+                msg_match = re.search(r'msg:"([^"]*)"', rule_text_str)
+                if msg_match:
+                    f.write(f"Message: {msg_match.group(1)}\n")
             
-            f.write("\n")
-            f.write(f"Category: {category}\n\n")
+            f.write(f"Source: {source_label}\n")
+            f.write(f"\nCategory: {category}\n\n")
             
             f.write("FULL RULE\n")
             f.write("-" * 70 + "\n")
-            f.write(f"{rule.to_string()}\n\n")
+            if rule:
+                f.write(f"{rule.to_string()}\n\n")
+            else:
+                f.write(f"{rule_text_str}\n\n")
             
             f.write("ANALYSIS\n")
             f.write("-" * 70 + "\n")
@@ -5527,14 +7229,22 @@ Would you like to run a complete analysis?"""
         from src.core.version import get_main_version
         version_str = get_main_version()
         
-        # Find the rule
+        # Get source attribution (Requirement 15.1, 15.3)
+        source_label = self._get_source_label_for_sid(sid, results)
+        local_file_rules_text = results.get('local_file_rules_text', {})
+        
+        # Find the rule in current file
         rule = next((r for r in self.parent.rules 
                    if hasattr(r, 'sid') and r.sid == sid), None)
         
-        if not rule:
+        # If not in current file, check local files
+        rule_text_str = None
+        if not rule and sid in local_file_rules_text:
+            rule_text_str = local_file_rules_text[sid]
+        
+        if not rule and not rule_text_str:
             return
         
-        line_num = self.parent.rules.index(rule) + 1
         category = stats.get('category', 'Unknown')
         
         html = f'''<!DOCTYPE html>
@@ -5607,7 +7317,8 @@ Would you like to run a complete analysis?"""
         <div class="title">SID {sid} Statistics</div>
         <div class="meta">
             <strong>Generated:</strong> {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}<br>
-            <strong>Analysis Period:</strong> Last {results['time_range_days']} days
+            <strong>Analysis Period:</strong> Last {results['time_range_days']} days<br>
+            <strong>Source:</strong> {source_label}
         </div>
     </div>
     
@@ -5627,22 +7338,49 @@ Would you like to run a complete analysis?"""
             html += f'''
             <tr><td>Age of Rule</td><td>{stats['days_in_production']} days</td></tr>'''
         
-        html += f'''
+        html += '''
         </table>
     </div>
     
     <div class="section">
-        <div class="section-title">Rule Information</div>
+        <div class="section-title">Rule Information</div>'''
+        
+        if rule:
+            line_num = self.parent.rules.index(rule) + 1
+            html += f'''
         <p><strong>Line:</strong> {line_num}<br>
         <strong>Action:</strong> {rule.action.upper()}<br>
         <strong>Protocol:</strong> {rule.protocol.upper()}<br>
-        <strong>Message:</strong> {rule.message}</p>
-        <p><strong>Category:</strong> {category}</p>
+        <strong>Message:</strong> {rule.message}<br>
+        <strong>Source:</strong> {source_label}</p>
+        <p><strong>Category:</strong> {category}</p>'''
+        else:
+            # Local file rule - parse from text
+            import re
+            action_match = re.match(r'(\w+)\s', rule_text_str)
+            action_str = action_match.group(1).upper() if action_match else '?'
+            msg_match = re.search(r'msg:"([^"]*)"', rule_text_str)
+            msg_str = msg_match.group(1) if msg_match else ''
+            html += f'''
+        <p><strong>Action:</strong> {action_str}<br>
+        <strong>Message:</strong> {msg_str}<br>
+        <strong>Source:</strong> {source_label}</p>
+        <p><strong>Category:</strong> {category}</p>'''
+        
+        html += '''
     </div>
     
     <div class="section">
-        <div class="section-title">Full Rule</div>
-        <div class="rule-text">{rule.to_string()}</div>
+        <div class="section-title">Full Rule</div>'''
+        
+        if rule:
+            html += f'''
+        <div class="rule-text">{rule.to_string()}</div>'''
+        else:
+            html += f'''
+        <div class="rule-text">{rule_text_str}</div>'''
+        
+        html += f'''
     </div>
     
     <div style="margin-top: 50px; padding-top: 20px; border-top: 1px solid #dee2e6; color: #6c757d; font-size: 12px;">
@@ -5667,12 +7405,26 @@ Would you like to run a complete analysis?"""
             
             f.write("Rules that don't write to CloudWatch Logs.\n\n")
             
+            # Source summary section (Requirement 15.4)
+            source_summary = self._get_source_summary(results)
+            if source_summary['has_local_files'] or source_summary['has_managed_groups']:
+                f.write("SOURCES\n")
+                f.write("-" * 70 + "\n")
+                for source_label, source_count in source_summary['sources']:
+                    f.write(f"  {source_label}: {source_count:,} rules\n")
+                f.write("\n")
+            
             f.write("UNLOGGED RULES LIST\n")
             f.write("-" * 70 + "\n")
-            f.write(f"{'Line':<6} {'SID':<8} {'Action':<8} {'Reason':<25} {'Message':<30}\n")
+            f.write(f"{'Line':<6} {'SID':<8} {'Action':<8} {'Source':<22} {'Reason':<22} {'Message':<25}\n")
             f.write("-" * 70 + "\n")
             
+            local_file_rules_text = results.get('local_file_rules_text', {})
+            
             for sid in sorted(unlogged_sids):
+                source_label = self._get_source_label_for_sid(sid, results)
+                source_display = source_label[:20] + '..' if len(source_label) > 22 else source_label
+                
                 rule = next((r for r in self.parent.rules
                            if hasattr(r, 'sid') and r.sid == sid), None)
                 
@@ -5682,7 +7434,6 @@ Would you like to run a complete analysis?"""
                     
                     # Determine reason
                     action_lower = rule.action.lower()
-                    options_text = f"{rule.content} {rule.original_options}".lower()
                     
                     if action_lower == "pass":
                         reason = "Pass without 'alert'"
@@ -5691,8 +7442,26 @@ Would you like to run a complete analysis?"""
                     else:
                         reason = "Unknown"
                     
-                    message = rule.message[:30] + "..." if len(rule.message) > 30 else rule.message
-                    f.write(f"{line_num:<6} {sid:<8} {action:<8} {reason:<25} {message:<30}\n")
+                    message = rule.message[:25] + "..." if len(rule.message) > 25 else rule.message
+                    f.write(f"{line_num:<6} {sid:<8} {action:<8} {source_display:<22} {reason:<22} {message:<25}\n")
+                elif sid in local_file_rules_text:
+                    # Local file rule
+                    rule_text = local_file_rules_text[sid]
+                    import re
+                    action_match = re.match(r'(\w+)\s', rule_text)
+                    action = action_match.group(1).upper() if action_match else '?'
+                    action_lower = action.lower()
+                    
+                    if action_lower == "pass":
+                        reason = "Pass without 'alert'"
+                    elif action_lower in ["drop", "reject"]:
+                        reason = f"{action_lower.capitalize()} with 'noalert'"
+                    else:
+                        reason = "Unknown"
+                    
+                    msg_match = re.search(r'msg:"([^"]*)"', rule_text)
+                    message = msg_match.group(1)[:25] if msg_match else ''
+                    f.write(f"{'—':<6} {sid:<8} {action:<8} {source_display:<22} {reason:<22} {message:<25}\n")
             
             f.write("\n")
             f.write("STATISTICS\n")
@@ -5776,13 +7545,18 @@ Would you like to run a complete analysis?"""
                 <th>SID</th>
                 <th>Action</th>
                 <th>Protocol</th>
+                <th>Source</th>
                 <th>Reason</th>
                 <th>Message</th>
             </tr>
         </thead>
         <tbody>'''
         
+        local_file_rules_text = results.get('local_file_rules_text', {})
+        
         for sid in sorted(unlogged_sids):
+            source_label = self._get_source_label_for_sid(sid, results)
+            
             rule = next((r for r in self.parent.rules
                        if hasattr(r, 'sid') and r.sid == sid), None)
             
@@ -5794,7 +7568,6 @@ Would you like to run a complete analysis?"""
                 
                 # Determine reason
                 action_lower = rule.action.lower()
-                options_text = f"{rule.content} {rule.original_options}".lower()
                 
                 if action_lower == "pass":
                     reason = "Pass without 'alert'"
@@ -5809,6 +7582,36 @@ Would you like to run a complete analysis?"""
                 <td>{sid}</td>
                 <td>{action}</td>
                 <td>{protocol}</td>
+                <td>{source_label}</td>
+                <td>{reason}</td>
+                <td>{message}</td>
+            </tr>'''
+            elif sid in local_file_rules_text:
+                # Local file rule
+                rule_text = local_file_rules_text[sid]
+                import re
+                action_match = re.match(r'(\w+)\s', rule_text)
+                action = action_match.group(1).upper() if action_match else '?'
+                action_lower = action.lower()
+                protocol_match = re.match(r'\w+\s+(\w+)\s', rule_text)
+                protocol = protocol_match.group(1).upper() if protocol_match else '?'
+                msg_match = re.search(r'msg:"([^"]*)"', rule_text)
+                message = msg_match.group(1) if msg_match else ''
+                
+                if action_lower == "pass":
+                    reason = "Pass without 'alert'"
+                elif action_lower in ["drop", "reject"]:
+                    reason = f"{action_lower.capitalize()} with 'noalert'"
+                else:
+                    reason = "Unknown"
+                
+                html += f'''
+            <tr>
+                <td>&mdash;</td>
+                <td>{sid}</td>
+                <td>{action}</td>
+                <td>{protocol}</td>
+                <td>{source_label}</td>
                 <td>{reason}</td>
                 <td>{message}</td>
             </tr>'''
@@ -11641,6 +13444,57 @@ Would you like to run a complete analysis?"""
         managed_sid_to_group = results.get('managed_sid_to_group', {})
         serialized['managed_sid_to_group'] = {str(k): v for k, v in managed_sid_to_group.items()}
 
+        # Serialize local file metadata (additional local .suricata files)
+        local_file_metadata = results.get('local_file_metadata', [])
+        serialized['local_files'] = []
+        for file_meta in local_file_metadata:
+            # Support both dict and dataclass-like objects
+            if isinstance(file_meta, dict):
+                serialized['local_files'].append({
+                    'path': file_meta.get('path', ''),
+                    'filename': file_meta.get('filename', ''),
+                    'rule_count': file_meta.get('rule_count', 0),
+                    'sids': list(file_meta.get('sids', [])),
+                    'unlogged_sids': list(file_meta.get('unlogged_sids', []))
+                })
+            else:
+                # Dataclass-like object (LocalFileMetadata)
+                serialized['local_files'].append({
+                    'path': getattr(file_meta, 'path', ''),
+                    'filename': getattr(file_meta, 'filename', ''),
+                    'rule_count': getattr(file_meta, 'rule_count', 0),
+                    'sids': list(getattr(file_meta, 'sids', [])),
+                    'unlogged_sids': list(getattr(file_meta, 'unlogged_sids', []))
+                })
+
+        # Serialize sid_to_source mapping (SID -> source label after deduplication)
+        # sid_to_source has int keys - convert to str for JSON serialization
+        sid_to_source = results.get('sid_to_source', {})
+        serialized['sid_to_source'] = {str(k): v for k, v in sid_to_source.items()}
+
+        # Serialize total_your_rules count (combined current file + local file unique SIDs)
+        serialized['total_your_rules'] = results.get('total_your_rules', 0)
+
+        # Serialize local file SIDs mapping (filename -> SID list)
+        local_file_sids = results.get('local_file_sids', {})
+        serialized['local_file_sids'] = {k: list(v) for k, v in local_file_sids.items()}
+
+        # Serialize local file unlogged SIDs as list
+        serialized['local_file_unlogged_sids'] = list(results.get('local_file_unlogged_sids', set()))
+
+        # Serialize local file rule ages (SID -> days in production)
+        # Convert int keys to str for JSON, preserve None values
+        local_file_rule_ages = results.get('local_file_rule_ages', {})
+        serialized['local_file_rule_ages'] = {str(k): v for k, v in local_file_rule_ages.items()}
+
+        # Serialize local file last modified dates (SID -> ISO date string)
+        # Values may be datetime.date or datetime.datetime - .isoformat() works on both
+        local_file_last_modified = results.get('local_file_last_modified', {})
+        serialized['local_file_last_modified'] = {
+            str(k): v.isoformat() if v is not None else None
+            for k, v in local_file_last_modified.items()
+        }
+
         return serialized
     
     def load_stats_from_file(self, stats_filename):
@@ -11769,6 +13623,78 @@ Would you like to run a complete analysis?"""
                 for sid in sids:
                     managed_sid_to_group[sid] = group_name
         results['managed_sid_to_group'] = managed_sid_to_group
+
+        # Deserialize local file metadata (additional local .suricata files)
+        local_files_data = stats_data.get('local_files', [])
+        local_file_metadata = []
+        for file_data in local_files_data:
+            file_meta = {
+                'path': file_data.get('path', ''),
+                'filename': file_data.get('filename', ''),
+                'rule_count': file_data.get('rule_count', 0),
+                'sids': file_data.get('sids', []),
+                'unlogged_sids': file_data.get('unlogged_sids', []),
+                'history_available': file_data.get('history_available', False),
+                'exists_on_disk': os.path.exists(file_data.get('path', ''))
+            }
+            local_file_metadata.append(file_meta)
+        results['local_file_metadata'] = local_file_metadata
+
+        # Deserialize sid_to_source mapping (str keys back to int)
+        serialized_sid_to_source = stats_data.get('sid_to_source', {})
+        sid_to_source = {}
+        for sid_str, source in serialized_sid_to_source.items():
+            sid_to_source[int(sid_str)] = source
+        results['sid_to_source'] = sid_to_source
+
+        # Deserialize total_your_rules count
+        results['total_your_rules'] = stats_data.get('total_your_rules', 0)
+
+        # Deserialize local file SIDs mapping (filename -> SID list)
+        results['local_file_sids'] = stats_data.get('local_file_sids', {})
+
+        # Deserialize local file unlogged SIDs
+        results['local_file_unlogged_sids'] = set(stats_data.get('local_file_unlogged_sids', []))
+
+        # Deserialize local file rule ages (str keys back to int, preserve None values)
+        serialized_rule_ages = stats_data.get('local_file_rule_ages', {})
+        local_file_rule_ages = {}
+        for sid_str, age in serialized_rule_ages.items():
+            local_file_rule_ages[int(sid_str)] = age
+        results['local_file_rule_ages'] = local_file_rule_ages
+
+        # Deserialize local file last modified dates (str keys back to int, ISO date strings back to date objects)
+        import datetime as _dt
+        serialized_last_modified = stats_data.get('local_file_last_modified', {})
+        local_file_last_modified = {}
+        for sid_str, date_str in serialized_last_modified.items():
+            if date_str is not None:
+                try:
+                    local_file_last_modified[int(sid_str)] = _dt.date.fromisoformat(date_str)
+                except (ValueError, TypeError):
+                    pass
+        results['local_file_last_modified'] = local_file_last_modified
+
+        # Attempt to reconstruct local_file_rules_text by re-reading local files from disk
+        # This enables rule messages to display when viewing saved results
+        local_file_rules_text = {}
+        for file_meta in local_file_metadata:
+            file_path = file_meta.get('path', '')
+            if file_path and os.path.isfile(file_path):
+                try:
+                    from src.core.suricata_rule import SuricataRule
+                    with open(file_path, 'r', encoding='utf-8') as f:
+                        for line in f:
+                            line = line.strip()
+                            if not line or line.startswith('#'):
+                                continue
+                            rule = SuricataRule.from_string(line)
+                            if rule and rule.sid:
+                                local_file_rules_text[rule.sid] = line
+                except (IOError, OSError, UnicodeDecodeError):
+                    pass  # File no longer readable - messages will be unavailable
+        results['local_file_rules_text'] = local_file_rules_text
+        results['duplicate_count'] = stats_data.get('duplicate_count', 0)
 
         return results
     
@@ -12882,6 +14808,128 @@ Would you like to run a complete analysis?"""
             self.parent.root.lift()
             self.parent.root.focus_force()
     
+    def _show_local_file_detail_popup(self, sid, source_filename, source_path,
+                                       rule_stats, rule_text, analysis_results,
+                                       results_window):
+        """Show detail popup for a rule from an additional local file.
+        
+        Displays: SID, source file name, action, hit statistics, full rule text.
+        Includes "Open in Editor" button with unsaved-changes guardrails.
+        Handles file unavailability by disabling the button and showing a message.
+        
+        Args:
+            sid: The rule's SID (int)
+            source_filename: Base filename of the source file
+            source_path: Absolute path to the source file
+            rule_stats: Dict with hits, hits_per_day, percent keys
+            rule_text: Full rule text string
+            analysis_results: The full analysis results dict
+            results_window: The results window Toplevel
+        """
+        # Check file existence up front (Requirement 14.3, 19.7)
+        file_exists = bool(source_path) and os.path.isfile(source_path)
+        
+        detail = tk.Toplevel(results_window)
+        detail.title(f"Local File Rule Detail \u2014 SID {sid}")
+        detail.geometry("700x400")
+        detail.resizable(True, True)
+        detail.minsize(500, 300)
+        detail.geometry("+%d+%d" % (
+            results_window.winfo_rootx() + 80,
+            results_window.winfo_rooty() + 120
+        ))
+        detail.grab_set()
+        
+        df = ttk.Frame(detail)
+        df.pack(fill=tk.BOTH, expand=True, padx=20, pady=20)
+        
+        # SID header in warm orange (distinct from teal managed rules)
+        ttk.Label(df, text=f"SID {sid}",
+                 font=("TkDefaultFont", 12, "bold"),
+                 foreground="#C75000").pack(anchor=tk.W, pady=(0, 5))
+        ttk.Label(df, text=f"Source: {source_filename}",
+                 font=("TkDefaultFont", 9), foreground="#C75000").pack(anchor=tk.W, pady=(0, 5))
+        
+        # File unavailability warning (Requirement 14.3)
+        if not file_exists:
+            warn_frame = ttk.Frame(df)
+            warn_frame.pack(fill=tk.X, pady=(0, 5))
+            ttk.Label(warn_frame, text="\u26a0",
+                     font=("TkDefaultFont", 10), foreground="#D32F2F").pack(side=tk.LEFT)
+            ttk.Label(warn_frame, text=" File is no longer available at its stored path",
+                     font=("TkDefaultFont", 9), foreground="#D32F2F").pack(side=tk.LEFT)
+        
+        # Hit statistics
+        hits = rule_stats.get('hits', 0)
+        hits_per_day = rule_stats.get('hits_per_day', 0.0)
+        percent = rule_stats.get('percent', 0.0)
+        ttk.Label(df, text=f"Hits: {hits:,}  |  Hits/Day: {hits_per_day:.1f}  |  Traffic: {percent:.1f}%",
+                 font=("TkDefaultFont", 9)).pack(anchor=tk.W, pady=(0, 10))
+        
+        # Full rule text
+        ttk.Label(df, text="Full Rule Text:",
+                 font=("TkDefaultFont", 10, "bold")).pack(anchor=tk.W, pady=(0, 5))
+        
+        rule_text_widget = tk.Text(df, height=6, wrap=tk.WORD,
+                                  font=("Consolas", 9), bg="#F5F5F5")
+        rule_text_widget.pack(fill=tk.BOTH, expand=True, pady=(0, 10))
+        rule_text_widget.insert(tk.END, rule_text)
+        rule_text_widget.config(state=tk.DISABLED)
+        # Enable copy bindings for read-only text (cross-platform)
+        rule_text_widget.bind("<Control-c>", lambda e: self._copy_text_selection(rule_text_widget) or "break")
+        rule_text_widget.bind("<Command-c>", lambda e: self._copy_text_selection(rule_text_widget) or "break")
+        
+        # Buttons frame
+        btn_frame = ttk.Frame(df)
+        btn_frame.pack(fill=tk.X, pady=(5, 0))
+        
+        # "Open in Editor" button with file unavailability handling (Requirement 14.3, 19.7)
+        def open_in_editor():
+            if source_path and os.path.isfile(source_path):
+                # Check for unsaved changes (Requirement 9.3)
+                if self.parent.modified:
+                    response = messagebox.askyesnocancel(
+                        "Unsaved Changes",
+                        "The current file has unsaved changes.\n\n"
+                        "Save before opening the local file?",
+                        parent=detail
+                    )
+                    if response is None:
+                        # Cancel — keep popup open (Requirement 9.5)
+                        return
+                    elif response:
+                        # Save first
+                        self.parent.save_file()
+                
+                # Load the local file and navigate to rule (Requirement 9.4, 9.6)
+                detail.destroy()
+                results_window.destroy()
+                self.parent.load_rules_from_file(source_path)
+                # Navigate to the rule in the main editor treeview
+                all_items = self.parent.tree.get_children()
+                for i, r in enumerate(self.parent.rules):
+                    if hasattr(r, 'sid') and r.sid == sid:
+                        if i < len(all_items):
+                            self.parent.tree.selection_set(all_items[i])
+                            self.parent.tree.focus(all_items[i])
+                            self.parent.tree.see(all_items[i])
+                        break
+            else:
+                messagebox.showwarning("File Unavailable",
+                                      f"The file '{source_filename}' is no longer available at:\n{source_path}",
+                                      parent=detail)
+        
+        if file_exists:
+            ttk.Button(btn_frame, text="Open in Editor", command=open_in_editor).pack(side=tk.LEFT, padx=(0, 10))
+        else:
+            # Disabled button with unavailability message (Requirement 14.3)
+            btn = ttk.Button(btn_frame, text="Open in Editor", state=tk.DISABLED)
+            btn.pack(side=tk.LEFT, padx=(0, 10))
+            ttk.Label(btn_frame, text="(file no longer available)",
+                     font=("TkDefaultFont", 8), foreground="#999999").pack(side=tk.LEFT)
+        
+        ttk.Button(btn_frame, text="Close", command=detail.destroy).pack(side=tk.RIGHT)
+    
     def _copy_text_selection(self, widget):
         """Copy selected text from Text widget to clipboard"""
         try:
@@ -13436,7 +15484,7 @@ Would you like to run a complete analysis?"""
         # Get key metrics
         health_score = analysis_results['health_score']
         categories = analysis_results['categories']
-        total_rules = analysis_results['total_rules']
+        total_rules = analysis_results.get('total_your_rules', analysis_results['total_rules'])
         total_logged = analysis_results.get('total_logged_rules', total_rules)
         
         # Calculate components
@@ -14048,7 +16096,7 @@ Would you like to run a complete analysis?"""
         tree_container = ttk.Frame(content)
         tree_container.pack(fill=tk.BOTH, expand=True, pady=(0, 10))
         
-        columns = ("Domain/Hostname", "Hits", "% of Cat", "Rule SID", "Action")
+        columns = ("Domain/Hostname", "Hits", "% of Cat", "Rule SID", "Source", "Action")
         domain_tree = ttk.Treeview(tree_container, columns=columns, show="headings", height=12)
         
         domain_tree.heading("Domain/Hostname", text="Domain/Hostname",
@@ -14059,12 +16107,15 @@ Would you like to run a complete analysis?"""
                           command=lambda: self._sort_treeview(domain_tree, "% of Cat", False))
         domain_tree.heading("Rule SID", text="Rule SID",
                           command=lambda: self._sort_treeview(domain_tree, "Rule SID", False))
+        domain_tree.heading("Source", text="Source",
+                          command=lambda: self._sort_treeview(domain_tree, "Source", False))
         domain_tree.heading("Action", text="Action")
         
-        domain_tree.column("Domain/Hostname", width=350, stretch=False)
-        domain_tree.column("Hits", width=80, stretch=False)
-        domain_tree.column("% of Cat", width=100, stretch=False)
-        domain_tree.column("Rule SID", width=120, stretch=False)
+        domain_tree.column("Domain/Hostname", width=300, stretch=False)
+        domain_tree.column("Hits", width=70, stretch=False)
+        domain_tree.column("% of Cat", width=80, stretch=False)
+        domain_tree.column("Rule SID", width=100, stretch=False)
+        domain_tree.column("Source", width=140, stretch=False)
         domain_tree.column("Action", width=80, stretch=False)
         
         # Scrollbars
@@ -14082,6 +16133,9 @@ Would you like to run a complete analysis?"""
         domain_tree.tag_configure("discovered_category", foreground="#999999")
         domain_tree.tag_configure("rule_category", foreground="#000000")
         domain_tree.tag_configure("indirect_domain", foreground="#999999")
+
+        # Get sid_to_source for displaying source file attribution (Req 21.4, 21.5)
+        _cat_sid_to_source = analysis_results.get('sid_to_source', {})
 
         def populate_domain_table(event=None):
             """Populate domain table when category selection changes"""
@@ -14128,14 +16182,27 @@ Would you like to run a complete analysis?"""
                     # Grey out indirect domains and show n/a for hits/percent/action
                     sid_str = 'n/a'
                     action_str = 'n/a'
+                    source_str = 'n/a'
                     domain_tree.insert("", tk.END,
-                                      values=(hostname, "n/a", "n/a", sid_str, action_str),
+                                      values=(hostname, "n/a", "n/a", sid_str, source_str, action_str),
                                       tags=("indirect_domain",))
                 else:
                     sid_str = ', '.join(str(s) for s in sids)
                     action_str = ', '.join(actions) if actions else '(unknown)'
+                    # Determine source for SIDs in this row (Req 21.4, 21.5)
+                    # If multiple SIDs, show source of first SID
+                    source_str = "(current file)"
+                    if sids:
+                        first_sid = sids[0]
+                        source_label = _cat_sid_to_source.get(first_sid, '')
+                        if source_label.startswith('local:'):
+                            source_str = source_label[len('local:'):]
+                        elif source_label == 'current_file' or not source_label:
+                            source_str = "(current file)"
+                        else:
+                            source_str = source_label
                     domain_tree.insert("", tk.END,
-                                      values=(hostname, f"{hits:,}", f"{percent:.1f}%", sid_str, action_str),
+                                      values=(hostname, f"{hits:,}", f"{percent:.1f}%", sid_str, source_str, action_str),
                                       tags=(row_tag,))
         
         cat_combo.bind('<<ComboboxSelected>>', populate_domain_table)
@@ -14144,8 +16211,11 @@ Would you like to run a complete analysis?"""
         populate_domain_table()
         
         # Double-click handler to jump to rule in main editor (only for direct domains)
+        # For local file rules, show detail popup instead (Requirement 21.6)
         # We need a reference to the results_window — get it from the parent_tab's toplevel
         _results_window_ref = content.winfo_toplevel()
+        _cat_local_file_rules_text = analysis_results.get('local_file_rules_text', {})
+        _cat_sid_stats = analysis_results.get('sid_stats', {})
         
         def on_category_domain_double_click(event):
             item = domain_tree.identify_row(event.y)
@@ -14167,7 +16237,119 @@ Would you like to run a complete analysis?"""
             except (ValueError, TypeError):
                 return
             
-            # Find the rule with this SID in the main rules list
+            # Check if this SID belongs to a local file
+            source_label = _cat_sid_to_source.get(first_sid, '')
+            
+            if source_label.startswith('local:'):
+                # Local file rule — show detail popup (Requirement 21.6)
+                import os
+                source_filename = source_label[len('local:'):]
+                
+                # Find source file path from local_file_metadata
+                local_file_metadata = analysis_results.get('local_file_metadata', [])
+                source_path = ''
+                for meta in local_file_metadata:
+                    if meta.get('filename', '') == source_filename:
+                        source_path = meta.get('path', '')
+                        break
+                
+                # Get rule text and stats
+                rule_text = _cat_local_file_rules_text.get(first_sid, '(rule text not available)')
+                rule_stats = _cat_sid_stats.get(first_sid, {})
+                
+                # Show detail popup
+                detail = tk.Toplevel(_results_window_ref)
+                detail.title(f"Local File Rule Detail — SID {first_sid}")
+                detail.geometry("700x400")
+                detail.transient(_results_window_ref)
+                detail.grab_set()
+                detail.resizable(True, True)
+                detail.minsize(500, 300)
+                detail.geometry("+%d+%d" % (
+                    _results_window_ref.winfo_rootx() + 80,
+                    _results_window_ref.winfo_rooty() + 120
+                ))
+                
+                df = ttk.Frame(detail)
+                df.pack(fill=tk.BOTH, expand=True, padx=20, pady=20)
+                
+                # SID header in warm orange (distinct from teal managed rules)
+                ttk.Label(df, text=f"SID {first_sid}",
+                         font=("TkDefaultFont", 12, "bold"),
+                         foreground="#C75000").pack(anchor=tk.W, pady=(0, 5))
+                ttk.Label(df, text=f"Source: {source_filename}",
+                         font=("TkDefaultFont", 9), foreground="#C75000").pack(anchor=tk.W, pady=(0, 5))
+                
+                # Hit statistics
+                hits = rule_stats.get('hits', 0)
+                hits_per_day = rule_stats.get('hits_per_day', 0.0)
+                percent = rule_stats.get('percent', 0.0)
+                ttk.Label(df, text=f"Hits: {hits:,}  |  Hits/Day: {hits_per_day:.1f}  |  Traffic: {percent:.1f}%",
+                         font=("TkDefaultFont", 9)).pack(anchor=tk.W, pady=(0, 10))
+                
+                # Full rule text
+                ttk.Label(df, text="Full Rule Text:",
+                         font=("TkDefaultFont", 10, "bold")).pack(anchor=tk.W, pady=(0, 5))
+                
+                rule_text_widget = tk.Text(df, height=6, wrap=tk.WORD,
+                                          font=("Consolas", 9), bg="#F5F5F5")
+                rule_text_widget.pack(fill=tk.BOTH, expand=True, pady=(0, 10))
+                rule_text_widget.insert(tk.END, rule_text)
+                rule_text_widget.config(state=tk.DISABLED)
+                # Enable copy bindings for read-only text
+                rule_text_widget.bind("<Control-c>", lambda e: None)
+                rule_text_widget.bind("<Command-c>", lambda e: None)
+                
+                # Buttons frame
+                btn_frame = ttk.Frame(df)
+                btn_frame.pack(fill=tk.X, pady=(5, 0))
+                
+                # "Open in Editor" button
+                def open_in_editor():
+                    if source_path and os.path.isfile(source_path):
+                        # Check for unsaved changes
+                        if self.parent.modified:
+                            response = messagebox.askyesnocancel(
+                                "Unsaved Changes",
+                                "The current file has unsaved changes.\n\n"
+                                "Save before opening the local file?",
+                                parent=detail
+                            )
+                            if response is None:
+                                return
+                            elif response:
+                                self.parent.save_file()
+                        
+                        # Load the local file and navigate to rule
+                        detail.destroy()
+                        _results_window_ref.destroy()
+                        self.parent.load_rules_from_file(source_path)
+                        # Navigate to the rule in the main editor treeview
+                        all_items = self.parent.tree.get_children()
+                        for i, r in enumerate(self.parent.rules):
+                            if hasattr(r, 'sid') and r.sid == first_sid:
+                                if i < len(all_items):
+                                    self.parent.tree.selection_set(all_items[i])
+                                    self.parent.tree.focus(all_items[i])
+                                    self.parent.tree.see(all_items[i])
+                                break
+                    else:
+                        messagebox.showwarning("File Unavailable",
+                                            f"The file '{source_filename}' is no longer available at:\n{source_path}",
+                                            parent=detail)
+                
+                if source_path and os.path.isfile(source_path):
+                    ttk.Button(btn_frame, text="Open in Editor", command=open_in_editor).pack(side=tk.LEFT, padx=(0, 10))
+                else:
+                    btn = ttk.Button(btn_frame, text="Open in Editor", state=tk.DISABLED)
+                    btn.pack(side=tk.LEFT, padx=(0, 10))
+                    ttk.Label(btn_frame, text="(file no longer available)",
+                             font=("TkDefaultFont", 8), foreground="#999999").pack(side=tk.LEFT)
+                
+                ttk.Button(btn_frame, text="Close", command=detail.destroy).pack(side=tk.RIGHT)
+                return
+            
+            # Current file rule — jump to line in main editor (existing behavior)
             rule = next((r for r in self.parent.rules
                        if hasattr(r, 'sid') and r.sid == first_sid), None)
             if not rule:
@@ -14265,7 +16447,7 @@ Would you like to run a complete analysis?"""
         ttk.Button(button_row, text="Help", command=show_category_help).pack(side=tk.LEFT)
     
     def _create_all_rules_tab(self, parent_tab, analysis_results, results_window):
-        """Create the All Rules tab (Tab 10) showing complete view of custom + managed rules
+        """Create the All Rules tab (Tab 10) showing complete view of custom + local + managed rules
         
         Args:
             parent_tab: Parent frame for the tab
@@ -14283,13 +16465,29 @@ Would you like to run a complete analysis?"""
         time_range_days = analysis_results.get('time_range_days', 30)
         total_hits = sum(s.get('hits', 0) for s in sid_stats.values()) if sid_stats else 0
         
-        # Title
-        custom_count = analysis_results['total_rules']
-        total_all = custom_count + total_managed
+        # Local file data
+        sid_to_source = analysis_results.get('sid_to_source', {})
+        local_file_rules_text = analysis_results.get('local_file_rules_text', {})
+        local_file_sids_dict = analysis_results.get('local_file_sids', {})
+        local_file_metadata = analysis_results.get('local_file_metadata', [])
+        
+        # Title - use total_your_rules (unique SIDs after dedup) + managed for the total
+        # This matches the header "Rules:" count and "Total Rules Analyzed" on Summary tab
+        total_your_rules = analysis_results.get('total_your_rules', analysis_results['total_rules'])
+        total_all = total_your_rules + total_managed
         ttk.Label(content, text=f"📋 COMPLETE RULE HIT COUNT",
                  font=("TkDefaultFont", 11, "bold")).pack(anchor=tk.W, pady=(0, 5))
         
-        showing_label = ttk.Label(content, text=f"Showing {total_all:,} rules ({custom_count:,} custom + {total_managed:,} managed)",
+        # Build description showing breakdown: current file + local files + managed
+        custom_count = analysis_results['total_rules']  # current file rules
+        local_file_count = total_your_rules - custom_count  # additional unique local file rules
+        if local_file_count > 0:
+            showing_text = (f"Showing {total_all:,} rules "
+                          f"({custom_count:,} current file + {local_file_count:,} local files + {total_managed:,} managed)")
+        else:
+            showing_text = f"Showing {total_all:,} rules ({custom_count:,} custom + {total_managed:,} managed)"
+        
+        showing_label = ttk.Label(content, text=showing_text,
                                  font=("TkDefaultFont", 9), foreground="#666666")
         showing_label.pack(anchor=tk.W, pady=(0, 10))
         
@@ -14297,17 +16495,23 @@ Would you like to run a complete analysis?"""
         filter_frame = ttk.Frame(content)
         filter_frame.pack(fill=tk.X, pady=(0, 10))
         
-        # Source dropdown
+        # Source dropdown - include local file sources
         ttk.Label(filter_frame, text="Source:").pack(side=tk.LEFT, padx=(0, 5))
         source_values = ["All Sources"]
         custom_filename = os.path.basename(self.parent.current_file) if self.parent.current_file else "Custom Rules"
-        source_values.append(custom_filename)
+        source_values.append(f"Current file")
+        # Add local file sources
+        for lf_meta in local_file_metadata:
+            lf_filename = lf_meta.get('filename', '')
+            if lf_filename:
+                source_values.append(f"{lf_filename}")
+        # Add managed group sources
         for mg in analysis_results.get('managed_rule_groups', []):
-            source_values.append(mg['name'])
+            source_values.append(f"managed: {mg['name']}")
         
         source_var = tk.StringVar(value="All Sources")
         source_combo = ttk.Combobox(filter_frame, textvariable=source_var,
-                                   values=source_values, state="readonly", width=30)
+                                   values=source_values, state="readonly", width=35)
         source_combo.pack(side=tk.LEFT, padx=(0, 15))
         
         # Action dropdown
@@ -14347,7 +16551,7 @@ Would you like to run a complete analysis?"""
         ar_tree.column("% Traffic", width=80, stretch=False)
         ar_tree.column("Source", width=250, stretch=False)
         ar_tree.column("Action", width=70, stretch=False)
-        ar_tree.column("Message", width=350, stretch=True)
+        ar_tree.column("Message", width=350, stretch=False)
         
         # Scrollbars
         v_sb = ttk.Scrollbar(tree_container, orient=tk.VERTICAL, command=ar_tree.yview)
@@ -14363,8 +16567,10 @@ Would you like to run a complete analysis?"""
         # Color tags
         ar_tree.tag_configure("managed_rule", foreground="#2E8B8B")
         ar_tree.tag_configure("custom_rule", foreground="#000000")
+        ar_tree.tag_configure("local_file_rule", foreground="#5C6BC0")
         
-        # Double-click handler: custom rules jump to editor, managed rules show detail
+        # Double-click handler: custom rules jump to editor, managed rules show detail,
+        # local file rules show detail popup with "Open in Editor" button
         def on_all_rules_double_click(event):
             item = ar_tree.identify_row(event.y)
             if not item:
@@ -14375,6 +16581,117 @@ Would you like to run a complete analysis?"""
                 return
             
             tags = ar_tree.item(item, 'tags')
+            
+            if 'local_file_rule' in tags:
+                # Local file rule — show detail popup (Requirement 9.1)
+                try:
+                    sid = int(str(values[0]).replace(',', ''))  # SID column
+                except (ValueError, TypeError):
+                    return
+                
+                source_display = str(values[4]) if len(values) > 4 else ''  # Source column
+                # Extract filename from source label like "[extra.suricata]"
+                source_filename = source_display.replace('[', '').replace(']', '').strip()
+                
+                # Find source file path from local_file_metadata
+                ar_local_file_metadata = analysis_results.get('local_file_metadata', [])
+                source_path = ''
+                for meta in ar_local_file_metadata:
+                    if meta.get('filename', '') == source_filename:
+                        source_path = meta.get('path', '')
+                        break
+                
+                # Get rule text and stats
+                ar_local_file_rules_text = analysis_results.get('local_file_rules_text', {})
+                rule_text = ar_local_file_rules_text.get(sid, '(rule text not available)')
+                rule_stats = sid_stats.get(sid, {})
+                
+                # Show detail popup
+                detail = tk.Toplevel(results_window)
+                detail.title(f"Local File Rule Detail \u2014 SID {sid}")
+                detail.geometry("700x400")
+                detail.transient(results_window)
+                detail.grab_set()
+                detail.resizable(True, True)
+                detail.minsize(500, 300)
+                detail.geometry("+%d+%d" % (
+                    results_window.winfo_rootx() + 80,
+                    results_window.winfo_rooty() + 120
+                ))
+                
+                df = ttk.Frame(detail)
+                df.pack(fill=tk.BOTH, expand=True, padx=20, pady=20)
+                
+                # SID header in warm orange
+                ttk.Label(df, text=f"SID {sid}",
+                         font=("TkDefaultFont", 12, "bold"),
+                         foreground="#C75000").pack(anchor=tk.W, pady=(0, 5))
+                ttk.Label(df, text=f"Source: {source_filename}",
+                         font=("TkDefaultFont", 9), foreground="#C75000").pack(anchor=tk.W, pady=(0, 5))
+                
+                # Hit statistics
+                hits = rule_stats.get('hits', 0)
+                hits_per_day = rule_stats.get('hits_per_day', 0.0)
+                percent = rule_stats.get('percent', 0.0)
+                ttk.Label(df, text=f"Hits: {hits:,}  |  Hits/Day: {hits_per_day:.1f}  |  Traffic: {percent:.1f}%",
+                         font=("TkDefaultFont", 9)).pack(anchor=tk.W, pady=(0, 10))
+                
+                # Full rule text
+                ttk.Label(df, text="Full Rule Text:",
+                         font=("TkDefaultFont", 10, "bold")).pack(anchor=tk.W, pady=(0, 5))
+                
+                rule_text_widget = tk.Text(df, height=6, wrap=tk.WORD,
+                                          font=("Consolas", 9), bg="#F5F5F5")
+                rule_text_widget.pack(fill=tk.BOTH, expand=True, pady=(0, 10))
+                rule_text_widget.insert(tk.END, rule_text)
+                rule_text_widget.config(state=tk.DISABLED)
+                rule_text_widget.bind("<Control-c>", lambda e: None)
+                rule_text_widget.bind("<Command-c>", lambda e: None)
+                
+                # Buttons frame
+                btn_frame = ttk.Frame(df)
+                btn_frame.pack(fill=tk.X, pady=(5, 0))
+                
+                def open_in_editor_all_rules(s_path=source_path, s_filename=source_filename, s_sid=sid):
+                    if s_path and os.path.isfile(s_path):
+                        if self.parent.modified:
+                            response = messagebox.askyesnocancel(
+                                "Unsaved Changes",
+                                "The current file has unsaved changes.\n\n"
+                                "Save before opening the local file?",
+                                parent=detail
+                            )
+                            if response is None:
+                                return
+                            elif response:
+                                self.parent.save_file()
+                        detail.destroy()
+                        results_window.destroy()
+                        self.parent.load_rules_from_file(s_path)
+                        # Navigate to the rule in the main editor treeview
+                        all_items = self.parent.tree.get_children()
+                        for i, r in enumerate(self.parent.rules):
+                            if hasattr(r, 'sid') and r.sid == s_sid:
+                                if i < len(all_items):
+                                    self.parent.tree.selection_set(all_items[i])
+                                    self.parent.tree.focus(all_items[i])
+                                    self.parent.tree.see(all_items[i])
+                                break
+                    else:
+                        messagebox.showwarning("File Unavailable",
+                                            f"The file '{s_filename}' is no longer available at:\n{s_path}",
+                                            parent=detail)
+                
+                if source_path and os.path.isfile(source_path):
+                    ttk.Button(btn_frame, text="Open in Editor", command=open_in_editor_all_rules).pack(side=tk.LEFT, padx=(0, 10))
+                else:
+                    btn = ttk.Button(btn_frame, text="Open in Editor", state=tk.DISABLED)
+                    btn.pack(side=tk.LEFT, padx=(0, 10))
+                    ttk.Label(btn_frame, text="(file no longer available)",
+                             font=("TkDefaultFont", 8), foreground="#999999").pack(side=tk.LEFT)
+                
+                ttk.Button(btn_frame, text="Close", command=detail.destroy).pack(side=tk.RIGHT)
+                return
             
             if 'managed_rule' in tags:
                 # Managed rule — show detail window with full message
@@ -14454,15 +16771,22 @@ Would you like to run a complete analysis?"""
         
         ar_tree.bind("<Double-1>", on_all_rules_double_click)
         
-        # Build complete data list (custom + managed)
+        # Build complete data list (custom + local files + managed)
         all_rules_data = []
         unlogged_sids = analysis_results.get('unlogged_sids', set())
+        local_file_unlogged_sids = analysis_results.get('local_file_unlogged_sids', set())
 
-        # Custom rules from loaded file
+        # Track which SIDs have been added (for deduplication)
+        added_sids = set()
+
+        # Current file rules (highest precedence in dedup)
         for rule in self.parent.rules:
             if getattr(rule, 'is_comment', False) or getattr(rule, 'is_blank', False):
                 continue
             sid = rule.sid
+            if sid in added_sids:
+                continue
+            added_sids.add(sid)
             is_unlogged = sid in unlogged_sids
             stats = sid_stats.get(sid, {})
             hits = stats.get('hits', 0)
@@ -14470,24 +16794,62 @@ Would you like to run a complete analysis?"""
             percent = stats.get('percent', 0.0)
             all_rules_data.append({
                 'sid': sid, 'hits': hits, 'hits_per_day': hits_per_day,
-                'percent': percent, 'source': custom_filename,
+                'percent': percent, 'source': "Current file",
                 'action': rule.action, 'msg': rule.message,
-                'is_managed': False, 'is_unlogged': is_unlogged
+                'is_managed': False, 'is_local_file': False,
+                'is_unlogged': is_unlogged
             })
         
-        # Managed rules from metadata
+        # Local file rules (second precedence in dedup)
+        for lf_meta in local_file_metadata:
+            lf_filename = lf_meta.get('filename', '')
+            lf_sids = lf_meta.get('sids', [])
+            for sid in lf_sids:
+                if sid in added_sids:
+                    continue
+                added_sids.add(sid)
+                is_unlogged = sid in local_file_unlogged_sids
+                stats = sid_stats.get(sid, {})
+                hits = stats.get('hits', 0)
+                hits_per_day = stats.get('hits_per_day', 0.0)
+                percent = stats.get('percent', 0.0)
+                # Get action and message from rule text
+                rule_text = local_file_rules_text.get(sid, '')
+                action = ''
+                message = ''
+                if rule_text:
+                    # Extract action (first word)
+                    parts = rule_text.split(' ', 1)
+                    if parts:
+                        action = parts[0]
+                    # Extract msg from rule text
+                    msg_match = re.search(r'msg\s*:\s*"([^"]*)"', rule_text)
+                    if msg_match:
+                        message = msg_match.group(1)
+                all_rules_data.append({
+                    'sid': sid, 'hits': hits, 'hits_per_day': hits_per_day,
+                    'percent': percent, 'source': f"{lf_filename}",
+                    'action': action, 'msg': message,
+                    'is_managed': False, 'is_local_file': True,
+                    'is_unlogged': is_unlogged
+                })
+        
+        # Managed rules from metadata (lowest precedence)
         for group_name, metadata_list in managed_rule_metadata.items():
             for meta in metadata_list:
                 sid = meta['sid']
+                if sid in added_sids:
+                    continue
+                added_sids.add(sid)
                 stats = sid_stats.get(sid, {})
                 hits = stats.get('hits', 0)
                 hits_per_day = stats.get('hits_per_day', 0.0)
                 percent = stats.get('percent', 0.0)
                 all_rules_data.append({
                     'sid': sid, 'hits': hits, 'hits_per_day': hits_per_day,
-                    'percent': percent, 'source': group_name,
+                    'percent': percent, 'source': f"managed: {group_name}",
                     'action': meta.get('action', ''), 'msg': meta.get('msg', ''),
-                    'is_managed': True
+                    'is_managed': True, 'is_local_file': False
                 })
         
         def populate_tree(*args):
@@ -14516,7 +16878,13 @@ Would you like to run a complete analysis?"""
                     if is_unlogged or rd['hits'] > 0:
                         continue
                 
-                tag = "managed_rule" if rd['is_managed'] else "custom_rule"
+                # Determine tag based on source type
+                if rd['is_managed']:
+                    tag = "managed_rule"
+                elif rd.get('is_local_file', False):
+                    tag = "local_file_rule"
+                else:
+                    tag = "custom_rule"
                 msg_display = rd['msg'][:60] + "..." if len(rd['msg']) > 60 else rd['msg']
                 
                 # Show "—" for unlogged rules since we can't determine their hit count
@@ -14551,11 +16919,16 @@ Would you like to run a complete analysis?"""
         bottom_frame.pack(fill=tk.X, pady=(5, 0))
         
         # Color legend
-        if total_managed > 0:
-            ttk.Label(bottom_frame, text="■ Custom rules", font=("TkDefaultFont", 8),
+        has_local_files = any(rd.get('is_local_file', False) for rd in all_rules_data)
+        if total_managed > 0 or has_local_files:
+            ttk.Label(bottom_frame, text="■ Current file", font=("TkDefaultFont", 8),
                      foreground="#000000").pack(side=tk.LEFT, padx=(0, 10))
-            ttk.Label(bottom_frame, text="■ Managed rules", font=("TkDefaultFont", 8),
-                     foreground="#2E8B8B").pack(side=tk.LEFT, padx=(0, 20))
+            if has_local_files:
+                ttk.Label(bottom_frame, text="■ Local file rules", font=("TkDefaultFont", 8),
+                         foreground="#5C6BC0").pack(side=tk.LEFT, padx=(0, 10))
+            if total_managed > 0:
+                ttk.Label(bottom_frame, text="■ Managed rules", font=("TkDefaultFont", 8),
+                         foreground="#2E8B8B").pack(side=tk.LEFT, padx=(0, 20))
         
         # Export button
         def export_all_rules():
@@ -14573,7 +16946,21 @@ Would you like to run a complete analysis?"""
                     f.write("=" * 100 + "\n")
                     f.write(f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
                     f.write(f"Analysis Period: {time_range_days} days\n")
-                    f.write(f"Total Rules: {total_all:,} ({custom_count:,} custom + {total_managed:,} managed)\n\n")
+                    if local_file_count > 0:
+                        f.write(f"Total Rules: {total_all:,} ({custom_count:,} current file + "
+                               f"{local_file_count:,} local files + {total_managed:,} managed)\n\n")
+                    else:
+                        f.write(f"Total Rules: {total_all:,} ({custom_count:,} custom + {total_managed:,} managed)\n\n")
+                    
+                    # Source summary section (Requirement 15.4)
+                    source_summary = self._get_source_summary(analysis_results)
+                    if source_summary['has_local_files'] or source_summary['has_managed_groups']:
+                        f.write("SOURCES\n")
+                        f.write("-" * 100 + "\n")
+                        for src_label, src_count in source_summary['sources']:
+                            f.write(f"  {src_label}: {src_count:,} rules\n")
+                        f.write("\n")
+                    
                     f.write(f"{'SID':<10} {'Hits':>10} {'Hits/Day':>10} {'% Traffic':>10} {'Source':<35} {'Action':<8} {'Message'}\n")
                     f.write("-" * 100 + "\n")
                     for rd in sorted(all_rules_data, key=lambda x: x['hits'], reverse=True):
@@ -14629,8 +17016,11 @@ Would you like to run a complete analysis?"""
                     f.write(f"Direct Hits: {direct_hits:,}\n")
                     f.write(f"Unique Domains: {unique_domains}\n\n")
                     
-                    f.write(f"  {'Domain':<40} {'Hits':>8} {'% of Cat':>10} {'Rule SID':<15} {'Action':<10}\n")
-                    f.write(f"  {'-'*40} {'-'*8} {'-'*10} {'-'*15} {'-'*10}\n")
+                    f.write(f"  {'Domain':<40} {'Hits':>8} {'% of Cat':>10} {'Rule SID':<15} {'Source':<20} {'Action':<10}\n")
+                    f.write(f"  {'-'*40} {'-'*8} {'-'*10} {'-'*15} {'-'*20} {'-'*10}\n")
+                    
+                    # Get sid_to_source for source attribution in export
+                    _export_sid_to_source = analysis_results.get('sid_to_source', {})
                     
                     domains = cat_info.get('domains', {})
                     for hostname, dom_data in sorted(domains.items(), key=lambda x: x[1]['hits'], reverse=True):
@@ -14640,13 +17030,24 @@ Would you like to run a complete analysis?"""
                         host_display = hostname[:38] + '..' if len(hostname) > 40 else hostname
                         
                         if is_indirect:
-                            f.write(f"  {host_display:<40} {'n/a':>8} {'n/a':>10} {'n/a':<15} {'n/a':<10}  (indirect)\n")
+                            f.write(f"  {host_display:<40} {'n/a':>8} {'n/a':>10} {'n/a':<15} {'n/a':<20} {'n/a':<10}  (indirect)\n")
                         else:
                             hits = dom_data.get('hits', 0)
                             pct = dom_data.get('percent', 0.0)
                             sids = ', '.join(str(s) for s in matched_sids)
                             actions = ', '.join(dom_data.get('actions', []))
-                            f.write(f"  {host_display:<40} {hits:>8,} {pct:>9.1f}% {sids:<15} {actions:<10}\n")
+                            # Determine source for display
+                            source_display = "(current file)"
+                            if matched_sids:
+                                src_label = _export_sid_to_source.get(matched_sids[0], '')
+                                if src_label.startswith('local:'):
+                                    source_display = src_label[len('local:'):]
+                                elif src_label == 'current_file' or not src_label:
+                                    source_display = "(current file)"
+                                else:
+                                    source_display = src_label
+                            source_display = source_display[:18] + '..' if len(source_display) > 20 else source_display
+                            f.write(f"  {host_display:<40} {hits:>8,} {pct:>9.1f}% {sids:<15} {source_display:<20} {actions:<10}\n")
                     
                     f.write("\n" + "=" * 70 + "\n\n")
             

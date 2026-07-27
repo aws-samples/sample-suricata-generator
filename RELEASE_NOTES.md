@@ -1,5 +1,27 @@
 # Release Notes
 
+## Version 2.5.0 - July 26, 2026
+
+### New Feature: User-Managed Rule Groups (Rule Usage Analyzer)
+
+- **Additional Local File Analysis**: Include multiple local `.suricata` rule files in the Rule Usage Analysis alongside the currently open file. All "Your Rules" (current file + local files) are treated as a unified pool for health scoring, statistics, and recommendations — separate from AWS Managed Rule Groups.
+- **Configuration Dialog Enhancements**: Browse and select additional `.suricata` files with progress feedback, file validation, duplicate SID detection, and combined SID count warnings for large analyses.
+- **Unified Results Across All Tabs**: Local file rules appear on all results tabs (Unused, Low-Frequency, Effectiveness, Categories, Search, Untracked, All Rules) with source file attribution and appropriate read-only indicators.
+- **Detail Popup and Navigation**: Double-click local file rules to view details and "Open in Editor" for cross-file navigation with unsaved-changes protection.
+- **SID Deduplication with Precedence**: Current file > local files (selection order) > managed groups — each SID attributed to exactly one source.
+- **Serialization**: Full local file metadata, SID attributions, and source mappings saved to `.stats` files for instant reload without re-querying CloudWatch.
+- **Export with Source Attribution**: All export and copy operations include source file identification for every rule.
+
+### Bug Fixes
+
+- **Categories Tab: Fixed bogus category names from rule parsing**: Fixed a regex boundary bug where the `msg:` keyword value bled into extracted category names (e.g., `Education msg:"Block Education"` appearing as a category instead of just `Education`). Root cause was concatenating rule content and options with a space instead of a semicolon separator.
+
+### Improvements
+
+- **Categories Tab: Optimized CloudWatch query for category analysis**: The category query now filters to only category rule SIDs and aggregates results (`stats count() by sid, categories, hostname`), dramatically reducing row consumption against the 10,000 record limit. Previously, alerts from all rules (including thousands of managed rule group rules) consumed the limit despite being discarded by downstream processing.
+
+---
+
 ## Version 2.4.7 / MRG v1.1.4 - July 15, 2026
 
 ### Improvements

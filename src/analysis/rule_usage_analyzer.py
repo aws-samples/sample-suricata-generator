@@ -50,16 +50,6 @@ class RuleUsageAnalyzer:
 | sort hits desc
 | limit 10000"""
     
-    # Category analysis query - retrieves per-alert category and hostname data
-    # Only returns alerts that have aws_category data (from aws_domain_category/aws_url_category rules)
-    CATEGORY_QUERY = """fields event.alert.signature_id as sid,
-       event.aws_category as categories,
-       event.http.hostname as http_host,
-       event.tls.sni as tls_sni
-| filter event.event_type = "alert"
-| filter isPresent(event.aws_category)
-| limit 10000"""
-    
     def __init__(self, debug_force_pagination=False):
         """Initialize the Rule Usage Analyzer
         
@@ -212,7 +202,11 @@ class RuleUsageAnalyzer:
         aws_session=None,
         managed_rule_sids: Optional[Dict[str, List[int]]] = None,
         managed_rule_groups: Optional[List[Dict]] = None,
-        managed_rule_metadata: Optional[Dict[str, List[Dict]]] = None
+        managed_rule_metadata: Optional[Dict[str, List[Dict]]] = None,
+        local_file_sids: Optional[Dict[str, List[int]]] = None,
+        local_file_rules: Optional[Dict[str, List]] = None,
+        local_file_metadata: Optional[List[Dict]] = None,
+        local_file_rule_ages: Optional[Dict[int, Optional[int]]] = None
     ) -> Optional[Dict]:
         """Analyze rule usage from CloudWatch Logs
         
@@ -236,6 +230,14 @@ class RuleUsageAnalyzer:
             managed_rule_metadata: Optional dict mapping managed rule group name to list of
                 metadata dicts with 'sid', 'action', 'msg' keys (for All Rules tab display).
                 Example: {"ThreatSignaturesPhishing": [{"sid": 1, "action": "alert", "msg": "..."}, ...]}
+            local_file_sids: Optional dict mapping filename -> list of SIDs from additional
+                local .suricata files. Example: {"extra.suricata": [100, 200, 300]}
+            local_file_rules: Optional dict mapping filename -> list of parsed SuricataRule
+                objects from additional local files.
+            local_file_metadata: Optional list of dicts with path, filename, rule_count, sids
+                metadata for each additional local file.
+            local_file_rule_ages: Optional dict mapping SID -> days_in_production (from .history
+                companion files). None values indicate unknown deployment age.
             
         Returns:
             Dict with comprehensive analysis results, or None if cancelled/failed
@@ -324,9 +326,72 @@ class RuleUsageAnalyzer:
             # Convert rule_sids list to set for calculations
             file_sids = set(rule_sids)
             
+            # Process local file data (additional local .suricata files)
+            local_file_unlogged_sids = set()
+            local_file_all_sids = set()  # All SIDs from local files (for combined pool)
+            local_file_logged_sids = set()  # Logged SIDs from local files
+            local_file_rules_text = {}  # SID -> full rule text string
+            sid_to_source = {}  # SID -> source label (after dedup)
+            duplicate_count = 0
+            
+            if local_file_sids:
+                # Collect all local file SIDs and identify unlogged ones
+                for filename, sids in local_file_sids.items():
+                    for sid in sids:
+                        local_file_all_sids.add(sid)
+                
+                # Classify unlogged rules from local files
+                if local_file_rules:
+                    for filename, rules_list in local_file_rules.items():
+                        for rule in rules_list:
+                            if self.is_unlogged_rule(rule):
+                                local_file_unlogged_sids.add(rule.sid)
+                            # Build SID -> rule text mapping for detail popups
+                            # Prefer raw_text (original parsed line) for fidelity,
+                            # fall back to to_string() reconstruction
+                            if hasattr(rule, 'raw_text') and rule.raw_text:
+                                local_file_rules_text[rule.sid] = rule.raw_text
+                            else:
+                                rule_text = rule.to_string()
+                                if rule_text:
+                                    local_file_rules_text[rule.sid] = rule_text
+                
+                # Logged local file SIDs = all local SIDs minus unlogged ones
+                local_file_logged_sids = local_file_all_sids - local_file_unlogged_sids
+                
+                # Build sid_to_source mapping using deduplication precedence:
+                # current file > local files (selection order) > managed groups
+                # First: current file SIDs
+                for sid in file_sids:
+                    sid_to_source[sid] = "current_file"
+                
+                # Second: local file SIDs (in order of files in local_file_sids dict)
+                for filename, sids in local_file_sids.items():
+                    for sid in sids:
+                        if sid not in sid_to_source:
+                            sid_to_source[sid] = f"local:{filename}"
+                        else:
+                            # This SID is a duplicate (already claimed by current file or earlier local file)
+                            duplicate_count += 1
+                
+                # Third: managed SIDs (added below after managed processing)
+            else:
+                # No local files - current file SIDs only for attribution
+                for sid in file_sids:
+                    sid_to_source[sid] = "current_file"
+            
             # IMPORTANT: Exclude unlogged rules from analysis
             # These rules don't write to CloudWatch, so they can't be tracked
             logged_file_sids = file_sids - unlogged_sids
+            
+            # Combine logged SIDs from current file AND local files for CloudWatch query
+            # Only include local file SIDs that are not duplicates of current file SIDs
+            # and that are not unlogged
+            combined_logged_sids = logged_file_sids.copy()
+            if local_file_sids:
+                # Add local file logged SIDs that aren't already in the current file
+                local_only_logged = local_file_logged_sids - file_sids
+                combined_logged_sids = combined_logged_sids | local_only_logged
             
             # Build managed rule group SID sets (if any managed groups were selected)
             all_managed_sids = set()
@@ -337,11 +402,14 @@ class RuleUsageAnalyzer:
                         all_managed_sids.add(sid)
                         # If SID appears in multiple groups, last one wins (rare edge case)
                         # If SID also exists in custom rules, custom takes precedence in display
-                        if sid not in file_sids:
+                        if sid not in file_sids and sid not in local_file_all_sids:
                             managed_sid_to_group[sid] = group_name
+                        # Add managed SIDs to sid_to_source if not already claimed
+                        if sid not in sid_to_source:
+                            sid_to_source[sid] = f"managed:{group_name}"
             
-            # Combined set of all known SIDs (custom + managed) for untracked calculation
-            all_known_sids = file_sids | all_managed_sids
+            # Combined set of all known SIDs (custom + local files + managed) for untracked calculation
+            all_known_sids = file_sids | local_file_all_sids | all_managed_sids
             
             # Check if we hit the 10,000 limit and may need pagination
             # Use 9999 threshold to detect when exactly at limit
@@ -354,14 +422,14 @@ class RuleUsageAnalyzer:
                 # Potential incompleteness - offer user choice
                 choice = self._handle_potential_incompleteness(
                     initial_stats, log_group_name, start_time, end_time,
-                    logged_file_sids, progress_callback, cancel_flag, client
+                    combined_logged_sids, progress_callback, cancel_flag, client
                 )
                 
                 if choice == 'full':
                     # Run paginated analysis
                     sid_stats = self._run_paginated_analysis_hit_count(
                         initial_stats, log_group_name, start_time, end_time,
-                        logged_file_sids, progress_callback, cancel_flag, client
+                        combined_logged_sids, progress_callback, cancel_flag, client
                     )
                     if sid_stats is None:
                         return None  # User cancelled during pagination
@@ -374,8 +442,9 @@ class RuleUsageAnalyzer:
                 sid_stats = initial_stats
             
             # Calculate unused rules (set difference) - only for logged rules
+            # Include both current file and local file logged SIDs
             triggered_sids = set(sid_stats.keys())
-            unused_sids = logged_file_sids - triggered_sids
+            unused_sids = combined_logged_sids - triggered_sids
             
             # Identify untracked SIDs (in CloudWatch but not in any known source)
             # These are rules that exist in CloudWatch logs but not in the current rule file
@@ -434,13 +503,14 @@ class RuleUsageAnalyzer:
             # Calculate category counts (exclude untracked AND managed SIDs from custom-only categories)
             # Managed SIDs are excluded from category counts because the existing tabs
             # (Unused, Low-Freq, Effectiveness, Tiers) show custom rules only
+            # Local file SIDs ARE included (they are "Your Rules")
             non_custom_sids = untracked_sids | all_managed_sids
             categories = {
                 'unused': len(unused_sids),
                 'low_freq': len([sid for sid, s in sid_stats.items() if s.get('category') == 'low_freq' and sid not in non_custom_sids]),
                 'medium': len([sid for sid, s in sid_stats.items() if s.get('category') == 'medium' and sid not in non_custom_sids]),
                 'high': len([sid for sid, s in sid_stats.items() if s.get('category') == 'high' and sid not in non_custom_sids]),
-                'unlogged': len(unlogged_sids),
+                'unlogged': len(unlogged_sids) + len(local_file_unlogged_sids),
                 'untracked': len(untracked_sids)
             }
             
@@ -451,13 +521,19 @@ class RuleUsageAnalyzer:
             # Calculate health score using only logged rules
             # Unlogged rules are excluded because they can't be tracked via CloudWatch
             # But we penalize for visibility gaps (unlogged rules create monitoring blind spots)
+            # Total unlogged includes both current file AND local file unlogged rules
+            total_unlogged = len(unlogged_sids) + len(local_file_unlogged_sids)
+            total_your_rules_sids = file_sids | (local_file_all_sids - file_sids)  # Union minus overlaps
+            total_your_rules_count = len(total_your_rules_sids)
+            total_rules_including_unlogged = total_your_rules_count
+            
             health_score = self._calculate_health_score(
-                len(logged_file_sids),  # Only count logged rules
+                len(combined_logged_sids),  # Only count logged rules (current + local)
                 len(unused_sids),
                 categories['low_freq'],
                 broad_rule_count,  # Count broad rules
-                len(unlogged_sids),  # Visibility penalty for unlogged rules
-                len(file_sids)  # Total including unlogged for percentage calculation
+                total_unlogged,  # Visibility penalty for unlogged rules from ALL sources
+                total_rules_including_unlogged  # Total including unlogged for percentage calculation
             )
             
             # Run category analysis query (separate, non-blocking)
@@ -468,7 +544,8 @@ class RuleUsageAnalyzer:
             
             category_data = self.query_category_data(
                 client, log_group_name, start_time, end_time,
-                progress_callback, cancel_flag, rules
+                progress_callback, cancel_flag, rules,
+                local_file_rules_text=local_file_rules_text if local_file_sids else None
             )
             
             # Store and return results in format expected by UI
@@ -478,11 +555,11 @@ class RuleUsageAnalyzer:
                 'log_group': log_group_name,
                 'time_range_days': time_range_days,
                 'total_rules': len(file_sids),
-                'total_logged_rules': len(logged_file_sids),  # For health score context
+                'total_logged_rules': len(combined_logged_sids),  # For health score context (includes local file logged)
                 'records_analyzed': result['statistics'].get('recordsMatched', 0),
                 'sid_stats': sid_stats,
                 'unused_sids': unused_sids,
-                'unlogged_sids': unlogged_sids,  # Track unlogged rules
+                'unlogged_sids': unlogged_sids,  # Track unlogged rules (current file only)
                 'untracked_sids': untracked_sids,  # Track untracked rules (in CloudWatch but not in any known source)
                 'file_sids': list(file_sids),  # BUG FIX #3: Add file_sids for right-click menu
                 'categories': categories,
@@ -497,6 +574,15 @@ class RuleUsageAnalyzer:
                 'managed_rule_metadata': managed_rule_metadata or {},
                 'managed_sid_to_group': managed_sid_to_group,
                 'total_managed_rules': len(all_managed_sids),
+                # Local file data (empty defaults when no local files selected)
+                'local_file_metadata': local_file_metadata or [],
+                'local_file_sids': local_file_sids or {},
+                'local_file_unlogged_sids': local_file_unlogged_sids,
+                'local_file_rule_ages': local_file_rule_ages or {},
+                'sid_to_source': sid_to_source,
+                'total_your_rules': total_your_rules_count,
+                'local_file_rules_text': local_file_rules_text,
+                'duplicate_count': duplicate_count,
             }
             
             return self.last_analysis_results
@@ -856,6 +942,35 @@ class RuleUsageAnalyzer:
             # This shouldn't happen (query filters hits > 0)
             return "Unused"
     
+    @staticmethod
+    def categorize_unused_confidence(
+        rule_age: Optional[int],
+        min_days_in_production: int = 14
+    ) -> str:
+        """Categorize an unused rule's confidence level based on its Rule_Age.
+
+        This is the canonical implementation of the confidence categorization
+        logic used across the application (UI, analysis, export).
+
+        Args:
+            rule_age: Number of days since the rule was first deployed (from
+                companion .history file). None means unknown deployment age.
+            min_days_in_production: Minimum days a rule must be in production
+                to be considered "confirmed unused" (default: 14).
+
+        Returns:
+            One of:
+            - "confirmed unused" if rule_age >= min_days_in_production
+            - "recently deployed" if rule_age < min_days_in_production
+            - "never observed" if rule_age is None
+        """
+        if rule_age is None:
+            return "never observed"
+        elif rule_age >= min_days_in_production:
+            return "confirmed unused"
+        else:
+            return "recently deployed"
+
     def _categorize_unused_rules(
         self,
         unused_sids: Set[int],
@@ -1003,11 +1118,22 @@ class RuleUsageAnalyzer:
         return int(max(0, min(100, score)))
     
     def query_category_data(self, client, log_group_name, start_time, end_time,
-                            progress_callback, cancel_flag, rules):
+                            progress_callback, cancel_flag, rules,
+                            local_file_rules_text=None):
         """Query CloudWatch for category and hostname data from alerts.
         
         This runs a separate query to retrieve per-alert category/hostname data
         for rules using aws_domain_category or aws_url_category keywords.
+        
+        The query is optimized in two ways:
+        1. SID filter: Only retrieves alerts from rules that use category keywords.
+           This is safe because indirect domain discovery (greyed-out entries) comes
+           from multi-category attribution within the same alerts — not from
+           non-category rule alerts (which are discarded by _aggregate_category_data
+           anyway).
+        2. Aggregation: Uses stats count() to collapse repeated domain visits into
+           single rows, so the 10,000 row limit applies to unique
+           SID+domain+categories combinations rather than individual events.
         
         Args:
             client: boto3 CloudWatch Logs client
@@ -1017,6 +1143,9 @@ class RuleUsageAnalyzer:
             progress_callback: Progress update callback
             cancel_flag: Cancellation flag
             rules: List of SuricataRule objects (for action lookup)
+            local_file_rules_text: Optional dict mapping SID (int) → rule text string
+                for additional local file rules. Used to include local file category
+                rules in the aggregation.
         
         Returns:
             Dict mapping category → domain aggregation data,
@@ -1026,11 +1155,41 @@ class RuleUsageAnalyzer:
             if progress_callback:
                 progress_callback(0, 100, "Querying category data from CloudWatch...")
             
+            # Build optimized query: filter to only category rule SIDs and aggregate
+            # to maximize value from the 10,000 row limit
+            category_rule_sids, _ = self._extract_category_rule_sids(rules)
+            
+            # Also include local file category rule SIDs
+            if local_file_rules_text:
+                import re as _lf_re
+                for lf_sid, lf_rule_text in local_file_rules_text.items():
+                    for match in _lf_re.finditer(r'aws_(?:domain|url)_category:([^;]+)', lf_rule_text):
+                        category_rule_sids.add(lf_sid)
+                        break  # Only need to find one match to include the SID
+            
+            if not category_rule_sids:
+                # No category rules — nothing to query
+                return {}
+            
+            # Build the query with SID filter and aggregation
+            sid_list = ', '.join(str(sid) for sid in sorted(category_rule_sids))
+            query_string = (
+                f"fields event.alert.signature_id as sid,\n"
+                f"       event.aws_category as categories,\n"
+                f"       event.http.hostname as http_host,\n"
+                f"       event.tls.sni as tls_sni\n"
+                f"| filter event.event_type = \"alert\"\n"
+                f"| filter isPresent(event.aws_category)\n"
+                f"| filter event.alert.signature_id in [{sid_list}]\n"
+                f"| stats count() as hits by sid, categories, http_host, tls_sni\n"
+                f"| limit 10000"
+            )
+            
             response = client.start_query(
                 logGroupName=log_group_name,
                 startTime=int(start_time.timestamp()),
                 endTime=int(end_time.timestamp()),
-                queryString=self.CATEGORY_QUERY,
+                queryString=query_string,
                 limit=10000
             )
             
@@ -1078,10 +1237,25 @@ class RuleUsageAnalyzer:
                     if not getattr(rule, 'is_comment', False) and not getattr(rule, 'is_blank', False):
                         rules_by_sid[rule.sid] = rule
             
-            # Build set of SIDs that belong to category rules, and which
-            # specific categories each SID targets
-            # Only these SIDs should appear in the category analysis results
+            # Rebuild category_rule_sids with full sid_to_categories mapping
+            # (the earlier call only needed SIDs for the query filter;
+            # here we also need which categories each SID targets for aggregation)
             category_rule_sids, sid_to_categories = self._extract_category_rule_sids(rules)
+            
+            # Also include local file rules that use category keywords (Req 21.1, 21.2)
+            if local_file_rules_text:
+                import re as _lf_re
+                for lf_sid, lf_rule_text in local_file_rules_text.items():
+                    targeted_cats = set()
+                    for match in _lf_re.finditer(r'aws_(?:domain|url)_category:([^;]+)', lf_rule_text):
+                        cat_str = match.group(1).strip()
+                        for cat in cat_str.split(','):
+                            cat = cat.strip()
+                            if cat:
+                                targeted_cats.add(cat)
+                    if targeted_cats:
+                        category_rule_sids.add(lf_sid)
+                        sid_to_categories[lf_sid] = targeted_cats
             
             # Aggregate into category → domain structure
             category_data = self._aggregate_category_data(
@@ -1101,11 +1275,15 @@ class RuleUsageAnalyzer:
     def _parse_category_results(self, result):
         """Parse CloudWatch category query results into list of alert records.
         
+        Supports both aggregated results (with 'hits' field from stats query)
+        and non-aggregated results (individual alert records).
+        
         Args:
             result: CloudWatch query result dictionary
         
         Returns:
-            List of dicts with keys: sid, categories, http_host, tls_sni
+            List of dicts with keys: sid, categories, http_host, tls_sni, hits
+            The 'hits' field defaults to 1 for non-aggregated results.
         """
         records = []
         
@@ -1123,6 +1301,15 @@ class RuleUsageAnalyzer:
                     record['http_host'] = field_value
                 elif field_name == 'tls_sni':
                     record['tls_sni'] = field_value
+                elif field_name == 'hits':
+                    try:
+                        record['hits'] = int(float(field_value))
+                    except (ValueError, TypeError):
+                        record['hits'] = 1
+            
+            # Default hits to 1 for non-aggregated results
+            if 'hits' not in record:
+                record['hits'] = 1
             
             if record.get('categories'):
                 records.append(record)
@@ -1159,7 +1346,9 @@ class RuleUsageAnalyzer:
                 continue
             
             # Check content and original_options for category keywords
-            options_text = f"{rule.content} {getattr(rule, 'original_options', '')}"
+            # Use '; ' separator to maintain proper semicolon-delimited boundaries
+            # so the regex [^;]+ doesn't match across keyword boundaries
+            options_text = f"{rule.content}; {getattr(rule, 'original_options', '')}"
             
             # Match aws_domain_category:Value or aws_url_category:Value
             # Categories can be comma-separated: aws_domain_category:Malware,Phishing
@@ -1248,6 +1437,7 @@ class RuleUsageAnalyzer:
             sid_str = alert.get('sid')
             aws_category_str = alert.get('categories')
             hostname = alert.get('http_host') or alert.get('tls_sni') or '(unknown)'
+            hit_count = alert.get('hits', 1)
             
             if not aws_category_str:
                 continue
@@ -1287,13 +1477,13 @@ class RuleUsageAnalyzer:
                     sid_targets_this_cat = category in sid_targeted_cats
                 
                 cat = cat_temp[category]
-                cat['total_hits'] += 1
+                cat['total_hits'] += hit_count
                 if sid and sid_targets_this_cat:
-                    cat['direct_hits'] += 1
+                    cat['direct_hits'] += hit_count
                     cat['rule_sids'].add(sid)
                 
                 dom = cat['domains'][hostname]
-                dom['hits'] += 1
+                dom['hits'] += hit_count
                 if sid and sid_targets_this_cat:
                     dom['matched_sids'].add(sid)
                 dom['actions'].add(action)
@@ -1351,7 +1541,9 @@ class RuleUsageAnalyzer:
                 continue
             
             # Check content and original_options for category keywords
-            options_text = f"{rule.content} {getattr(rule, 'original_options', '')}"
+            # Use '; ' separator to maintain proper semicolon-delimited boundaries
+            # so the regex [^;]+ doesn't match across keyword boundaries
+            options_text = f"{rule.content}; {getattr(rule, 'original_options', '')}"
             
             # Match aws_domain_category:Value or aws_url_category:Value
             # Categories can be comma-separated: aws_domain_category:Malware,Phishing

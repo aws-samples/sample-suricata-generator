@@ -201,4 +201,7 @@ class SuricataRule:
                     content_parts.append(part)
             content = '; '.join(content_parts)
         
-        return cls(action, protocol, src_net, src_port, dst_net, dst_port, message, content, sid, direction, original_options, rev)
+        rule = cls(action, protocol, src_net, src_port, dst_net, dst_port, message, content, sid, direction, original_options, rev)
+        # Preserve the original raw text for display purposes (e.g., local file rule popups)
+        rule.raw_text = rule_str
+        return rule

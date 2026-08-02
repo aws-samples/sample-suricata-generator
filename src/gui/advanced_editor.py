@@ -11,6 +11,7 @@ import sys
 import os
 import json
 import re
+from dataclasses import dataclass, field
 
 # Try to import wxPython
 try:
@@ -37,6 +38,26 @@ except ImportError:
         SID_MIN = 1
         SID_MAX = 999999999
     HAS_RULE_ANALYZER = False
+
+
+@dataclass
+class RuleValidationContext:
+    """Context built during rule parsing for cross-keyword validation checks."""
+    protocol: str = ""
+    flow_direction: str | None = None
+    keywords_found: list = field(default_factory=list)
+    active_sticky_buffer: str | None = None
+    content_matches: list = field(default_factory=list)
+
+
+# Common country code mistakes with suggestions
+COUNTRY_CODE_SUGGESTIONS = {
+    "UK": "GB (United Kingdom)",
+    "EN": "GB (England is part of United Kingdom)",
+    "ENG": "GB (use ISO 3166-1 alpha-2 code)",
+    "SC": "GB (Scotland is part of United Kingdom)",
+    "WAL": "GB (Wales is part of United Kingdom)",
+}
 
 
 def main():
@@ -376,6 +397,15 @@ class AdvancedEditorWx(wx.Dialog):
             self.keywords_data = None
         except Exception:
             self.keywords_data = None
+
+        # Build valid country codes frozenset from geoip entry for O(1) lookups
+        if self.keywords_data:
+            geoip_def = next((kw for kw in self.keywords_data['keywords'] if kw['name'] == 'geoip'), None)
+            self.valid_country_codes = frozenset(
+                code.upper() for code in geoip_def.get('country_codes', [])
+            ) if geoip_def else frozenset()
+        else:
+            self.valid_country_codes = frozenset()
     
     def populate_editor(self):
         """Convert rules to text and populate editor"""
@@ -884,7 +914,11 @@ class AdvancedEditorWx(wx.Dialog):
                 statements = content_section.split(';')
                 current_pos = 0
                 
-                for statement in statements:
+                # Build RuleValidationContext for cross-keyword checks
+                rule_protocol = token_positions[1][2].lower() if len(token_positions) > 1 else ""
+                ctx = RuleValidationContext(protocol=rule_protocol)
+                
+                for stmt_idx, statement in enumerate(statements):
                     statement = statement.strip()
                     if not statement:
                         current_pos += 1
@@ -906,12 +940,140 @@ class AdvancedEditorWx(wx.Dialog):
                             warnings.append((keyword_pos, keyword_pos + len(keyword), 
                                            f"Unknown keyword: {keyword}"))
                     # Validate keyword value if keyword has defined values
-                    elif keyword and value_part:
+                    elif keyword and keyword.lower() in [k.lower() for k in known_keywords]:
                         # Find keyword definition
                         keyword_def = next((kw for kw in self.keywords_data.get('keywords', []) 
                                           if kw.get('name', '').lower() == keyword.lower()), None)
                         
-                        if keyword_def and keyword_def.get('values'):
+                        # Find keyword position in line for error reporting
+                        search_start = paren_start + current_pos
+                        keyword_pos = line.find(keyword, search_start)
+                        if keyword_pos == -1:
+                            keyword_pos = paren_start + current_pos + 1
+                        keyword_end_pos = keyword_pos + len(keyword)
+                        
+                        # Track keyword in context for cross-keyword checks
+                        if keyword_def:
+                            ctx.keywords_found.append({
+                                'name': keyword,
+                                'keyword_def': keyword_def,
+                                'position': keyword_pos,
+                                'value': value_part if value_part else None
+                            })
+                            
+                            # Extract flow direction from flow: keyword
+                            if keyword == 'flow' and value_part:
+                                flow_parts = [p.strip() for p in value_part.split(',')]
+                                for part in flow_parts:
+                                    if part in ('to_server', 'from_client'):
+                                        ctx.flow_direction = 'to_server'
+                                        break
+                                    elif part in ('to_client', 'from_server'):
+                                        ctx.flow_direction = 'to_client'
+                                        break
+                            
+                            # Track active sticky buffer
+                            syntax_mode = keyword_def.get('syntax_mode')
+                            if syntax_mode == 'sticky_buffer' and not value_part:
+                                ctx.active_sticky_buffer = keyword
+                            elif keyword == 'content' and ctx.active_sticky_buffer:
+                                # Content match following a sticky buffer
+                                ctx.content_matches.append({
+                                    'buffer': ctx.active_sticky_buffer,
+                                    'value': value_part
+                                })
+                            elif keyword not in ('nocase', 'endswith', 'startswith', 'bsize',
+                                               'depth', 'offset', 'distance', 'within',
+                                               'fast_pattern', 'dotprefix'):
+                                # Non-modifier keyword resets the active sticky buffer
+                                if keyword != 'content':
+                                    ctx.active_sticky_buffer = None
+                            
+                            # === Per-keyword check: Unsupported keyword ===
+                            unsupported_error = self._check_unsupported_keyword(keyword_def, keyword)
+                            if unsupported_error:
+                                errors.append((keyword_pos, keyword_end_pos, unsupported_error))
+                            
+                            # === Per-keyword check: Syntax mode mismatch ===
+                            following_statements = [s.strip() for s in statements[stmt_idx + 1:] if s.strip()]
+                            syntax_error = self._check_syntax_mode(keyword_def, keyword, value_part, following_statements)
+                            if syntax_error:
+                                errors.append((keyword_pos, keyword_end_pos, syntax_error))
+                            
+                            # === Per-keyword check: Forbidden modifiers ===
+                            # Check after a sticky buffer keyword's content match
+                            # We look for modifiers after content: that follows a sticky buffer
+                            if keyword == 'content' and ctx.active_sticky_buffer:
+                                # Collect modifiers that follow this content match
+                                modifiers_used = []
+                                for following_stmt in following_statements:
+                                    following_kw = following_stmt.split(':', 1)[0].strip() if ':' in following_stmt else following_stmt.strip()
+                                    if following_kw in ('nocase', 'endswith', 'startswith', 'bsize',
+                                                      'depth', 'offset', 'distance', 'within',
+                                                      'fast_pattern', 'dotprefix'):
+                                        modifiers_used.append(following_kw)
+                                    else:
+                                        break  # Stop at non-modifier keyword
+                                
+                                # Get the sticky buffer keyword def
+                                buffer_def = next((kw for kw in self.keywords_data.get('keywords', [])
+                                                  if kw.get('name', '').lower() == ctx.active_sticky_buffer.lower()), None)
+                                if buffer_def and modifiers_used:
+                                    forbidden_error = self._check_forbidden_modifiers(buffer_def, ctx.active_sticky_buffer, modifiers_used)
+                                    if forbidden_error:
+                                        # Find the position of the forbidden modifier
+                                        for mod in modifiers_used:
+                                            if mod in buffer_def.get('forbidden_modifiers', []):
+                                                mod_search_start = keyword_pos
+                                                mod_pos = line.find(mod, mod_search_start)
+                                                if mod_pos != -1:
+                                                    errors.append((mod_pos, mod_pos + len(mod), forbidden_error))
+                                                break
+                            
+                            # === Per-keyword check: ssl_version negation ===
+                            if keyword == 'ssl_version' and value_part:
+                                ssl_error = self._check_ssl_version_negation(keyword, value_part)
+                                if ssl_error:
+                                    # Highlight the value part
+                                    value_pos = line.find(value_part, keyword_pos)
+                                    if value_pos != -1:
+                                        errors.append((value_pos, value_pos + len(value_part), ssl_error))
+                                    else:
+                                        errors.append((keyword_pos, keyword_end_pos, ssl_error))
+                            
+                            # === Per-keyword check: GeoIP country codes ===
+                            if keyword == 'geoip' and value_part:
+                                geoip_error = self._check_geoip_country_codes(value_part)
+                                if geoip_error:
+                                    value_pos = line.find(value_part, keyword_pos)
+                                    if value_pos != -1:
+                                        errors.append((value_pos, value_pos + len(value_part), geoip_error))
+                                    else:
+                                        errors.append((keyword_pos, keyword_end_pos, geoip_error))
+                            
+                            # === Per-keyword check: JA3/JA3S hash length ===
+                            if keyword in ('ja3.hash', 'ja3s.hash') and not value_part:
+                                # JA3 is a sticky buffer — check the following content: match
+                                for following_stmt in following_statements:
+                                    following_kw = following_stmt.split(':', 1)[0].strip() if ':' in following_stmt else following_stmt.strip()
+                                    if following_kw == 'content':
+                                        content_val = following_stmt.split(':', 1)[1].strip() if ':' in following_stmt else ''
+                                        ja3_error = self._check_ja3_hash_length(keyword, content_val)
+                                        if ja3_error:
+                                            # Find position of the content value
+                                            content_pos = line.find(following_stmt.strip(), keyword_pos)
+                                            if content_pos != -1:
+                                                errors.append((content_pos, content_pos + len(following_stmt.strip()), ja3_error))
+                                            else:
+                                                errors.append((keyword_pos, keyword_end_pos, ja3_error))
+                                        break
+                                    elif following_kw not in ('nocase', 'endswith', 'startswith', 'bsize',
+                                                            'depth', 'offset', 'distance', 'within',
+                                                            'fast_pattern', 'dotprefix'):
+                                        break  # Non-modifier, non-content keyword — stop looking
+                        
+                        # Existing value validation logic
+                        if keyword_def and keyword_def.get('values') and value_part:
                             # Get valid values for this keyword
                             valid_values = [v.lower() for v in keyword_def.get('values', [])]
                             
@@ -950,14 +1112,85 @@ class AdvancedEditorWx(wx.Dialog):
                                 
                                 # Validate the value
                                 if check_value and check_value.lower() not in valid_values:
+                                    # Check if keyword supports numeric range as alternative
+                                    numeric_range = keyword_def.get('numeric_range')
+                                    if numeric_range and check_value.isdigit():
+                                        num_val = int(check_value)
+                                        if numeric_range[0] <= num_val <= numeric_range[1]:
+                                            continue  # Valid numeric value, skip error
+                                    
                                     # Find position of invalid value in line
                                     search_start = paren_start + current_pos
                                     value_pos = line.find(user_value, search_start)
                                     if value_pos != -1:
-                                        errors.append((value_pos, value_pos + len(user_value),
-                                                     f"Invalid value '{user_value}' for keyword '{keyword}'"))
+                                        # Build error message including numeric range hint if applicable
+                                        if numeric_range:
+                                            errors.append((value_pos, value_pos + len(user_value),
+                                                         f"Invalid value '{user_value}' for keyword '{keyword}' — "
+                                                         f"use a protocol name or number ({numeric_range[0]}-{numeric_range[1]})"))
+                                        else:
+                                            errors.append((value_pos, value_pos + len(user_value),
+                                                         f"Invalid value '{user_value}' for keyword '{keyword}'"))
                     
                     current_pos += len(statement) + 1
+                
+                # === Cross-keyword checks (after all keywords are collected) ===
+                
+                # 1. Packet-level vs app-layer mixing
+                mixing_result = self._check_packet_app_layer_mixing(ctx.keywords_found)
+                if mixing_result:
+                    kw_name, error_msg = mixing_result
+                    # Find position of the packet-level keyword from ctx.keywords_found
+                    for kw_entry in ctx.keywords_found:
+                        if kw_entry['name'] == kw_name:
+                            start_col = kw_entry['position']
+                            end_col = start_col + len(kw_name)
+                            errors.append((start_col, end_col, error_msg))
+                            break
+                
+                # 2. Flow direction conflicts
+                direction_conflicts = self._check_flow_direction_conflict(ctx.keywords_found, ctx.flow_direction)
+                for kw_name, error_msg in direction_conflicts:
+                    # Find position of the conflicting keyword from ctx.keywords_found
+                    for kw_entry in ctx.keywords_found:
+                        if kw_entry['name'] == kw_name:
+                            start_col = kw_entry['position']
+                            end_col = start_col + len(kw_name)
+                            errors.append((start_col, end_col, error_msg))
+                            break
+                
+                # 3. pcre companion check
+                pcre_error = self._check_pcre_companion(ctx.keywords_found)
+                if pcre_error:
+                    # Find position of "pcre" keyword from ctx.keywords_found
+                    for kw_entry in ctx.keywords_found:
+                        if kw_entry['name'] == 'pcre':
+                            start_col = kw_entry['position']
+                            end_col = start_col + len('pcre')
+                            errors.append((start_col, end_col, pcre_error))
+                            break
+                
+                # 4. ip_proto protocol check
+                ip_proto_error = self._check_ip_proto_protocol(ctx.protocol, ctx.keywords_found)
+                if ip_proto_error:
+                    # Find position of "ip_proto" keyword from ctx.keywords_found
+                    for kw_entry in ctx.keywords_found:
+                        if kw_entry['name'] == 'ip_proto':
+                            start_col = kw_entry['position']
+                            end_col = start_col + len('ip_proto')
+                            errors.append((start_col, end_col, ip_proto_error))
+                            break
+                
+                # 5. app-layer-protocol redundancy
+                alp_error = self._check_app_layer_redundancy(ctx.protocol, ctx.keywords_found)
+                if alp_error:
+                    # Find position of "app-layer-protocol" keyword from ctx.keywords_found
+                    for kw_entry in ctx.keywords_found:
+                        if kw_entry['name'] == 'app-layer-protocol':
+                            start_col = kw_entry['position']
+                            end_col = start_col + len('app-layer-protocol')
+                            errors.append((start_col, end_col, alp_error))
+                            break
             
             # Check aws_url_category is used with http protocol only
             if 'aws_url_category:' in content_section.lower():
@@ -1141,6 +1374,452 @@ class AdvancedEditorWx(wx.Dialog):
         except (ValueError, AttributeError):
             return False
     
+    def _check_unsupported_keyword(self, keyword_def, keyword):
+        """Check if a keyword is marked as unsupported in AWS Network Firewall.
+
+        Args:
+            keyword_def: The keyword definition dict from content_keywords.json
+            keyword: The keyword name string
+
+        Returns:
+            str: Error message if keyword is unsupported, None otherwise
+        """
+        if not keyword_def.get('supported', True):
+            unsupported_reason = keyword_def.get('unsupported_reason', 'not supported in AWS Network Firewall')
+            return f"{keyword} is not supported in AWS Network Firewall: {unsupported_reason}"
+        return None
+
+    def _check_syntax_mode(self, keyword_def, keyword, value_part, following_statements):
+        """Check for keyword syntax mode misuse.
+
+        Detects two types of misuse:
+        1. Direct-value keyword used as sticky buffer (followed by content:) → error
+        2. Sticky-buffer keyword used with direct value (keyword:"value") → error
+
+        Args:
+            keyword_def: dict from content_keywords.json for this keyword
+            keyword: str, the keyword name (e.g., "tls.fingerprint")
+            value_part: str or None, the value after the colon (e.g., the hash in tls.fingerprint:"hash")
+            following_statements: list of str, the subsequent statements in the rule after this keyword
+
+        Returns:
+            str: Error message if syntax mode mismatch detected, None otherwise
+        """
+        syntax_mode = keyword_def.get('syntax_mode')
+        if syntax_mode is None:
+            return None
+
+        if syntax_mode == "direct_value":
+            # Direct-value keyword should NOT be used as a sticky buffer
+            # Check: keyword has no value AND a following statement starts with content:
+            if not value_part:
+                for stmt in following_statements:
+                    if stmt.strip().startswith('content:'):
+                        return (
+                            f"{keyword} takes its value directly — use "
+                            f"{keyword}:\"value\" instead of {keyword}; content:\"value\""
+                        )
+
+        elif syntax_mode == "sticky_buffer":
+            # Sticky-buffer keyword should NOT be used with a direct value
+            # Check: keyword has a value part (colon with value)
+            if value_part:
+                return (
+                    f"{keyword} is a sticky buffer — use "
+                    f"{keyword}; content:\"value\" instead of {keyword}:\"{value_part}\""
+                )
+
+        return None
+
+    def _check_ssl_version_negation(self, keyword, value_part):
+        """Check if ssl_version keyword uses negation (! prefix) which is not supported in AWS NFW.
+
+        Args:
+            keyword: The keyword name string (should be "ssl_version" when called)
+            value_part: The value after ssl_version: (e.g., "!tls1.0,!tls1.1")
+
+        Returns:
+            str: Error message if negation is found, None otherwise
+        """
+        if keyword != "ssl_version":
+            return None
+
+        # Split by comma and check if any value starts with !
+        values = value_part.split(',')
+        for val in values:
+            if val.strip().startswith('!'):
+                return "ssl_version negation not supported in AWS Network Firewall — use ssl_version:tls1.0,tls1.1 with a drop action to block deprecated versions"
+
+        return None
+
+    def _check_forbidden_modifiers(self, keyword_def, keyword, modifiers_used):
+        """Check if any modifiers used after a sticky buffer keyword are forbidden.
+
+        After a sticky buffer keyword, subsequent modifiers (nocase, etc.) are checked
+        against the keyword's forbidden_modifiers list.
+
+        Args:
+            keyword_def: dict from content_keywords.json for the active sticky buffer keyword
+            keyword: str, the sticky buffer keyword name (e.g., "http.host")
+            modifiers_used: list of str, the modifiers found after the sticky buffer's
+                content match (e.g., ["nocase", "endswith"])
+
+        Returns:
+            str: Error message if a forbidden modifier is found, None otherwise.
+                Returns the first forbidden modifier found.
+        """
+        forbidden_modifiers = keyword_def.get('forbidden_modifiers', [])
+        if not forbidden_modifiers:
+            return None
+
+        for modifier in modifiers_used:
+            if modifier in forbidden_modifiers:
+                reason = keyword_def.get('forbidden_modifier_reasons', {}).get(modifier, "")
+                if reason:
+                    return f"{modifier} is redundant — {reason}"
+                else:
+                    return f"{modifier} cannot be used with {keyword}"
+        return None
+
+    def _check_geoip_country_codes(self, value_part):
+        """Validate country codes in a geoip keyword value.
+
+        Parses the geoip value to extract country codes (after the direction parameter),
+        strips any ! prefix, and validates each code against self.valid_country_codes
+        (case-insensitive). Returns an error for the first invalid code found, with a
+        suggestion from COUNTRY_CODE_SUGGESTIONS if available.
+
+        Args:
+            value_part: str, the full value after geoip: (e.g., "src,!US,!UK" or "dst,RU")
+
+        Returns:
+            str: Error message if an invalid country code is found, None if all valid
+        """
+        if not value_part or not self.valid_country_codes:
+            return None
+
+        # Format is: direction,code1[,code2,...] where direction is src/dst/any/both
+        parts = value_part.split(',')
+
+        # Skip the first element (direction parameter)
+        if len(parts) < 2:
+            return "geoip requires at least one country code after the direction (e.g., geoip:src,US)"
+
+        country_codes = parts[1:]
+
+        # Check that at least one non-empty country code exists
+        non_empty_codes = [c.strip().lstrip('!') for c in country_codes if c.strip() and c.strip() != '!']
+        if not non_empty_codes:
+            return "geoip requires at least one country code after the direction (e.g., geoip:src,US)"
+
+        for code in country_codes:
+            code = code.strip()
+            if not code:
+                continue
+
+            # Strip ! prefix if present (negation)
+            if code.startswith('!'):
+                code = code[1:]
+
+            if not code:
+                continue
+
+            # Validate against valid_country_codes (case-insensitive)
+            if code.upper() not in self.valid_country_codes:
+                # Check for a friendly suggestion
+                suggestion = COUNTRY_CODE_SUGGESTIONS.get(code.upper())
+                if suggestion:
+                    return f"Invalid country code '{code}' \u2014 use {suggestion} (ISO 3166-1 alpha-2)"
+                else:
+                    return f"Invalid country code '{code}' \u2014 check ISO 3166-1 alpha-2 codes"
+
+        return None
+
+    def _check_ja3_hash_length(self, keyword, content_value):
+        """Validate that JA3/JA3S hash content is exactly 32 characters (MD5).
+
+        Only checks when keyword is 'ja3.hash' or 'ja3s.hash'. Parses the content
+        value by stripping quotes and handling negated content (content:!"...").
+        Skips hex-encoded patterns (containing | delimiters).
+
+        Args:
+            keyword: str, the keyword name (should be "ja3.hash" or "ja3s.hash")
+            content_value: str, the content match value (e.g., '"abc123..."' or '!"abc..."')
+
+        Returns:
+            str: Error message if hash length is not 32, None if valid or not applicable
+        """
+        # Guard clause: only check for ja3.hash or ja3s.hash
+        if keyword not in ("ja3.hash", "ja3s.hash"):
+            return None
+
+        # If content_value is None or empty, nothing to check
+        if not content_value:
+            return None
+
+        value = content_value.strip()
+        if not value:
+            return None
+
+        # Strip leading ! for negated content (content:!"...")
+        if value.startswith('!'):
+            value = value[1:]
+
+        # Strip surrounding quotes
+        if value.startswith('"') and value.endswith('"'):
+            value = value[1:-1]
+        else:
+            # No quotes means it's not a standard content string, skip
+            return None
+
+        # Skip hex-encoded patterns (containing | delimiters)
+        if '|' in value:
+            return None
+
+        # Check if the extracted content string length is exactly 32 characters
+        if len(value) != 32:
+            return "JA3/JA3S hash must be exactly 32 characters (MD5 hash)"
+
+        return None
+
+    def _check_packet_app_layer_mixing(self, keywords_found):
+        """Check if packet-level and app-layer keywords are mixed in the same rule.
+
+        This is a cross-keyword check run AFTER all keywords are collected. AWS Network
+        Firewall rejects rules that combine packet-specific matches (like geoip, dsize,
+        flags) with app-layer keywords (like tls.sni, http.host, dns.query).
+
+        Args:
+            keywords_found: list of dicts, each with keys:
+                - name (str): the keyword name
+                - keyword_def (dict): the keyword definition from content_keywords.json
+                - position (int): character position in the line
+                - value (str or None): the keyword's value
+
+        Returns:
+            tuple: (keyword_name, error_message) if mixing detected, None otherwise.
+                The tuple includes the keyword name so the caller can determine
+                which keyword to underline.
+        """
+        packet_keywords = []
+        app_layer_keywords = []
+
+        for kw in keywords_found:
+            keyword_level = kw['keyword_def'].get('keyword_level')
+            if keyword_level == 'packet':
+                packet_keywords.append(kw)
+            elif keyword_level == 'app_layer':
+                app_layer_keywords.append(kw)
+
+        # Only produce an error if BOTH groups have at least one entry
+        if packet_keywords and app_layer_keywords:
+            # Error on the FIRST packet-level keyword
+            first_packet = packet_keywords[0]
+            # List up to 3 app-layer keyword names for clarity
+            app_layer_names = [kw['name'] for kw in app_layer_keywords[:3]]
+            app_layer_list = ", ".join(app_layer_names)
+            error_msg = (
+                f"{first_packet['name']} is a packet-level keyword — cannot be combined "
+                f"with app-layer keywords ({app_layer_list}) in the same rule. "
+                f"Split into separate rules."
+            )
+            return (first_packet['name'], error_msg)
+
+        return None
+
+    def _check_pcre_companion(self, keywords_found):
+        """Check if pcre keyword has a required companion keyword in the same rule.
+
+        This is a cross-keyword check run AFTER all keywords are collected. AWS Network
+        Firewall rejects rules that use pcre without at least one companion keyword
+        (content, tls.sni, http.host, http.uri, or dns.query) for performance
+        optimization — pcre alone is too CPU-intensive without a pre-filter.
+
+        Args:
+            keywords_found: list of dicts, each with keys:
+                - name (str): the keyword name
+                - keyword_def (dict): the keyword definition from content_keywords.json
+                - position (int): character position in the line
+                - value (str or None): the keyword's value
+
+        Returns:
+            str: error message if pcre is present without a companion keyword, None otherwise.
+        """
+        COMPANION_KEYWORDS = {"content", "tls.sni", "http.host", "http.uri", "dns.query"}
+
+        # Check if rule contains pcre
+        has_pcre = any(kw['name'] == 'pcre' for kw in keywords_found)
+        if not has_pcre:
+            return None
+
+        # Check if rule contains at least one companion keyword
+        has_companion = any(kw['name'] in COMPANION_KEYWORDS for kw in keywords_found)
+        if has_companion:
+            return None
+
+        return "pcre requires one of: content, tls.sni, http.host, http.uri, or dns.query in the same rule"
+
+    def _check_ip_proto_protocol(self, protocol, keywords_found):
+        """Check if ip_proto keyword is used with a non-ip protocol in the rule header.
+
+        This is a cross-keyword check run AFTER all keywords are collected. AWS Network
+        Firewall rejects rules that use the ip_proto keyword when the rule header
+        protocol is anything other than 'ip'.
+
+        Args:
+            protocol: str, the rule header protocol (e.g., "tcp", "udp", "ip", "tls", "http")
+            keywords_found: list of dicts, each with keys:
+                - name (str): the keyword name
+                - keyword_def (dict): the keyword definition from content_keywords.json
+                - position (int): character position in the line
+                - value (str or None): the keyword's value
+
+        Returns:
+            str: error message if ip_proto is used with non-ip protocol, None otherwise.
+        """
+        # Check if rule contains ip_proto keyword
+        has_ip_proto = any(kw['name'] == 'ip_proto' for kw in keywords_found)
+        if not has_ip_proto:
+            return None
+
+        # If protocol (case-insensitive) is NOT "ip", return error
+        if protocol.lower() != 'ip':
+            return "ip_proto keyword can only be used with 'ip' protocol in the rule header"
+
+        # Protocol is "ip", no error
+        return None
+
+    def _check_flow_direction_conflict(self, keywords_found, flow_value):
+        """Check if any keyword's flow_direction conflicts with the rule's flow setting.
+
+        This is a cross-keyword check run AFTER all keywords are collected. AWS Network
+        Firewall rejects rules where a response buffer (flow_direction: "to_client") is
+        used with flow:to_server, or a request buffer (flow_direction: "to_server") is
+        used with flow:to_client.
+
+        Args:
+            keywords_found: list of dicts, each with keys:
+                - name (str): the keyword name
+                - keyword_def (dict): the keyword definition from content_keywords.json
+                - position (int): character position in the line
+                - value (str or None): the keyword's value
+            flow_value: str or None, the value from the flow: keyword
+                (e.g., "to_server,established" or "to_client")
+
+        Returns:
+            list: list of tuples (keyword_name, error_message) for ALL conflicting
+                keywords, or empty list if no conflicts.
+        """
+        if flow_value is None:
+            return []
+
+        # Extract direction from flow_value (can be comma-separated with other values)
+        # Handle aliases: from_client = to_server, from_server = to_client
+        flow_parts = [part.strip() for part in flow_value.split(',')]
+        rule_direction = None
+        for part in flow_parts:
+            if part in ('to_server', 'from_client'):
+                rule_direction = 'to_server'
+                break
+            elif part in ('to_client', 'from_server'):
+                rule_direction = 'to_client'
+                break
+
+        if rule_direction is None:
+            return []
+
+        conflicts = []
+        for kw in keywords_found:
+            kw_flow_direction = kw['keyword_def'].get('flow_direction')
+            if kw_flow_direction is None or kw_flow_direction == 'both':
+                continue
+
+            # Check for conflict: keyword expects to_client but flow says to_server
+            if kw_flow_direction == 'to_client' and rule_direction == 'to_server':
+                error_msg = (
+                    f"{kw['name']} is a response buffer — "
+                    f"use flow:to_client instead of flow:to_server"
+                )
+                conflicts.append((kw['name'], error_msg))
+            # Check for conflict: keyword expects to_server but flow says to_client
+            elif kw_flow_direction == 'to_server' and rule_direction == 'to_client':
+                error_msg = (
+                    f"{kw['name']} is a request buffer — "
+                    f"use flow:to_server instead of flow:to_client"
+                )
+                conflicts.append((kw['name'], error_msg))
+
+        return conflicts
+
+    def _check_app_layer_redundancy(self, protocol, keywords_found):
+        """Check if app-layer-protocol keyword is redundant given header or other keywords.
+
+        This is a cross-keyword check run AFTER all keywords are collected. AWS Network
+        Firewall rejects rules where app-layer-protocol specifies a protocol that is
+        already set by the rule header or implied by other keywords in the rule.
+
+        Args:
+            protocol: str, the rule header protocol (e.g., "tls", "http", "ip", "tcp")
+            keywords_found: list of dicts, each with keys:
+                - name (str): the keyword name
+                - keyword_def (dict): the keyword definition from content_keywords.json
+                - position (int): character position in the line
+                - value (str or None): the keyword's value
+
+        Returns:
+            str: error message if redundancy detected, None otherwise.
+        """
+        # Find app-layer-protocol keyword in keywords_found
+        app_layer_kw = None
+        for kw in keywords_found:
+            if kw['name'] == 'app-layer-protocol':
+                app_layer_kw = kw
+                break
+
+        if app_layer_kw is None:
+            return None
+
+        # Get the value — the protocol it specifies
+        alp_value = app_layer_kw.get('value')
+        if not alp_value:
+            return None
+
+        alp_value = alp_value.strip()
+
+        # If the value starts with "!" (negated), return None — negation doesn't trigger this
+        if alp_value.startswith('!'):
+            return None
+
+        # Check 1: Does the app-layer-protocol value match the rule header protocol?
+        if alp_value.lower() == protocol.lower():
+            return ("app-layer-protocol is redundant \u2014 the protocol is already "
+                    "set by the rule header or other keywords")
+
+        # Check 2: Does the app-layer-protocol value match the implied protocol from other keywords?
+        # Build set of implied protocols from other keywords in the rule
+        implied_protocols = set()
+        for kw in keywords_found:
+            kw_name = kw['name']
+            if kw_name == 'app-layer-protocol':
+                continue
+            # Keywords starting with "tls." or "ja3." or "ja3s." or "ja4." or "ssl_" imply "tls"
+            if (kw_name.startswith('tls.') or kw_name.startswith('ja3.') or
+                    kw_name.startswith('ja3s.') or kw_name.startswith('ja4.') or
+                    kw_name.startswith('ssl_')):
+                implied_protocols.add('tls')
+            # Keywords starting with "http." or "http2." imply "http"
+            elif kw_name.startswith('http.') or kw_name.startswith('http2.'):
+                implied_protocols.add('http')
+            # Keywords starting with "dns." imply "dns"
+            elif kw_name.startswith('dns.'):
+                implied_protocols.add('dns')
+
+        if alp_value.lower() in implied_protocols:
+            return ("app-layer-protocol is redundant \u2014 the protocol is already "
+                    "set by the rule header or other keywords")
+
+        return None
+
     def on_hover_start(self, event):
         """Handle mouse hover start - show tooltip for errors/warnings with valid options"""
         pos = event.GetPosition()

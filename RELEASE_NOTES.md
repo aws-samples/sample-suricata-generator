@@ -1,5 +1,33 @@
 # Release Notes
 
+## Version 2.6.0 - August 2, 2026
+
+### Advanced Editor: AWS Network Firewall Validation Enhancements
+
+The Advanced Editor was significantly strengthened with 11 new real-time validation checks targeting common AWS Network Firewall deployment failures. These checks catch issues *as you type* — before you ever attempt an import — reducing failed deployments caused by subtle rule authoring mistakes.
+
+**New Validation Categories:**
+
+1. **Syntax Mode Mismatch** — Detects direct-value keywords incorrectly used as sticky buffers (and vice versa)
+2. **Packet-Level vs App-Layer Mixing** — Flags rules that combine incompatible keyword types (e.g., `geoip` + `tls.sni`)
+3. **Forbidden Modifiers** — Catches redundant modifiers like `nocase` on buffers that are already normalized
+4. **Flow Direction Conflict** — Identifies response buffers used with `flow:to_server` (and the reverse)
+5. **ssl_version Negation** — Flags unsupported `!` prefix usage with actionable guidance
+6. **Invalid GeoIP Country Codes** — Validates ISO 3166-1 alpha-2 codes with suggestions for common mistakes (e.g., UK → GB)
+7. **Unsupported Keywords** — Identifies keywords not available in AWS Network Firewall (e.g., `xbits`, `flow.age`)
+8. **pcre Without Companion** — Ensures `pcre` has a required fast-pattern keyword for performance
+9. **ip_proto Protocol Mismatch** — Verifies `ip_proto` is only used with the `ip` header protocol
+10. **app-layer-protocol Redundancy** — Detects redundant protocol specifications already implied by the rule
+11. **JA3/JA3S Hash Length** — Validates MD5 hash content is exactly 32 characters
+
+**Supporting Changes:**
+
+- Extended `content_keywords.json` with new metadata fields (`syntax_mode`, `keyword_level`, `flow_direction`, `forbidden_modifiers`, `supported`, `country_codes`, `numeric_range`) to drive the data-driven validation engine
+- `ip_proto` keyword now accepts both protocol names (TCP, UDP, ICMP) and numeric values (0-255)
+- Error tooltips provide actionable fix suggestions (e.g., "use flow:to_client instead of flow:to_server")
+
+---
+
 ## Version 2.5.0 - July 26, 2026
 
 ### New Feature: User-Managed Rule Groups (Rule Usage Analyzer)

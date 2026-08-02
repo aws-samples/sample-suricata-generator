@@ -1,6 +1,6 @@
 {
-  "version": "1.2.2",
-  "last_updated": "2026-04-18",
+  "version": "1.3.0",
+  "last_updated": "2026-08-01",
   "description": "AWS Network Firewall Suricata Content Keywords",
   "note": "This file contains keywords verified to work with AWS Network Firewall. Users can add new keywords as AWS/Suricata adds features.",
   "keywords": [
@@ -88,6 +88,8 @@
     {
       "name": "tls.sni",
       "syntax": "tls.sni; content:\"<domain>\"",
+      "syntax_mode": "sticky_buffer",
+      "keyword_level": "app_layer",
       "modifiers": [
         "content",
         "nocase",
@@ -102,6 +104,8 @@
     {
       "name": "tls.cert_issuer",
       "syntax": "tls.cert_issuer; content:\"<issuer>\"",
+      "syntax_mode": "sticky_buffer",
+      "keyword_level": "app_layer",
       "modifiers": [
         "content",
         "nocase",
@@ -119,19 +123,34 @@
     {
       "name": "http.host",
       "syntax": "http.host; content:\"<domain>\"",
+      "syntax_mode": "sticky_buffer",
+      "keyword_level": "app_layer",
+      "flow_direction": "to_server",
+      "forbidden_modifiers": ["nocase"],
+      "forbidden_modifier_reasons": {
+        "nocase": "http.host buffer is automatically normalized to lowercase"
+      },
       "modifiers": [
         "content",
         "startswith",
         "endswith",
         "dotprefix"
       ],
-      "description": "Match HTTP host header",
+      "description": "Match HTTP host header. Buffer is automatically normalized to lowercase — do NOT use nocase modifier.",
       "category": "http",
-      "example": "http.host; content:\"example.com\"; endswith;"
+      "example": "http.host; content:\"example.com\"; endswith;",
+      "notes": [
+        "Buffer is normalized to lowercase — nocase is redundant and will cause an error",
+        "Use endswith for suffix matching (e.g., .example.com)",
+        "Use dotprefix for subdomain wildcard matching"
+      ]
     },
     {
       "name": "http.uri",
       "syntax": "http.uri; content:\"<path>\"",
+      "syntax_mode": "sticky_buffer",
+      "keyword_level": "app_layer",
+      "flow_direction": "to_server",
       "modifiers": [
         "content",
         "nocase",
@@ -145,6 +164,9 @@
     {
       "name": "http.method",
       "syntax": "http.method; content:\"<method>\"",
+      "syntax_mode": "sticky_buffer",
+      "keyword_level": "app_layer",
+      "flow_direction": "to_server",
       "values": [
         "GET",
         "POST",
@@ -161,6 +183,8 @@
     {
       "name": "http.header_names",
       "syntax": "http.header_names; content:\"|0d 0a|<header>|0d 0a|\"",
+      "syntax_mode": "sticky_buffer",
+      "keyword_level": "app_layer",
       "modifiers": [
         "content",
         "startswith",
@@ -189,6 +213,9 @@
     {
       "name": "http.request_header",
       "syntax": "http.request_header; content:\"<header_name>|3a 20|<value>\"",
+      "syntax_mode": "sticky_buffer",
+      "keyword_level": "app_layer",
+      "flow_direction": "to_server",
       "modifiers": [
         "content",
         "nocase",
@@ -211,6 +238,9 @@
     {
       "name": "http2.header_name",
       "syntax": "http2.header_name; content:\"<header_name>\"",
+      "syntax_mode": "sticky_buffer",
+      "keyword_level": "app_layer",
+      "flow_direction": "to_server",
       "modifiers": [
         "content",
         "nocase",
@@ -233,6 +263,8 @@
     {
       "name": "dns.query",
       "syntax": "dns.query; content:\"<domain>\"",
+      "syntax_mode": "sticky_buffer",
+      "keyword_level": "app_layer",
       "modifiers": [
         "content",
         "nocase",
@@ -246,6 +278,9 @@
     {
       "name": "ja3.hash",
       "syntax": "ja3.hash; content:\"<hash>\"",
+      "syntax_mode": "sticky_buffer",
+      "keyword_level": "app_layer",
+      "flow_direction": "to_server",
       "modifiers": [
         "content",
         "!"
@@ -257,6 +292,9 @@
     {
       "name": "ja3s.hash",
       "syntax": "ja3s.hash; content:\"<hash>\"",
+      "syntax_mode": "sticky_buffer",
+      "keyword_level": "app_layer",
+      "flow_direction": "to_client",
       "modifiers": [
         "content",
         "!"
@@ -268,6 +306,8 @@
     {
       "name": "ja4.hash",
       "syntax": "ja4.hash; content:\"<pattern>\"",
+      "syntax_mode": "sticky_buffer",
+      "keyword_level": "app_layer",
       "modifiers": [
         "content",
         "startswith",
@@ -282,6 +322,7 @@
     {
       "name": "ssl_state",
       "syntax": "ssl_state:<value>",
+      "keyword_level": "app_layer",
       "values": [
         "client_hello",
         "server_hello",
@@ -301,33 +342,30 @@
     {
       "name": "ssl_version",
       "syntax": "ssl_version:<version>[,<version>]",
+      "keyword_level": "app_layer",
       "values": [
         "sslv2",
         "sslv3",
         "tls1.0",
         "tls1.1",
         "tls1.2",
-        "tls1.3",
-        "!sslv2",
-        "!sslv3",
-        "!tls1.0",
-        "!tls1.1"
+        "tls1.3"
       ],
       "multi_value": true,
-      "description": "Match version of SSL/TLS record. Multiple versions can be specified with commas. Can be prefixed with ! to negate (match if version is different than all listed versions)",
+      "description": "Match version of SSL/TLS record. Multiple versions can be specified with commas to match any of the listed versions.",
       "category": "tls",
       "example": "ssl_version:tls1.2",
       "examples": [
         "ssl_version:tls1.2;",
         "ssl_version:sslv2,sslv3;",
-        "ssl_version:!tls1.0,tls1.1;",
+        "ssl_version:tls1.0,tls1.1;",
         "ssl_version:tls1.2,tls1.3;"
       ],
       "notes": [
         "Matches the SSL/TLS record version, not negotiated version",
-        "Multiple versions can be comma-separated",
-        "Negation (!) matches if version differs from all listed versions",
-        "Negation does not match on undetermined versions"
+        "Multiple versions can be comma-separated (matches if ANY listed version is seen)",
+        "Negation (!) is NOT supported in AWS Network Firewall",
+        "To block old versions: use alert/drop with ssl_version:tls1.0,tls1.1 to match deprecated traffic"
       ]
     },
     {
@@ -350,14 +388,62 @@
     },
     {
       "name": "geoip",
-      "syntax": "geoip:<direction>,<country_code>",
+      "syntax": "geoip:<direction>,<country_code>[,<country_code>]",
+      "keyword_level": "packet",
       "values": [
         "src",
-        "dst"
+        "dst",
+        "any",
+        "both"
       ],
-      "description": "Match on GeoIP country code. Direction can be 'src' or 'dst'",
+      "description": "Match on GeoIP country code. Direction can be 'src', 'dst', 'any' (OR logic), or 'both' (AND logic). Supports multiple country codes and negation with ! prefix. Supports IPv4 and IPv6.",
       "category": "network",
-      "example": "geoip:dst,RU"
+      "example": "geoip:dst,RU",
+      "examples": [
+        "geoip:dst,RU;",
+        "geoip:any,RU;",
+        "geoip:both,RU;",
+        "geoip:src,!US,!GB;"
+      ],
+      "notes": [
+        "src = match source IP only",
+        "dst = match destination IP only",
+        "any = match if source OR destination matches (OR logic)",
+        "both = match if source AND destination match (AND logic)",
+        "Supports multiple comma-separated country codes",
+        "Negation (!) must prefix each country code individually (e.g., !US,!GB)",
+        "Cannot be combined with app-layer keywords (tls.sni, http.*, dns.query, etc.) in the same rule",
+        "Uses MaxMind GeoIP database for IP-to-country lookups",
+        "IP must have a location in MaxMind's database to match — anycast IPs will not match",
+        "Network Firewall only allows valid ISO 3166-1 alpha-2 country codes",
+        "Supports both IPv4 and IPv6 (expanded from base Suricata)"
+      ],
+      "country_codes": [
+        "AD", "AE", "AF", "AG", "AI", "AL", "AM", "AO", "AR", "AS",
+        "AT", "AU", "AW", "AX", "AZ", "BA", "BB", "BD", "BE", "BF",
+        "BG", "BH", "BI", "BJ", "BL", "BM", "BN", "BO", "BR", "BS",
+        "BT", "BW", "BY", "BZ", "CA", "CD", "CF", "CG", "CH", "CI",
+        "CK", "CL", "CM", "CN", "CO", "CR", "CU", "CV", "CW", "CY",
+        "CZ", "DE", "DJ", "DK", "DM", "DO", "DZ", "EC", "EE", "EG",
+        "EH", "ER", "ES", "ET", "FI", "FJ", "FK", "FM", "FO", "FR",
+        "GA", "GB", "GD", "GE", "GF", "GG", "GH", "GI", "GL", "GM",
+        "GN", "GP", "GQ", "GR", "GT", "GU", "GW", "GY", "HK", "HN",
+        "HR", "HT", "HU", "ID", "IE", "IL", "IM", "IN", "IQ", "IR",
+        "IS", "IT", "JE", "JM", "JO", "JP", "KE", "KG", "KH", "KI",
+        "KM", "KN", "KP", "KR", "KW", "KY", "KZ", "LA", "LB", "LC",
+        "LI", "LK", "LR", "LS", "LT", "LU", "LV", "LY", "MA", "MC",
+        "MD", "ME", "MF", "MG", "MH", "MK", "ML", "MM", "MN", "MO",
+        "MP", "MQ", "MR", "MS", "MT", "MU", "MV", "MW", "MX", "MY",
+        "MZ", "NA", "NC", "NE", "NF", "NG", "NI", "NL", "NO", "NP",
+        "NR", "NU", "NZ", "OM", "PA", "PE", "PF", "PG", "PH", "PK",
+        "PL", "PM", "PN", "PR", "PS", "PT", "PW", "PY", "QA", "RE",
+        "RO", "RS", "RU", "RW", "SA", "SB", "SC", "SD", "SE", "SG",
+        "SH", "SI", "SJ", "SK", "SL", "SM", "SN", "SO", "SR", "SS",
+        "ST", "SV", "SY", "SZ", "TC", "TD", "TG", "TH", "TJ", "TK",
+        "TL", "TM", "TN", "TO", "TR", "TT", "TV", "TW", "TZ", "UA",
+        "UG", "US", "UY", "UZ", "VA", "VC", "VE", "VG", "VI", "VN",
+        "VU", "WF", "WS", "XK", "YE", "YT", "ZA", "ZM", "ZW"
+      ]
     },
     {
       "name": "metadata",
@@ -391,6 +477,7 @@
     {
       "name": "ip_proto",
       "syntax": "ip_proto:<protocol>",
+      "keyword_level": "packet",
       "values": [
         "TCP",
         "UDP",
@@ -399,7 +486,8 @@
         "!UDP",
         "!ICMP"
       ],
-      "description": "Match on IP protocol. Can be negated with ! prefix",
+      "numeric_range": [0, 255],
+      "description": "Match on IP protocol (name or number 0-255). Can be negated with ! prefix",
       "category": "network",
       "example": "ip_proto:!TCP"
     },
@@ -497,6 +585,7 @@
     {
       "name": "dsize",
       "syntax": "dsize:<operator><size>",
+      "keyword_level": "packet",
       "values": [
         "<",
         ">",
@@ -509,6 +598,7 @@
     {
       "name": "flags",
       "syntax": "flags:[modifier]<flags>[,<mask>]",
+      "keyword_level": "packet",
       "values": [
         "F",
         "S",
@@ -553,14 +643,23 @@
     {
       "name": "threshold",
       "syntax": "threshold:type <type>, track <track>, count <count>, seconds <seconds>",
-      "values": [
-        "limit",
-        "threshold",
-        "both"
-      ],
-      "description": "Rate limiting and thresholds for alerts",
+      "description": "Rate limiting and thresholds for alerts. Functional in AWS Network Firewall but locally significant per firewall instance.",
       "category": "general",
-      "example": "threshold:type limit, track by_src, count 1, seconds 60"
+      "example": "threshold:type limit, track by_src, count 1, seconds 60",
+      "examples": [
+        "threshold:type limit, track by_src, count 1, seconds 60;",
+        "threshold:type threshold, track by_dst, count 5, seconds 300;",
+        "threshold:type both, track by_src, count 10, seconds 60;"
+      ],
+      "notes": [
+        "Types: limit (alert on first N), threshold (alert every Nth), both (limit + suppress after)",
+        "Track: by_src or by_dst",
+        "The threshold keyword is locally significant in AWS Network Firewall",
+        "Network Firewall runs multiple instances behind a load balancer",
+        "Each instance tracks its own threshold counter independently",
+        "Actual threshold behavior may be multiplied by the number of instances",
+        "Best used for rate limiting rather than exact count enforcement"
+      ]
     },
     {
       "name": "classtype",
@@ -585,36 +684,23 @@
     },
     {
       "name": "xbits",
-      "syntax": "xbits:<operation>,<name>,track <track_type>",
-      "values": [
-        "set",
-        "unset",
-        "isset",
-        "isnotset",
-        "toggle"
-      ],
-      "description": "Set, unset, toggle and check for bits stored per host, ip_pair or transaction. Supports optional expire parameter",
+      "syntax": "xbits:<operation>,<name>,track tx",
+      "supported": false,
+      "unsupported_reason": "requires undocumented rule hook — use flowbits instead",
+      "description": "Transaction-level bit tracking. Listed as partially supported in AWS Network Firewall documentation but may require explicit rule hooks not documented publicly. Consider using flowbits instead for reliable cross-rule state tracking.",
       "category": "flow",
-      "example": "xbits:set,badssh,track ip_src,expire 3600",
-      "examples": [
-        "xbits:set,badssh,track ip_src;",
-        "xbits:set,badssh,track ip_src,expire 3600;",
-        "xbits:isset,badssh,track ip_src;",
-        "xbits:unset,badssh,track ip_dst;",
-        "xbits:toggle,blocked,track ip_pair;",
-        "xbits:set,suspicious,track tx;"
-      ],
+      "example": "xbits:set,suspicious,track tx",
       "notes": [
-        "Track types: ip_src, ip_dst, ip_pair, tx",
-        "Optional: expire <seconds> parameter",
-        "Use with noalert to track without alerting",
-        "If you set on client request with track ip_dst, check on server response with track ip_src",
-        "Transaction (tx) support is protocol-dependent"
+        "track ip_src, ip_dst, and ip_pair are explicitly NOT supported",
+        "track tx may require an explicit rule hook (undocumented requirement)",
+        "Consider using flowbits for reliable state tracking in AWS Network Firewall",
+        "Only 'set' and 'isset' operations are supported (not unset, isnotset, toggle)"
       ]
     },
     {
       "name": "aws_url_category",
       "syntax": "aws_url_category:\"<category>\"",
+      "keyword_level": "app_layer",
       "values": [
         "Abortion",
         "Adult and Mature Content",
@@ -690,6 +776,7 @@
     {
       "name": "aws_domain_category",
       "syntax": "aws_domain_category:\"<category>\"",
+      "keyword_level": "app_layer",
       "values": [
         "Abortion",
         "Adult and Mature Content",
@@ -762,6 +849,244 @@
         "More effective with TLS inspection but functions without it",
         "Single domain may map to multiple categories"
       ]
+    },
+    {
+      "name": "http.request_body",
+      "syntax": "http.request_body; content:\"<pattern>\"",
+      "syntax_mode": "sticky_buffer",
+      "keyword_level": "app_layer",
+      "flow_direction": "to_server",
+      "modifiers": [
+        "content",
+        "nocase",
+        "startswith",
+        "endswith",
+        "offset",
+        "depth",
+        "distance",
+        "within",
+        "bsize"
+      ],
+      "description": "Match on HTTP request body (POST data). Sticky buffer for the normalized request body.",
+      "category": "http",
+      "example": "http.request_body; content:\"username=\"; startswith;",
+      "examples": [
+        "http.request_body; content:\"Email=\"; startswith;",
+        "http.request_body; content:\"password\"; nocase;"
+      ]
+    },
+    {
+      "name": "http.response_body",
+      "syntax": "http.response_body; content:\"<pattern>\"",
+      "syntax_mode": "sticky_buffer",
+      "keyword_level": "app_layer",
+      "flow_direction": "to_client",
+      "modifiers": [
+        "content",
+        "nocase",
+        "startswith",
+        "endswith",
+        "offset",
+        "depth",
+        "distance",
+        "within",
+        "bsize"
+      ],
+      "description": "Match on HTTP response body content. Sticky buffer for the normalized response body.",
+      "category": "http",
+      "example": "http.response_body; content:\"error\"; nocase;"
+    },
+    {
+      "name": "http.user_agent",
+      "syntax": "http.user_agent; content:\"<pattern>\"",
+      "syntax_mode": "sticky_buffer",
+      "keyword_level": "app_layer",
+      "flow_direction": "to_server",
+      "modifiers": [
+        "content",
+        "nocase",
+        "startswith",
+        "endswith",
+        "bsize"
+      ],
+      "description": "Match on HTTP User-Agent header value. Sticky buffer for the User-Agent field.",
+      "category": "http",
+      "example": "http.user_agent; content:\"curl/\"; startswith;"
+    },
+    {
+      "name": "http.content_type",
+      "syntax": "http.content_type; content:\"<pattern>\"",
+      "syntax_mode": "sticky_buffer",
+      "keyword_level": "app_layer",
+      "flow_direction": "to_server",
+      "modifiers": [
+        "content",
+        "nocase",
+        "startswith",
+        "endswith"
+      ],
+      "description": "Match on HTTP Content-Type header value. Sticky buffer for the Content-Type field.",
+      "category": "http",
+      "example": "http.content_type; content:\"application/json\";"
+    },
+    {
+      "name": "http.stat_code",
+      "syntax": "http.stat_code; content:\"<code>\"",
+      "syntax_mode": "sticky_buffer",
+      "keyword_level": "app_layer",
+      "flow_direction": "to_client",
+      "modifiers": [
+        "content",
+        "bsize"
+      ],
+      "description": "Match on HTTP response status code. Sticky buffer for the response status code.",
+      "category": "http",
+      "example": "http.stat_code; content:\"403\";"
+    },
+    {
+      "name": "http.stat_msg",
+      "syntax": "http.stat_msg; content:\"<message>\"",
+      "syntax_mode": "sticky_buffer",
+      "keyword_level": "app_layer",
+      "flow_direction": "to_client",
+      "modifiers": [
+        "content",
+        "nocase",
+        "bsize"
+      ],
+      "description": "Match on HTTP response status message. Sticky buffer for the response status message.",
+      "category": "http",
+      "example": "http.stat_msg; content:\"Forbidden\";"
+    },
+    {
+      "name": "fast_pattern",
+      "syntax": "fast_pattern",
+      "description": "Content modifier that forces this content match to be used as the fast pattern matcher. Helps Suricata optimize rule matching by selecting this pattern for the multi-pattern matcher.",
+      "category": "modifier",
+      "example": "content:\"rare_string\"; fast_pattern;",
+      "notes": [
+        "Should be applied to the most unique/rare content match in a rule",
+        "Only one content match per rule can have fast_pattern",
+        "Improves rule performance by guiding the multi-pattern matcher"
+      ]
+    },
+    {
+      "name": "bsize",
+      "syntax": "bsize:<operator><size>",
+      "description": "Match on the size of the current sticky buffer. Similar to dsize but works on any sticky buffer (http.host, http.uri, etc.).",
+      "category": "modifier",
+      "example": "http.header_names; bsize:22;",
+      "examples": [
+        "http.host; content:\"example.com\"; bsize:11;",
+        "http.header_names; content:\"|0d 0a|Host|0d 0a|\"; bsize:>10;"
+      ],
+      "notes": [
+        "Operators: < (less than), > (greater than), = (equal), or no operator for exact match",
+        "Works on the preceding sticky buffer (http.host, http.uri, http.header_names, etc.)"
+      ]
+    },
+    {
+      "name": "tls.fingerprint",
+      "syntax": "tls.fingerprint:\"<fingerprint>\"",
+      "syntax_mode": "direct_value",
+      "keyword_level": "app_layer",
+      "modifiers": [
+        "!"
+      ],
+      "description": "Match TLS/SSL certificate SHA1 fingerprint. Format is colon-separated hex (XX:YY:ZZ:...). Not a sticky buffer — takes the value directly after colon.",
+      "category": "tls",
+      "example": "tls.fingerprint:\"4a:a3:b6:1e:af:df:ff:fe:1a:25:02:40:db:5d:ee:ff:aa:bb:cc:dd\";",
+      "examples": [
+        "tls.fingerprint:\"4a:a3:b6:1e:af:df:ff:fe:1a:25:02:40:db:5d:ee:ff:aa:bb:cc:dd\";",
+        "tls.fingerprint:!\"de:ad:be:ef:ca:fe:ba:be:12:34:56:78:9a:bc:de:f0:11:22:33:44\";"
+      ],
+      "notes": [
+        "Fingerprint is the SHA1 hash of the DER-encoded certificate",
+        "Format: colon-separated hex bytes in quotes",
+        "NOT a sticky buffer — use tls.fingerprint:\"value\" directly (not tls.fingerprint; content:\"value\")",
+        "Use with flow:to_client,established to match server certificate",
+        "Can be negated with ! prefix before the quoted value"
+      ]
+    },
+    {
+      "name": "tls.cert_subject",
+      "syntax": "tls.cert_subject; content:\"<subject>\"",
+      "syntax_mode": "sticky_buffer",
+      "keyword_level": "app_layer",
+      "modifiers": [
+        "content",
+        "nocase",
+        "startswith",
+        "endswith",
+        "isdataat"
+      ],
+      "description": "Match TLS/SSL certificate Subject field (Distinguished Name). Sticky buffer for certificate subject DN.",
+      "category": "tls",
+      "example": "tls.cert_subject; content:\"CN=www.example.org\"; isdataat:!1,relative;",
+      "examples": [
+        "tls.cert_subject; content:\"CN=www.example.org\"; isdataat:!1,relative;",
+        "tls.cert_subject; content:\"O=Example Inc\"; nocase;"
+      ],
+      "notes": [
+        "Matches against the Subject Distinguished Name of the certificate",
+        "Use isdataat:!1,relative for exact match (no trailing data)",
+        "Common fields: CN (Common Name), O (Organization), OU (Organizational Unit)",
+        "Use with flow:to_client,established to match server certificate"
+      ]
+    },
+    {
+      "name": "flowint",
+      "syntax": "flowint:<name>,<operation>[,<value>]",
+      "description": "Flow integer variables for counting and tracking within a flow. Allows arithmetic and comparison operations on per-flow integer counters.",
+      "category": "flow",
+      "example": "flowint:failed_logins,+,1",
+      "examples": [
+        "flowint:login_attempts,+,1;",
+        "flowint:login_attempts,>,3;",
+        "flowint:counter,=,0;",
+        "flowint:counter,isset;"
+      ],
+      "notes": [
+        "Variables are per-flow (reset when flow ends)",
+        "Supports arithmetic: + (add), - (subtract), = (set)",
+        "Supports comparison: >, <, >=, <=, ==, !=",
+        "isset/isnotset check if variable has been initialized",
+        "Useful for detecting brute force or repeated patterns within a connection"
+      ]
+    },
+    {
+      "name": "stream_size",
+      "syntax": "stream_size:<direction>,<operator>,<size>",
+      "values": [
+        "client",
+        "server",
+        "both",
+        "either"
+      ],
+      "description": "Match on the size of the stream in a given direction. Checks accumulated bytes in the stream.",
+      "category": "flow",
+      "example": "stream_size:client,>,1000",
+      "examples": [
+        "stream_size:client,>,1000;",
+        "stream_size:server,<,100;",
+        "stream_size:both,>,10000;"
+      ],
+      "notes": [
+        "client = bytes from client to server",
+        "server = bytes from server to client",
+        "both = combined bytes in both directions",
+        "either = bytes in either direction (whichever is larger)",
+        "Operators: >, <, >=, <=, =, !="
+      ]
+    },
+    {
+      "name": "flow.age",
+      "syntax": "flow.age:<operator><seconds>",
+      "supported": false,
+      "unsupported_reason": "not enabled in AWS Network Firewall suricata.yaml",
+      "description": "Match on the age of the flow in seconds. Not supported in AWS Network Firewall.",
+      "category": "flow",
+      "example": "flow.age:>60"
     }
   ]
 }

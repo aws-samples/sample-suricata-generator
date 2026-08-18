@@ -1,5 +1,13 @@
 # Release Notes
 
+## Version 2.6.1 - August 17, 2026
+
+### Bug Fixes
+
+- **Fixed valid negated network variables being rejected on paste**: Pasting a rule whose source or destination network used a negated variable such as `!$HOME_NET` (e.g. `drop dns $HOME_NET any -> !$HOME_NET any (...)`) was incorrectly flagged as a syntax error, and the rule was commented out on paste. The paste validation path used a helper that did not understand the leading `!` negation, so it fell through to CIDR parsing and failed. Paste now validates networks with the same negation-aware logic as the rule editor, correctly accepting `!$HOME_NET`, `!192.168.1.0/24`, groups, and negated groups (`![...]`) while still rejecting genuinely invalid values.
+
+---
+
 ## Version 2.6.0 - August 2, 2026
 
 ### Advanced Editor: AWS Network Firewall Validation Enhancements

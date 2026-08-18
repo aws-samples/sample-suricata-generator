@@ -1442,8 +1442,15 @@ class SuricataRuleGenerator:
         
         return True
     
-    def validate_network_field(self, value: str, field_name: str) -> bool:
-        """Validate network field (source/dest network) with full Suricata CIDR range support"""
+    def validate_network_field(self, value: str, field_name: str, show_error: bool = True) -> bool:
+        """Validate network field (source/dest network) with full Suricata CIDR range support
+
+        Handles 'any', variables ($/@), single CIDR/IP, negation (e.g. !$HOME_NET,
+        !192.168.1.0/24), bracketed groups, and negated groups (e.g. ![1.1.1.1]).
+
+        Set show_error=False for silent validation (e.g. during paste) so no
+        messagebox popups are raised on failure.
+        """
         value = value.strip()
         
         # Allow 'any'
@@ -1453,43 +1460,45 @@ class SuricataRuleGenerator:
         # Validate simple variables using the helper that checks for proper format
         if (value.startswith('$') or value.startswith('@')) and not value.startswith(('$[', '@[')) and '[' not in value:
             # Use the validation helper to ensure proper variable format (no $$, @@, etc.)
-            return self._validate_single_network_item(value, field_name, show_error=True)
+            return self._validate_single_network_item(value, field_name, show_error=show_error)
         
         # Check if it's a bracketed group expression
         if value.startswith('[') and value.endswith(']'):
-            return self._validate_network_group(value[1:-1], field_name)
+            return self._validate_network_group(value[1:-1], field_name, show_error=show_error)
         
         # Check if it's a negated expression
         if value.startswith('!'):
             negated_value = value[1:].strip()
             if negated_value.startswith('[') and negated_value.endswith(']'):
                 # Negated group: ![1.1.1.1, 1.1.1.2]
-                return self._validate_network_group(negated_value[1:-1], field_name)
+                return self._validate_network_group(negated_value[1:-1], field_name, show_error=show_error)
             else:
                 # Simple negation: !192.168.1.0/24 or !$HOME_NET
-                return self._validate_single_network_item(negated_value, field_name)
+                return self._validate_single_network_item(negated_value, field_name, show_error=show_error)
         
         # Check if it's a simple CIDR or single IP
         if self._validate_single_network_item(value, field_name, show_error=False):
             return True
         
         # If none of the above, it's invalid
-        messagebox.showerror("Network Validation Error", 
-            f"{field_name} must be one of:\n" +
-            "• 'any'\n" +
-            "• Variable: $HOME_NET or @REFERENCE_SET\n" +
-            "• Single CIDR: 192.168.1.0/24\n" +
-            "• Negation: !192.168.1.0/24 or !$HOME_NET\n" +
-            "• Group: [10.0.0.0/24, !10.0.0.5]\n" +
-            "• Variable group: [$EXTERNAL_NET, !$HOME_NET]\n" +
-            "• Negated group: ![1.1.1.1, 1.1.1.2]")
+        if show_error:
+            messagebox.showerror("Network Validation Error", 
+                f"{field_name} must be one of:\n" +
+                "• 'any'\n" +
+                "• Variable: $HOME_NET or @REFERENCE_SET\n" +
+                "• Single CIDR: 192.168.1.0/24\n" +
+                "• Negation: !192.168.1.0/24 or !$HOME_NET\n" +
+                "• Group: [10.0.0.0/24, !10.0.0.5]\n" +
+                "• Variable group: [$EXTERNAL_NET, !$HOME_NET]\n" +
+                "• Negated group: ![1.1.1.1, 1.1.1.2]")
         return False
     
-    def _validate_network_group(self, group_content: str, field_name: str) -> bool:
+    def _validate_network_group(self, group_content: str, field_name: str, show_error: bool = True) -> bool:
         """Validate the contents of a network group [item1, item2, ...]"""
         if not group_content.strip():
-            messagebox.showerror("Network Validation Error", 
-                f"{field_name} contains empty brackets. Groups must contain at least one network specification.")
+            if show_error:
+                messagebox.showerror("Network Validation Error", 
+                    f"{field_name} contains empty brackets. Groups must contain at least one network specification.")
             return False
         
         # Split by commas and validate each item
@@ -1497,20 +1506,22 @@ class SuricataRuleGenerator:
         
         for item in items:
             if not item:
-                messagebox.showerror("Network Validation Error", 
-                    f"{field_name} contains empty item in group. Remove extra commas.")
+                if show_error:
+                    messagebox.showerror("Network Validation Error", 
+                        f"{field_name} contains empty item in group. Remove extra commas.")
                 return False
             
             # Handle negated items within group
             if item.startswith('!'):
                 item = item[1:].strip()
                 if not item:
-                    messagebox.showerror("Network Validation Error", 
-                        f"{field_name} contains empty negation in group.")
+                    if show_error:
+                        messagebox.showerror("Network Validation Error", 
+                            f"{field_name} contains empty negation in group.")
                     return False
             
             # Validate the individual item
-            if not self._validate_single_network_item(item, field_name, show_error=True):
+            if not self._validate_single_network_item(item, field_name, show_error=show_error):
                 return False
         
         return True
@@ -2500,11 +2511,13 @@ class SuricataRuleGenerator:
                         validation_errors.append(f"invalid protocol '{parsed_rule.protocol}'")
                     
                     # Validate source network (silent validation for paste)
-                    if not self._validate_single_network_item(parsed_rule.src_net, "Source Network", show_error=False):
+                    # Use validate_network_field so negation (!$HOME_NET), groups, and
+                    # negated groups (![...]) are accepted just like the rule editor.
+                    if not self.validate_network_field(parsed_rule.src_net, "Source Network", show_error=False):
                         validation_errors.append(f"invalid source network '{parsed_rule.src_net}'")
                     
                     # Validate destination network (silent validation for paste)
-                    if not self._validate_single_network_item(parsed_rule.dst_net, "Dest Network", show_error=False):
+                    if not self.validate_network_field(parsed_rule.dst_net, "Dest Network", show_error=False):
                         validation_errors.append(f"invalid destination network '{parsed_rule.dst_net}'")
                     
                     # Validate source port (suppress messagebox errors during validation)

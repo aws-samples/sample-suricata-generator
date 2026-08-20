@@ -1,6 +1,6 @@
 {
-  "version": "1.1.0",
-  "last_updated": "2026-02-02",
+  "version": "1.1.1",
+  "last_updated": "2026-08-19",
   "description": "Rule Templates Library for Suricata Rule Generator",
   "templates": [
     {
@@ -10,11 +10,11 @@
       "description": "Block all direct DNS traffic to force VPC to use Route 53 resolver",
       "icon": "\ud83d\udd0d",
       "complexity": "beginner",
-      "template_type": "policy",
+      "template_type": "parameterized",
       "test_mode_supported": true,
       "rules": [
         {
-          "action": "drop",
+          "action": "{ACTION}",
           "protocol": "dns",
           "src_net": "$HOME_NET",
           "src_port": "any",
@@ -25,12 +25,31 @@
           "message": "Block direct DNS query (force Route 53 resolver)"
         }
       ],
-      "parameters": [],
+      "parameters": [
+        {
+          "name": "BLOCK_ACTION",
+          "type": "radio",
+          "required": true,
+          "description": "Select action for blocked traffic",
+          "options": [
+            {
+              "value": "drop",
+              "label": "Drop (silently discard)",
+              "action": "drop"
+            },
+            {
+              "value": "reject",
+              "label": "Reject (actively refuse connection)",
+              "action": "reject"
+            }
+          ]
+        }
+      ],
       "variables": {
         "$HOME_NET": "[10.0.0.0/8,172.16.0.0/12,192.168.0.0/16]"
       },
       "notes": "Blocks all outbound DNS traffic on any port, forcing the VPC to use Route 53 resolver. Prevents DNS tunneling and ensures AWS-controlled DNS resolution.",
-      "rule_generation": "static"
+      "rule_generation": "dynamic"
     },
     {
       "id": "enforce_aws_https",
@@ -39,11 +58,11 @@
       "description": "Block unencrypted HTTP traffic to AWS service endpoints",
       "icon": "\u2601",
       "complexity": "beginner",
-      "template_type": "policy",
+      "template_type": "parameterized",
       "test_mode_supported": true,
       "rules": [
         {
-          "action": "drop",
+          "action": "{ACTION}",
           "protocol": "http",
           "src_net": "$HOME_NET",
           "src_port": "any",
@@ -54,12 +73,31 @@
           "message": "Block HTTP to AWS services (enforce HTTPS)"
         }
       ],
-      "parameters": [],
+      "parameters": [
+        {
+          "name": "BLOCK_ACTION",
+          "type": "radio",
+          "required": true,
+          "description": "Select action for blocked traffic",
+          "options": [
+            {
+              "value": "drop",
+              "label": "Drop (silently discard)",
+              "action": "drop"
+            },
+            {
+              "value": "reject",
+              "label": "Reject (actively refuse connection)",
+              "action": "reject"
+            }
+          ]
+        }
+      ],
       "variables": {
         "$HOME_NET": "[10.0.0.0/8,172.16.0.0/12,192.168.0.0/16]"
       },
       "notes": "Enforces HTTPS-only communication with AWS services. Blocks unencrypted HTTP requests to *.amazonaws.com domains. AWS best practice for API security.",
-      "rule_generation": "static"
+      "rule_generation": "dynamic"
     },
     {
       "id": "block_crypto_mining",
@@ -68,11 +106,11 @@
       "description": "Block TCP ports used by cryptocurrency mining pools",
       "icon": "\u26cf\ufe0f",
       "complexity": "beginner",
-      "template_type": "policy",
+      "template_type": "parameterized",
       "test_mode_supported": true,
       "rules": [
         {
-          "action": "drop",
+          "action": "{ACTION}",
           "protocol": "tcp",
           "src_net": "$HOME_NET",
           "src_port": "any",
@@ -83,12 +121,31 @@
           "message": "Block cryptocurrency mining pool traffic"
         }
       ],
-      "parameters": [],
+      "parameters": [
+        {
+          "name": "BLOCK_ACTION",
+          "type": "radio",
+          "required": true,
+          "description": "Select action for blocked traffic",
+          "options": [
+            {
+              "value": "drop",
+              "label": "Drop (silently discard)",
+              "action": "drop"
+            },
+            {
+              "value": "reject",
+              "label": "Reject (actively refuse connection)",
+              "action": "reject"
+            }
+          ]
+        }
+      ],
       "variables": {
         "$HOME_NET": "[10.0.0.0/8,172.16.0.0/12,192.168.0.0/16]"
       },
       "notes": "Blocks common cryptocurrency mining pool ports. Helps detect cryptojacking malware and prevent unauthorized resource usage.",
-      "rule_generation": "static"
+      "rule_generation": "dynamic"
     },
     {
       "id": "block_malware_c2_ports",
@@ -97,11 +154,11 @@
       "description": "Block TCP ports commonly used by malware command & control",
       "icon": "\ud83e\udda0",
       "complexity": "beginner",
-      "template_type": "policy",
+      "template_type": "parameterized",
       "test_mode_supported": true,
       "rules": [
         {
-          "action": "drop",
+          "action": "{ACTION}",
           "protocol": "tcp",
           "src_net": "$HOME_NET",
           "src_port": "any",
@@ -112,12 +169,31 @@
           "message": "Block malware C2 common ports"
         }
       ],
-      "parameters": [],
+      "parameters": [
+        {
+          "name": "BLOCK_ACTION",
+          "type": "radio",
+          "required": true,
+          "description": "Select action for blocked traffic",
+          "options": [
+            {
+              "value": "drop",
+              "label": "Drop (silently discard)",
+              "action": "drop"
+            },
+            {
+              "value": "reject",
+              "label": "Reject (actively refuse connection)",
+              "action": "reject"
+            }
+          ]
+        }
+      ],
       "variables": {
         "$HOME_NET": "[10.0.0.0/8,172.16.0.0/12,192.168.0.0/16]"
       },
       "notes": "Blocks TCP ports frequently used by malware for C2 communications. May impact legitimate applications - test in alert mode first.",
-      "rule_generation": "static"
+      "rule_generation": "dynamic"
     },
     {
       "id": "block_direct_to_ip",
@@ -126,11 +202,11 @@
       "description": "Block HTTP/HTTPS requests using IP address in SNI/Host header (malware indicator)",
       "icon": "\ud83d\udeab",
       "complexity": "intermediate",
-      "template_type": "policy",
+      "template_type": "parameterized",
       "test_mode_supported": true,
       "rules": [
         {
-          "action": "reject",
+          "action": "{ACTION}",
           "protocol": "http",
           "src_net": "$HOME_NET",
           "src_port": "any",
@@ -141,7 +217,7 @@
           "message": "HTTP direct to IP via host header (malware indicator)"
         },
         {
-          "action": "reject",
+          "action": "{ACTION}",
           "protocol": "tls",
           "src_net": "$HOME_NET",
           "src_port": "any",
@@ -152,12 +228,31 @@
           "message": "TLS direct to IP via SNI (malware indicator)"
         }
       ],
-      "parameters": [],
+      "parameters": [
+        {
+          "name": "BLOCK_ACTION",
+          "type": "radio",
+          "required": true,
+          "description": "Select action for blocked traffic",
+          "options": [
+            {
+              "value": "drop",
+              "label": "Drop (silently discard)",
+              "action": "drop"
+            },
+            {
+              "value": "reject",
+              "label": "Reject (actively refuse connection)",
+              "action": "reject"
+            }
+          ]
+        }
+      ],
       "variables": {
         "$HOME_NET": "[10.0.0.0/8,172.16.0.0/12,192.168.0.0/16]"
       },
       "notes": "Detects when HTTP Host header or TLS SNI contains an IP address instead of a domain name. This is a common indicator of malware C2 communication or automated attacks.",
-      "rule_generation": "static"
+      "rule_generation": "dynamic"
     },
     {
       "id": "enforce_tls_version",
@@ -170,7 +265,7 @@
       "test_mode_supported": true,
       "rules": [
         {
-          "action": "reject",
+          "action": "{ACTION}",
           "protocol": "tls",
           "src_net": "$HOME_NET",
           "src_port": "any",
@@ -182,6 +277,24 @@
         }
       ],
       "parameters": [
+        {
+          "name": "BLOCK_ACTION",
+          "type": "radio",
+          "required": true,
+          "description": "Select action for blocked traffic",
+          "options": [
+            {
+              "value": "drop",
+              "label": "Drop (silently discard)",
+              "action": "drop"
+            },
+            {
+              "value": "reject",
+              "label": "Reject (actively refuse connection)",
+              "action": "reject"
+            }
+          ]
+        },
         {
           "name": "MIN_VERSION",
           "type": "radio",
@@ -220,7 +333,7 @@
       "test_mode_supported": true,
       "rules": [
         {
-          "action": "reject",
+          "action": "{ACTION}",
           "protocol": "tcp",
           "src_net": "$HOME_NET",
           "src_port": "any",
@@ -231,7 +344,7 @@
           "message": "Egress port {TRANSPORT}/{PORT} but not {PROTOCOL_UPPER}"
         },
         {
-          "action": "reject",
+          "action": "{ACTION}",
           "protocol": "{PROTOCOL}",
           "src_net": "$HOME_NET",
           "src_port": "any",
@@ -243,6 +356,24 @@
         }
       ],
       "parameters": [
+        {
+          "name": "BLOCK_ACTION",
+          "type": "radio",
+          "required": true,
+          "description": "Select action for blocked traffic",
+          "options": [
+            {
+              "value": "drop",
+              "label": "Drop (silently discard)",
+              "action": "drop"
+            },
+            {
+              "value": "reject",
+              "label": "Reject (actively refuse connection)",
+              "action": "reject"
+            }
+          ]
+        },
         {
           "name": "PROTOCOLS",
           "type": "multi_select_protocol",
@@ -350,7 +481,7 @@
       "test_mode_supported": true,
       "rules": [
         {
-          "action": "drop",
+          "action": "{ACTION}",
           "protocol": "{PROTOCOL}",
           "src_net": "$HOME_NET",
           "src_port": "any",
@@ -362,6 +493,24 @@
         }
       ],
       "parameters": [
+        {
+          "name": "BLOCK_ACTION",
+          "type": "radio",
+          "required": true,
+          "description": "Select action for blocked traffic",
+          "options": [
+            {
+              "value": "drop",
+              "label": "Drop (silently discard)",
+              "action": "drop"
+            },
+            {
+              "value": "reject",
+              "label": "Reject (actively refuse connection)",
+              "action": "reject"
+            }
+          ]
+        },
         {
           "name": "PROTOCOLS",
           "type": "multi_select_protocol",
@@ -413,7 +562,7 @@
       "test_mode_supported": true,
       "rules": [
         {
-          "action": "drop",
+          "action": "{ACTION}",
           "protocol": "tcp",
           "src_net": "$HOME_NET",
           "src_port": "any",
@@ -425,6 +574,24 @@
         }
       ],
       "parameters": [
+        {
+          "name": "BLOCK_ACTION",
+          "type": "radio",
+          "required": true,
+          "description": "Select action for blocked traffic",
+          "options": [
+            {
+              "value": "drop",
+              "label": "Drop (silently discard)",
+              "action": "drop"
+            },
+            {
+              "value": "reject",
+              "label": "Reject (actively refuse connection)",
+              "action": "reject"
+            }
+          ]
+        },
         {
           "name": "PORTS",
           "type": "multi_select_port",
@@ -1862,7 +2029,7 @@
       "test_mode_supported": true,
       "rules": [
         {
-          "action": "drop",
+          "action": "{ACTION}",
           "protocol": "http",
           "src_net": "$HOME_NET",
           "src_port": "any",
@@ -1874,6 +2041,24 @@
         }
       ],
       "parameters": [
+        {
+          "name": "BLOCK_ACTION",
+          "type": "radio",
+          "required": true,
+          "description": "Select action for blocked traffic",
+          "options": [
+            {
+              "value": "drop",
+              "label": "Drop (silently discard)",
+              "action": "drop"
+            },
+            {
+              "value": "reject",
+              "label": "Reject (actively refuse connection)",
+              "action": "reject"
+            }
+          ]
+        },
         {
           "name": "EXTENSIONS",
           "type": "multi_select_extension",
@@ -2006,7 +2191,7 @@
       "test_mode_supported": true,
       "rules": [
         {
-          "action": "drop",
+          "action": "{ACTION}",
           "protocol": "http",
           "src_net": "$HOME_NET",
           "src_port": "any",
@@ -2018,6 +2203,24 @@
         }
       ],
       "parameters": [
+        {
+          "name": "BLOCK_ACTION",
+          "type": "radio",
+          "required": true,
+          "description": "Select action for blocked traffic",
+          "options": [
+            {
+              "value": "drop",
+              "label": "Drop (silently discard)",
+              "action": "drop"
+            },
+            {
+              "value": "reject",
+              "label": "Reject (actively refuse connection)",
+              "action": "reject"
+            }
+          ]
+        },
         {
           "name": "METHODS",
           "type": "multi_select_method",
@@ -2087,7 +2290,7 @@
       "test_mode_supported": true,
       "rules": [
         {
-          "action": "drop",
+          "action": "{ACTION}",
           "protocol": "http",
           "src_net": "$HOME_NET",
           "src_port": "any",
@@ -2099,6 +2302,24 @@
         }
       ],
       "parameters": [
+        {
+          "name": "BLOCK_ACTION",
+          "type": "radio",
+          "required": true,
+          "description": "Select action for blocked traffic",
+          "options": [
+            {
+              "value": "drop",
+              "label": "Drop (silently discard)",
+              "action": "drop"
+            },
+            {
+              "value": "reject",
+              "label": "Reject (actively refuse connection)",
+              "action": "reject"
+            }
+          ]
+        },
         {
           "name": "CATEGORIES",
           "type": "multi_select_category",
@@ -2534,7 +2755,7 @@
       "test_mode_supported": true,
       "rules": [
         {
-          "action": "drop",
+          "action": "{ACTION}",
           "protocol": "{PROTOCOL}",
           "src_net": "$HOME_NET",
           "src_port": "any",
@@ -2546,6 +2767,24 @@
         }
       ],
       "parameters": [
+        {
+          "name": "BLOCK_ACTION",
+          "type": "radio",
+          "required": true,
+          "description": "Select action for blocked traffic",
+          "options": [
+            {
+              "value": "drop",
+              "label": "Drop (silently discard)",
+              "action": "drop"
+            },
+            {
+              "value": "reject",
+              "label": "Reject (actively refuse connection)",
+              "action": "reject"
+            }
+          ]
+        },
         {
           "name": "PROTOCOL",
           "type": "radio",

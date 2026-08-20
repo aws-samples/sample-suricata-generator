@@ -2,6 +2,7 @@ import tkinter as tk
 from tkinter import ttk, messagebox
 import re
 from typing import List
+from src.core.constants import SuricataConstants
 
 class SearchManager:
     """Manages all search functionality for the Suricata Rule Generator"""
@@ -20,6 +21,10 @@ class SearchManager:
         self.current_search_index = -1
         self.search_active = False
         self.search_field = "all"
+        # Field names ('action', 'protocol') whose replacement was skipped by
+        # _replace_in_rule because the result would not be a valid keyword.
+        # Callers read this to build a combined "invalid replacement" warning.
+        self._skipped_invalid_fields = set()
         
         # Search configuration variables
         self.search_filters = {
@@ -76,6 +81,7 @@ class SearchManager:
         
         field_options = [
             ("All fields", "all"),
+            ("Action", "action"),
             ("Message", "message"),
             ("Content", "content"),
             ("Networks (src/dst)", "networks"),
@@ -265,7 +271,10 @@ class SearchManager:
             # Search is already active and nothing changed - replace current match
             if self.search_results and self.current_search_index >= 0:
                 self.replace_current(replace_text)
-                if not self.search_results:
+                warn = self._invalid_skip_warning()
+                if warn:
+                    messagebox.showwarning("Replace", warn, parent=dialog)
+                elif not self.search_results:
                     messagebox.showinfo("Replace", "No more matches found. All replacements complete.", parent=dialog)
             else:
                 messagebox.showinfo("Replace", "No match at current position.", parent=dialog)
@@ -283,10 +292,19 @@ class SearchManager:
                     self.search_field = "all"
                 
                 count = self.replace_all(replace_text)
+                warn = self._invalid_skip_warning()
                 dialog.destroy()
+                # Use the local `term` (not self.search_term) because
+                # replace_all() calls close_search(), which resets
+                # self.search_term to an empty string.
                 if count > 0:
-                    messagebox.showinfo("Replace All", 
-                                      f"Replaced {count} occurrences of '{self.search_term}' with '{replace_text}'.",
+                    msg = f"Replaced {count} occurrences of '{term}' with '{replace_text}'."
+                    if warn:
+                        msg += "\n\nNote: " + warn
+                    messagebox.showinfo("Replace All", msg, parent=self.parent.root)
+                elif warn:
+                    messagebox.showwarning("Replace All",
+                                      "No replacements made.\n\n" + warn,
                                       parent=self.parent.root)
                 else:
                     messagebox.showinfo("Replace All",
@@ -313,6 +331,50 @@ class SearchManager:
         # Bind Enter key
         dialog.bind('<Return>', lambda e: on_find())
     
+    def _rule_index_from_item(self, item):
+        """Map a tree row to its index in self.parent.rules.
+
+        The rules table stores the true 1-based line number (its position in
+        the full, unfiltered self.rules list) in the first column of every row.
+        We must use that value rather than tree.index(item): tree.index()
+        returns the row's position among only the VISIBLE rows, which diverges
+        from self.rules whenever a filter hides rows (comments, blank lines,
+        etc.). Using it would map visible rows onto the wrong rule objects.
+
+        Args:
+            item: Treeview item id
+
+        Returns:
+            int: 0-based index into self.parent.rules, or None if it cannot be
+                 determined.
+        """
+        try:
+            values = self.parent.tree.item(item, 'values')
+            if values and str(values[0]).strip():
+                return int(values[0]) - 1
+        except (ValueError, IndexError, tk.TclError):
+            pass
+        return None
+
+    def _invalid_skip_warning(self):
+        """Build a warning describing replacements skipped due to invalid values.
+
+        Reads self._skipped_invalid_fields (populated by _replace_in_rule) and
+        returns a message listing each affected field and its valid values, or
+        an empty string if nothing was skipped.
+        """
+        if not self._skipped_invalid_fields:
+            return ""
+        
+        lines = []
+        if 'action' in self._skipped_invalid_fields:
+            lines.append("  - action (valid: " + ", ".join(SuricataConstants.SUPPORTED_ACTIONS) + ")")
+        if 'protocol' in self._skipped_invalid_fields:
+            lines.append("  - protocol (valid: " + ", ".join(SuricataConstants.SUPPORTED_PROTOCOLS) + ")")
+        
+        return ("One or more replacements were skipped because the result would "
+                "not be valid for these field(s):\n\n" + "\n".join(lines))
+
     def perform_enhanced_search(self):
         """Perform enhanced search with filtering options - searches all rules by default"""
         if not self.search_term:
@@ -345,15 +407,21 @@ class SearchManager:
                 messagebox.showerror("Regex Error", "Invalid regular expression pattern.")
                 return
         
-        # Search through all rules
+        # Search through all currently displayed rows.
+        # NOTE: Only rows present in the tree are searched. When a filter is
+        # active, hidden rows are not inserted into the tree, so they are
+        # intentionally excluded from search/replace (filter defines scope).
         all_items = self.parent.tree.get_children()
         for item in all_items:
             if item == self.parent.placeholder_item:
                 continue  # Skip placeholder
             
-            # Get rule index and rule object
-            rule_index = self.parent.tree.index(item)
-            if rule_index >= len(self.parent.rules):
+            # Map the displayed row back to its rule using the true line number
+            # stored in the first column (values[0]). Do NOT use tree.index(),
+            # which returns the row's position among only the VISIBLE rows and
+            # diverges from self.rules whenever rows are filtered out.
+            rule_index = self._rule_index_from_item(item)
+            if rule_index is None or rule_index >= len(self.parent.rules):
                 continue
             
             rule = self.parent.rules[rule_index]
@@ -407,7 +475,9 @@ class SearchManager:
             return False  # Blank lines don't match text searches
         else:
             # Regular rule - search in specified field
-            if search_field == "message":
+            if search_field == "action":
+                text_to_search = rule.action
+            elif search_field == "message":
                 text_to_search = rule.message
             elif search_field == "content":
                 text_to_search = rule.content
@@ -539,13 +609,16 @@ class SearchManager:
     
     def replace_current(self, replace_text):
         """Replace the current search match in the main program tree view"""
+        self._skipped_invalid_fields = set()
         if not self.search_results or self.current_search_index < 0:
             return
         
         current_item = self.search_results[self.current_search_index]
-        rule_index = self.parent.tree.index(current_item)
+        # Use the true line number (values[0]), not tree.index(), so the mapping
+        # stays correct when rows are filtered out of the tree.
+        rule_index = self._rule_index_from_item(current_item)
         
-        if rule_index >= len(self.parent.rules):
+        if rule_index is None or rule_index >= len(self.parent.rules):
             return
         
         rule = self.parent.rules[rule_index]
@@ -569,8 +642,10 @@ class SearchManager:
             for item in all_items:
                 if item == self.parent.placeholder_item:
                     continue
-                rule_idx = self.parent.tree.index(item)
-                if rule_idx < len(self.parent.rules):
+                # Use the true line number (values[0]), not tree.index(), so the
+                # mapping stays correct when rows are filtered out of the tree.
+                rule_idx = self._rule_index_from_item(item)
+                if rule_idx is not None and rule_idx < len(self.parent.rules):
                     r = self.parent.rules[rule_idx]
                     if self.matches_search_criteria(r, self.search_term if not self.search_options['case_sensitive'].get() else self.search_term,
                                                     self.search_field, None, 
@@ -593,6 +668,8 @@ class SearchManager:
         Returns:
             int: Number of replacements made
         """
+        self._skipped_invalid_fields = set()
+        
         # Perform search first if not already done
         if not self.search_results:
             self.perform_enhanced_search()
@@ -607,8 +684,10 @@ class SearchManager:
         
         # Process all matches
         for item in self.search_results:
-            rule_index = self.parent.tree.index(item)
-            if rule_index >= len(self.parent.rules):
+            # Use the true line number (values[0]), not tree.index(), so the
+            # mapping stays correct when rows are filtered out of the tree.
+            rule_index = self._rule_index_from_item(item)
+            if rule_index is None or rule_index >= len(self.parent.rules):
                 continue
             
             rule = self.parent.rules[rule_index]
@@ -689,6 +768,21 @@ class SearchManager:
             # Replace in rule fields based on search_field
             replaced = False
             
+            if self.search_field == "all" or self.search_field == "action":
+                old_action = rule.action
+                new_action = self._perform_replacement(old_action, search_term, replace_text)
+                if new_action != old_action:
+                    # Only apply if the result is a valid Suricata action. This
+                    # prevents replacements from corrupting the action field
+                    # (e.g., turning "reject" into an unusable value).
+                    if new_action.lower() in SuricataConstants.SUPPORTED_ACTIONS:
+                        rule.action = new_action
+                        replaced = True
+                    else:
+                        # Signal that a replacement was skipped so callers can
+                        # warn the user about the invalid action value.
+                        self._skipped_invalid_fields.add('action')
+            
             if self.search_field == "all" or self.search_field == "message":
                 old_text = rule.message
                 new_text = self._perform_replacement(old_text, search_term, replace_text)
@@ -729,12 +823,18 @@ class SearchManager:
                     rule.dst_port = new_dst_port
                     replaced = True
             
-            if self.search_field == "protocol":
+            if self.search_field == "all" or self.search_field == "protocol":
                 old_proto = rule.protocol
                 new_proto = self._perform_replacement(old_proto, search_term, replace_text)
                 if new_proto != old_proto:
-                    rule.protocol = new_proto
-                    replaced = True
+                    # Only apply if the result is a valid Suricata protocol,
+                    # so a replacement can't corrupt the protocol field into an
+                    # unsupported value that would fail at deployment time.
+                    if new_proto.lower() in SuricataConstants.SUPPORTED_PROTOCOLS:
+                        rule.protocol = new_proto
+                        replaced = True
+                    else:
+                        self._skipped_invalid_fields.add('protocol')
             
             # Update original_options if rule was modified
             if replaced and hasattr(rule, 'original_options'):

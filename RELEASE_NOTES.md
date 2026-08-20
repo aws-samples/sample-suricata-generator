@@ -1,5 +1,23 @@
 # Release Notes
 
+## Version 2.6.2 - August 18, 2026
+
+### Bug Fixes
+
+- **Fixed main editor search/replace missing rules when the view is filtered**: In the main editor's Find and Replace dialog, searching for a term (e.g., `reject`) could return no matches when a rule filter was active — even though the rules were present — while the Advanced Editor found them correctly. The search mapped each displayed row back to its rule using its position among the *visible* rows (`tree.index`), which diverges from the full rules list whenever a filter hides rows (comments, blank lines, etc.). Displayed rows are now mapped using the true line number stored in the row (matching how the rest of the app resolves rows), so Find, Replace, and Replace All operate on the correct rules. Search/replace continues to act only on the currently displayed rows, so an active filter defines the scope.
+
+- **Fixed "Replace All" confirmation showing an empty search term**: The confirmation dialog reported `Replaced X occurrences of '' with '...'` because the search term was cleared before the message was built. It now shows the original search string.
+
+### Improvements
+
+- **Added "Action" as a searchable/replaceable field**: The Find and Replace dialog's "Search in" dropdown now includes **Action**, and the action is also covered by "All fields". This makes it possible to find and replace rule actions (e.g., change `reject` to `drop`) directly. Previously the action was matched under "All fields" for Find but could never be replaced, so a Replace All of an action reported matches but changed nothing.
+
+- **Made "All fields" replace cover Action and Protocol**: "All fields" replace now rewrites the `action` and `protocol` fields in addition to message, content, networks, and ports — bringing Replace coverage in line with what Find already matched and eliminating "found N / replaced 0" mismatches for those fields.
+
+- **Added validation for action and protocol replacements**: A replacement that would set an invalid `action` (valid: pass, alert, drop, reject) or an invalid `protocol` (valid: the 21 supported Suricata protocols) is now skipped rather than corrupting the field, and the dialog shows a single combined warning listing every affected field and its valid values. This prevents invalid values that would otherwise only fail later at AWS deployment time.
+
+---
+
 ## Version 2.6.1 - August 17, 2026
 
 ### Bug Fixes

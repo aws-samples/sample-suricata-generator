@@ -30,6 +30,7 @@ from src.agent.agent_factory import AgentFactory
 from src.agent.models import GenerationResult
 from src.core.constants import BEDROCK_REGIONS
 from src.core.suricata_rule import SuricataRule
+from src.core.sid_generator import suggest_next_sid
 
 logger = logging.getLogger(__name__)
 
@@ -660,16 +661,21 @@ class AIAssistantPanel:
             for err in result.errors:
                 self._append_to_chat(f"  ⚠ {err}\n", "error_msg")
 
-        # Display generated rules
+        # Display generated rules. Rewrite the SID shown in each rule to the SID
+        # that insertion will actually assign (honoring the session anchor /
+        # date-based scheme), so the chat preview matches the end result. This
+        # is a non-destructive preview — the authoritative assignment still
+        # happens in _insert_rules when the user clicks "Insert Rules".
         if result.rules:
-            for rule_str in result.rules:
+            preview_rules = self._preview_final_sids(list(result.rules))
+            for rule_str in preview_rules:
                 self._append_to_chat(f"{rule_str}\n", "code_block")
                 summary = self._summarize_rule(rule_str)
                 if summary:
                     self._append_to_chat(f"  ↳ {summary}\n", "explanation")
 
             # Add action buttons for the rule set
-            self._insert_action_buttons(list(result.rules))
+            self._insert_action_buttons(preview_rules)
 
         # Display explanation / suggestions
         if result.explanation:
@@ -690,6 +696,43 @@ class AIAssistantPanel:
             "role": "assistant",
             "content": "\n\n".join(content_parts) if content_parts else "(empty response)",
         })
+
+    def _preview_final_sids(self, rules: list[str]) -> list[str]:
+        """Rewrite each rule's sid: to the SID that insertion would assign.
+
+        Display-only preview so the chat shows the same SID the rule will get
+        when inserted. Mirrors the SID logic in _insert_rules (anchor-aware when
+        an override anchor is active, otherwise date-based), but is strictly
+        NON-DESTRUCTIVE: it works on a copy of the in-use SID set and never
+        modifies self.parent.sid_override_anchor. _insert_rules remains the sole
+        source of truth for the actual assignment.
+
+        Note: this is a best-effort preview. If the user changes the ruleset
+        between generation and insertion, the final SID (recomputed by
+        _insert_rules) may differ — but it will always be correct.
+        """
+        import re as _re
+
+        # SIDs currently in use (same collection logic as _insert_rules).
+        used: set[int] = set()
+        for rule in self.parent.rules:
+            if hasattr(rule, "sid") and not getattr(rule, "is_comment", False) and not getattr(rule, "is_blank", False):
+                used.add(rule.sid)
+
+        # Peek at the anchor without consuming it.
+        preview_anchor = getattr(self.parent, "sid_override_anchor", None)
+
+        previewed: list[str] = []
+        for rule_str in rules:
+            if preview_anchor is not None and hasattr(self.parent, "_next_anchored_sid"):
+                next_sid = self.parent._next_anchored_sid(preview_anchor, used)
+                preview_anchor = next_sid  # advance our LOCAL copy only
+            else:
+                next_sid = suggest_next_sid(used)
+            used.add(next_sid)
+            previewed.append(_re.sub(r'sid:\s*\d+', f'sid:{next_sid}', rule_str))
+
+        return previewed
 
     def _insert_action_buttons(self, rules: list[str]) -> None:
         """Insert 'Insert Rules' button into the chat area."""
@@ -713,11 +756,39 @@ class AIAssistantPanel:
         self.message_area.config(state=tk.DISABLED)
 
     def _do_insert(self, rules: list[str], insert_after_sid: int | None) -> None:
-        """Insert rules and clear the handoff context afterward."""
-        self._insert_rules(rules, insert_after_sid=insert_after_sid)
+        """Insert rules and clear the handoff context afterward.
+
+        Positioning:
+        - AI Analysis handoff (insert_after_sid set): insert near the affected
+          rule, as before.
+        - Normal chat insert (no handoff): insert AFTER the rule currently
+          selected in the main editor, so the user controls placement. Falls
+          back to appending at the end when nothing is selected.
+        """
+        insert_at_index = None
+        if insert_after_sid is None:
+            insert_at_index = self._selected_insert_index()
+        self._insert_rules(rules, insert_after_sid=insert_after_sid,
+                           insert_at_index=insert_at_index)
         # Clear the pending context so subsequent manual prompts
         # append to the end as usual.
         self._pending_insert_after_sid = None
+
+    def _selected_insert_index(self) -> int | None:
+        """Return the index at which to insert AI rules based on the main
+        editor's current selection.
+
+        Returns the position just AFTER the selected rule (so new rules land
+        below the highlighted one), or None to append at the end when there is
+        no usable selection (nothing selected, or the placeholder/empty-area
+        "insert at end" position).
+        """
+        selected = getattr(self.parent, "selected_rule_index", None)
+        rule_count = len(self.parent.rules)
+        # None = no selection; >= rule_count = placeholder / end-of-list position.
+        if selected is None or selected >= rule_count:
+            return None  # append at end
+        return selected + 1  # insert after the selected rule
 
     # ------------------------------------------------------------------ #
     #  Chat Area Helpers                                                  #
@@ -902,7 +973,8 @@ class AIAssistantPanel:
     #  Rule Insertion (Task 5.1)                                          #
     # ------------------------------------------------------------------ #
 
-    def _insert_rules(self, rules: list[str], insert_after_sid: int | None = None) -> None:
+    def _insert_rules(self, rules: list[str], insert_after_sid: int | None = None,
+                      insert_at_index: int | None = None) -> None:
         """Parse rules, assign unique SIDs, and insert into the parent's rule list.
 
         Steps:
@@ -914,10 +986,14 @@ class AIAssistantPanel:
         Args:
             rules: List of Suricata rule strings to insert.
             insert_after_sid: If provided, insert new rules after the rule
-                with this SID instead of appending to the end. This is used
-                by the AI Analysis handoff to place rules near the affected
-                rules for correct evaluation order in strict mode. When None
-                (the default), rules are appended to the end as before.
+                with this SID. Used by the AI Analysis handoff to place rules
+                near the affected rules for correct evaluation order in strict
+                mode.
+            insert_at_index: If provided (and insert_after_sid is None), insert
+                new rules starting at this 0-based index in the parent's rule
+                list. Used to honor the rule currently selected in the main
+                editor. When both position args are None, rules are appended to
+                the end.
         """
         # 1. Save undo state BEFORE making any changes
         self.parent.save_undo_state()
@@ -928,9 +1004,14 @@ class AIAssistantPanel:
             if hasattr(rule, "sid") and not getattr(rule, "is_comment", False) and not getattr(rule, "is_blank", False):
                 current_sids.add(rule.sid)
 
-        # 3. Determine next SID using the same logic as the main editor:
-        #    blank file starts at 100, otherwise highest existing SID + 1
-        next_sid = max(current_sids, default=99) + 1
+        # 3. SIDs are assigned per-rule below. AI insertion is treated as an
+        #    extension of interactive authoring, so it honors the main program's
+        #    session SID override anchor: if the user has been hand-numbering,
+        #    AI rules continue that sequence; otherwise they use the date-based
+        #    scheme (YYMMDDNNNN). SIDs are allocated consecutively across the
+        #    batch and the anchor is advanced so later rules/pastes continue on.
+        #    The LLM-provided SID in the rule string is always replaced.
+        import re as _re
 
         inserted_count = 0
         errors: list[str] = []
@@ -942,12 +1023,23 @@ class AIAssistantPanel:
                     errors.append(f"Could not parse rule: {rule_str[:80]}…" if len(rule_str) > 80 else f"Could not parse rule: {rule_str}")
                     continue
 
-                # Assign a non-conflicting SID (skip any already in use)
-                while next_sid in current_sids:
-                    next_sid += 1
-                parsed.sid = next_sid
-                current_sids.add(next_sid)
-                next_sid += 1
+                # Assign a fresh SID, honoring the session anchor when active.
+                anchor = getattr(self.parent, "sid_override_anchor", None)
+                if anchor is not None:
+                    new_sid = self.parent._next_anchored_sid(anchor, current_sids)
+                    self.parent.sid_override_anchor = new_sid  # advance the anchor
+                else:
+                    new_sid = suggest_next_sid(current_sids)
+                parsed.sid = new_sid
+                current_sids.add(new_sid)
+
+                # Keep the raw rule text in sync with the assigned SID. The parsed
+                # rule preserves the LLM's original options (which contain the
+                # model's own sid:), and the main table renders from
+                # original_options — so without this the table would show the
+                # LLM's SID while the editor/disk use the assigned SID.
+                if parsed.original_options:
+                    parsed.original_options = _re.sub(r'sid:\s*\d+', f'sid:{new_sid}', parsed.original_options)
 
                 # Validate rule length (AWS Network Firewall limit: 8,192 chars)
                 length_error = self._validate_rule_length(parsed)
@@ -975,6 +1067,15 @@ class AIAssistantPanel:
                     else:
                         # Anchor SID not found — fall back to append
                         self.parent.rules.append(parsed)
+                elif insert_at_index is not None:
+                    # Insert starting at the given index (the selection position),
+                    # offset by previously inserted rules so the batch stays in order.
+                    insert_pos = insert_at_index + inserted_count
+                    if insert_pos < 0 or insert_pos > len(self.parent.rules):
+                        # Out-of-range safety net — append at end.
+                        self.parent.rules.append(parsed)
+                    else:
+                        self.parent.rules.insert(insert_pos, parsed)
                 else:
                     self.parent.rules.append(parsed)
 

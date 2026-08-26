@@ -218,10 +218,12 @@ class DomainImporter:
                                    values=["pass", "drop", "reject"], state="readonly")
         action_combo.grid(row=0, column=1, sticky=tk.W, padx=5, pady=5)
         
-        # Starting SID
+        # Starting SID — honor the session override anchor (continue the user's
+        # manual sequence) when one is active, otherwise use the date-based
+        # scheme. Matches the rest of the interactive authoring paths so an
+        # in-place import doesn't jump to a surprising date-based SID.
         ttk.Label(config_frame, text="Starting SID:").grid(row=1, column=0, sticky=tk.W, padx=5, pady=5)
-        max_sid = max([rule.sid for rule in self.parent.rules if not getattr(rule, 'is_comment', False) and not getattr(rule, 'is_blank', False)], default=99)
-        suggested_sid = max_sid + 1
+        suggested_sid = self.parent.suggest_interactive_sid()
         sid_var = tk.StringVar(value=str(suggested_sid))
         ttk.Entry(config_frame, textvariable=sid_var, width=10).grid(row=1, column=1, sticky=tk.W, padx=5, pady=5)
         
@@ -1146,6 +1148,9 @@ class DomainImporter:
             
             loading_dialog.destroy()
             
+            # Reset the session SID override anchor for the new file context
+            self.parent.reset_sid_anchor()
+            
             # Disable change tracking for new content operations
             self.parent.tracking_enabled = False
             self.parent.tracking_menu_var.set(False)
@@ -1278,9 +1283,9 @@ class DomainImporter:
                 messagebox.showerror("Error", "Please enter a domain name.")
                 return
             
-            # Get next available SID
-            max_sid = max([rule.sid for rule in self.parent.rules if not getattr(rule, 'is_comment', False) and not getattr(rule, 'is_blank', False)], default=99)
-            start_sid = max_sid + 1
+            # Get next available SID — honor the session override anchor when
+            # active, otherwise use the date-based scheme (matches other paths).
+            start_sid = self.parent.suggest_interactive_sid()
             
             # Generate domain rules
             alert_on_pass = alert_on_pass_var.get()

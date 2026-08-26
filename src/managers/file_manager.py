@@ -799,7 +799,7 @@ EOF
     def load_aws_template(self) -> tuple[List[SuricataRule], dict]:
         """Load AWS best practices Suricata rules template from website"""
         try:
-            url = "https://aws.github.io/aws-security-services-best-practices/guides/network-firewall/"
+            url = "https://aws.github.io/aws-security-services-best-practices/guides/network-firewall/sample-suricata-rules/docs/"
             # Validate URL scheme for security
             if not url.startswith(('http://', 'https://')):
                 raise ValueError("Only HTTP/HTTPS URLs are allowed")
@@ -844,10 +844,21 @@ EOF
             raise Exception(f"Failed to load AWS template: {str(e)}")
     
     def extract_rules_from_html(self, html_content: str) -> str:
-        """Extract Suricata rules from AWS best practices HTML content"""
+        """Extract Suricata rules from AWS best practices HTML content
+
+        The best practices page publishes a "Complete rules template" section
+        containing a ready-to-deploy ruleset inside a code block. We anchor on
+        that section's heading (the most stable marker) and extract the first
+        code block that follows it. Legacy markers are kept as fallbacks so the
+        feature still works against older copies of the page.
+        """
         try:
-            # Try current marker first, fall back to legacy marker
+            # Preferred: the MkDocs heading anchor for the complete template
+            # section, e.g. <h2 id="complete-rules-template">.
             start_markers = [
+                'id="complete-rules-template"',
+                "Complete rules template",
+                # Legacy markers from previous versions of the page
                 "Here is a custom Suricata template that customer find helpful",
                 "Below we have also included a custom template for an egress security use case",
             ]
@@ -876,12 +887,16 @@ EOF
             
             rules_html = html_content[code_start:code_end]
             
-            # Clean up HTML entities and tags
-            rules_text = rules_html.replace("&lt;", "<")
+            # Strip inline tags first (e.g. per-line <a id="__codelineno-..."></a>
+            # anchors that MkDocs injects), then decode HTML entities. Stripping
+            # before decoding avoids turning encoded "&lt;"/"&gt;" inside rule
+            # content into stray angle brackets that the tag regex would eat.
+            rules_text = re.sub(r'<[^>]+>', '', rules_html)
+            rules_text = rules_text.replace("&lt;", "<")
             rules_text = rules_text.replace("&gt;", ">")
-            rules_text = rules_text.replace("&amp;", "&")
             rules_text = rules_text.replace("&quot;", '"')
-            rules_text = re.sub(r'<[^>]+>', '', rules_text)
+            rules_text = rules_text.replace("&#39;", "'")
+            rules_text = rules_text.replace("&amp;", "&")
             
             return rules_text.strip()
             

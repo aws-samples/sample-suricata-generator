@@ -7952,10 +7952,12 @@ Would you like to run a complete analysis?"""
         # SID range inputs with exclude checkbox
         ttk.Label(row2, text="SID:", font=("TkDefaultFont", 9)).pack(side=tk.LEFT, padx=(0, 2))
         self.filter_sid_from_var = tk.StringVar()
-        ttk.Entry(row2, textvariable=self.filter_sid_from_var, width=8).pack(side=tk.LEFT)
+        # Width 11 fits the full 10-digit max SID (4294967294) and date-based
+        # SIDs (YYMMDDNNNN) with a little padding, so values aren't clipped.
+        ttk.Entry(row2, textvariable=self.filter_sid_from_var, width=11).pack(side=tk.LEFT)
         ttk.Label(row2, text="to", font=("TkDefaultFont", 9)).pack(side=tk.LEFT, padx=2)
         self.filter_sid_to_var = tk.StringVar()
-        ttk.Entry(row2, textvariable=self.filter_sid_to_var, width=8).pack(side=tk.LEFT)
+        ttk.Entry(row2, textvariable=self.filter_sid_to_var, width=11).pack(side=tk.LEFT)
         
         # Exclude range checkbox
         self.filter_sid_exclude_var = tk.BooleanVar(value=False)
@@ -8824,9 +8826,8 @@ Would you like to run a complete analysis?"""
                     # (actual_rule_index is already set above to the blank line's position)
                     # Populate with default values for new rule
                     self.parent.set_default_editor_values()
-                    # Auto-generate next available SID
-                    max_sid = max([r.sid for r in self.parent.rules if not getattr(r, 'is_comment', False) and not getattr(r, 'is_blank', False)], default=99)
-                    self.sid_var.set(str(max_sid + 1))
+                    # Auto-generate next available SID (date-based, honors anchor)
+                    self.sid_var.set(str(self.parent.suggest_interactive_sid()))
                 elif getattr(rule, 'is_comment', False):
                     # Comment line - show comment editor only
                     self.show_comment_editor()
@@ -8930,9 +8931,8 @@ Would you like to run a complete analysis?"""
             self.parent.selected_rule_index = len(self.parent.rules)  # Set insertion point
             self.show_rule_editor()  # Show editor fields
             self.parent.set_default_editor_values()  # Populate with defaults
-            # Auto-generate next available SID for convenience
-            max_sid = max([rule.sid for rule in self.parent.rules if not getattr(rule, 'is_comment', False) and not getattr(rule, 'is_blank', False)], default=99)
-            self.sid_var.set(str(max_sid + 1))
+            # Auto-generate next available SID for convenience (date-based, honors anchor)
+            self.sid_var.set(str(self.parent.suggest_interactive_sid()))
         else:
             # Check if clicking on already selected item to toggle selection
             current_selection = self.tree.selection()

@@ -13,7 +13,7 @@ Created: 2026-01-25
 import time
 import json
 import os
-from datetime import datetime, timedelta, date
+from datetime import datetime, timedelta, date, timezone
 from collections import defaultdict
 from typing import Dict, List, Optional, Callable, Any
 
@@ -23,83 +23,151 @@ from src.aws.aws_service_detector import AWSServiceDetector
 class TrafficAnalyzer:
     """Main class for traffic analysis and VPC endpoint recommendations"""
     
-    # AWS Network Firewall data processing costs by region (per GB)
-    # Source: AWS Network Firewall Pricing (2026)
+    # Maximum wall-clock time to wait for a single CloudWatch Logs Insights query
+    # to reach a terminal state before giving up. This is a safety net against a
+    # query that never returns a terminal status (e.g. stuck in Running); CloudWatch
+    # normally returns a 'Timeout' status on its own, which is also handled. Kept
+    # generous so a legitimately large server-side aggregation is not aborted early.
+    MAX_QUERY_SECONDS = 900
+    
+    # CloudWatch Logs Insights query statuses that mean "done" (stop polling).
+    # Includes Timeout/Unknown so a query in those states does not poll forever.
+    _TERMINAL_QUERY_STATUSES = ('Complete', 'Failed', 'Cancelled', 'Timeout', 'Unknown')
+    
+    # AWS Network Firewall data processing costs by region (per GB).
+    # Source: AWS Price List API (ServiceCode AWSNetworkFirewall), validated
+    # 2026-08-21 (pricing effective 2026-02-01). Nearly all regions are $0.065/GB;
+    # a few carry a premium. GB here is binary (1 GB = 1024^3 bytes), matching how
+    # AWS meters Network Firewall data processing.
     FIREWALL_PRICING = {
+        'af-south-1': 0.065,
+        'ap-east-1': 0.065,
+        'ap-east-2': 0.065,
+        'ap-northeast-1': 0.065,
+        'ap-northeast-2': 0.065,
+        'ap-northeast-3': 0.065,
+        'ap-south-1': 0.065,
+        'ap-south-2': 0.065,
+        'ap-southeast-1': 0.065,
+        'ap-southeast-2': 0.065,
+        'ap-southeast-3': 0.075,
+        'ap-southeast-4': 0.065,
+        'ap-southeast-5': 0.065,
+        'ap-southeast-6': 0.065,
+        'ap-southeast-7': 0.065,
+        'ca-central-1': 0.065,
+        'ca-west-1': 0.065,
+        'eu-central-1': 0.065,
+        'eu-central-2': 0.075,
+        'eu-north-1': 0.065,
+        'eu-south-1': 0.065,
+        'eu-south-2': 0.065,
+        'eu-west-1': 0.065,
+        'eu-west-2': 0.065,
+        'eu-west-3': 0.065,
+        'il-central-1': 0.065,
+        'me-central-1': 0.065,
+        'me-south-1': 0.065,
+        'mx-central-1': 0.065,
+        'sa-east-1': 0.065,
         'us-east-1': 0.065,
         'us-east-2': 0.065,
-        'us-west-1': 0.078,
+        'us-gov-east-1': 0.078,
+        'us-gov-west-1': 0.078,
+        'us-west-1': 0.065,
         'us-west-2': 0.065,
-        'ca-central-1': 0.072,
-        'eu-west-1': 0.075,
-        'eu-west-2': 0.075,
-        'eu-west-3': 0.075,
-        'eu-central-1': 0.075,
-        'eu-north-1': 0.075,
-        'ap-south-1': 0.090,
-        'ap-northeast-1': 0.090,
-        'ap-northeast-2': 0.090,
-        'ap-northeast-3': 0.090,
-        'ap-southeast-1': 0.090,
-        'ap-southeast-2': 0.090,
-        'ap-southeast-3': 0.090,
-        'sa-east-1': 0.104,
-        'me-south-1': 0.078,
-        'af-south-1': 0.091,
     }
     
-    # VPC Interface Endpoint costs by region (per month)
-    # Source: AWS PrivateLink Pricing (2026)
-    # Calculation: hourly_rate × 730 hours/month
+    # VPC Interface (PrivateLink) endpoint costs by region (per month).
+    # Source: AWS Price List API (ServiceCode AmazonVPC, usagetype
+    # '<region>-VpcEndpoint-Hours'), validated 2026-08-21.
+    # Calculation: hourly_rate x 730 hours/month (rounded to cents).
     INTERFACE_ENDPOINT_PRICING = {
-        'us-east-1': 7.30,      # $0.01/hour
-        'us-east-2': 7.30,      # $0.01/hour
-        'us-west-1': 8.03,      # $0.011/hour
-        'us-west-2': 7.30,      # $0.01/hour
-        'ca-central-1': 7.30,   # $0.01/hour
-        'eu-west-1': 8.03,      # $0.011/hour
-        'eu-west-2': 8.03,      # $0.011/hour
-        'eu-west-3': 8.03,      # $0.011/hour
-        'eu-central-1': 8.03,   # $0.011/hour
-        'eu-north-1': 8.03,     # $0.011/hour
-        'ap-south-1': 10.22,    # $0.014/hour
+        'af-south-1': 9.56,      # $0.01309/hour
+        'ap-east-1': 10.44,      # $0.0143/hour
+        'ap-east-2': 9.20,       # $0.0126/hour
         'ap-northeast-1': 10.22, # $0.014/hour
-        'ap-northeast-2': 10.22, # $0.014/hour
+        'ap-northeast-2': 9.49,  # $0.013/hour
         'ap-northeast-3': 10.22, # $0.014/hour
-        'ap-southeast-1': 10.22, # $0.014/hour
-        'ap-southeast-2': 10.22, # $0.014/hour
-        'ap-southeast-3': 10.22, # $0.014/hour
-        'sa-east-1': 11.68,     # $0.016/hour
-        'me-south-1': 8.76,     # $0.012/hour
-        'af-south-1': 10.95,    # $0.015/hour
+        'ap-south-1': 9.49,      # $0.013/hour
+        'ap-south-2': 9.49,      # $0.013/hour
+        'ap-southeast-1': 9.49,  # $0.013/hour
+        'ap-southeast-2': 9.49,  # $0.013/hour
+        'ap-southeast-3': 9.49,  # $0.013/hour
+        'ap-southeast-4': 9.49,  # $0.013/hour
+        'ap-southeast-5': 8.54,  # $0.0117/hour
+        'ap-southeast-6': 9.96,  # $0.01365/hour
+        'ap-southeast-7': 8.54,  # $0.0117/hour
+        'ca-central-1': 8.03,    # $0.011/hour
+        'ca-west-1': 8.03,       # $0.011/hour
+        'eu-central-1': 8.76,    # $0.012/hour
+        'eu-central-2': 9.64,    # $0.0132/hour
+        'eu-north-1': 7.67,      # $0.0105/hour
+        'eu-south-1': 8.43,      # $0.01155/hour
+        'eu-south-2': 8.03,      # $0.011/hour
+        'eu-west-1': 8.03,       # $0.011/hour
+        'eu-west-2': 8.03,       # $0.011/hour
+        'eu-west-3': 8.03,       # $0.011/hour
+        'il-central-1': 8.43,    # $0.01155/hour
+        'me-central-1': 8.83,    # $0.0121/hour
+        'me-south-1': 8.83,      # $0.0121/hour
+        'mx-central-1': 7.67,    # $0.0105/hour
+        'sa-east-1': 15.33,      # $0.021/hour
+        'us-east-1': 7.30,       # $0.01/hour
+        'us-east-2': 7.30,       # $0.01/hour
+        'us-gov-east-1': 9.12,   # $0.0125/hour
+        'us-gov-west-1': 9.12,   # $0.0125/hour
+        'us-west-1': 8.03,       # $0.011/hour
+        'us-west-2': 7.30,       # $0.01/hour
     }
     
-    # Interface endpoint data processing (cross-region) - same across all regions
+    # Interface endpoint data processing (first tier ~$0.01/GB in most regions)
     INTERFACE_ENDPOINT_DATA_COST_PER_GB = 0.01
     
     # AWS Network Firewall endpoint (hourly) costs by region
-    # Source: AWS Network Firewall Pricing (2026)
+    # AWS Network Firewall standard PRIMARY endpoint hourly cost by region.
+    # Source: AWS Price List API (ServiceCode AWSNetworkFirewall, usagetype
+    # '<region>-Endpoint-Hour'), validated 2026-08-21 (pricing effective
+    # 2026-02-01). Most regions are $0.395/hr; newer/edge regions carry a premium.
+    # Note: this is the PRIMARY endpoint rate; secondary endpoints and Advanced
+    # Inspection (TLS) endpoint hours use different rates and are not modeled here.
     ENDPOINT_HOURLY_PRICING = {
+        'af-south-1': 0.395,
+        'ap-east-1': 0.395,
+        'ap-east-2': 0.66,
+        'ap-northeast-1': 0.395,
+        'ap-northeast-2': 0.395,
+        'ap-northeast-3': 0.395,
+        'ap-south-1': 0.395,
+        'ap-south-2': 0.535,
+        'ap-southeast-1': 0.395,
+        'ap-southeast-2': 0.395,
+        'ap-southeast-3': 0.485,
+        'ap-southeast-4': 0.705,
+        'ap-southeast-5': 0.66,
+        'ap-southeast-6': 0.705,
+        'ap-southeast-7': 0.66,
+        'ca-central-1': 0.395,
+        'ca-west-1': 0.705,
+        'eu-central-1': 0.395,
+        'eu-central-2': 1.075,
+        'eu-north-1': 0.395,
+        'eu-south-1': 0.395,
+        'eu-south-2': 0.395,
+        'eu-west-1': 0.395,
+        'eu-west-2': 0.395,
+        'eu-west-3': 0.395,
+        'il-central-1': 0.565,
+        'me-central-1': 0.415,
+        'me-south-1': 0.395,
+        'mx-central-1': 0.585,
+        'sa-east-1': 0.395,
         'us-east-1': 0.395,
         'us-east-2': 0.395,
-        'us-west-1': 0.473,
+        'us-gov-east-1': 0.474,
+        'us-gov-west-1': 0.474,
+        'us-west-1': 0.395,
         'us-west-2': 0.395,
-        'ca-central-1': 0.433,
-        'eu-west-1': 0.443,
-        'eu-west-2': 0.443,
-        'eu-west-3': 0.443,
-        'eu-central-1': 0.443,
-        'eu-north-1': 0.443,
-        'ap-south-1': 0.540,
-        'ap-northeast-1': 0.540,
-        'ap-northeast-2': 0.540,
-        'ap-northeast-3': 0.540,
-        'ap-southeast-1': 0.540,
-        'ap-southeast-2': 0.540,
-        'ap-southeast-3': 0.540,
-        'sa-east-1': 0.623,
-        'me-south-1': 0.469,
-        'af-south-1': 0.547,
     }
     
     def __init__(self, log_group: str, region: str, days: Optional[int] = None, 
@@ -125,10 +193,16 @@ class TrafficAnalyzer:
         
         # Determine time range
         if start_date and end_date:
-            # Custom date range mode
+            # Custom date range mode.
+            # The query window treats end_date as INCLUSIVE through the end of that
+            # day (see _get_query_window: end is end_date @ 23:59:59). So a range of
+            # start_date..end_date spans (delta + 1) calendar days, not delta. e.g.
+            # 08-19..08-20 is TWO days (48h), not one. self.days must reflect that so
+            # 'time_range_days' and the runtime-hours fallback stay consistent with
+            # the window actually queried.
             self.start_date = start_date
             self.end_date = end_date
-            self.days = (end_date - start_date).days
+            self.days = (end_date - start_date).days + 1
             self.use_custom_dates = True
         else:
             # Legacy days mode (backward compatible)
@@ -137,9 +211,19 @@ class TrafficAnalyzer:
             self.start_date = self.end_date - timedelta(days=self.days)
             self.use_custom_dates = False
         
-        # Get region-specific pricing with fallback to us-east-1
+        # Get region-specific pricing with fallback to us-east-1 rates.
         self.firewall_cost_per_gb = self.FIREWALL_PRICING.get(region, 0.065)
         self.interface_endpoint_monthly_cost = self.INTERFACE_ENDPOINT_PRICING.get(region, 7.30)
+        self.endpoint_hourly_rate = self.ENDPOINT_HOURLY_PRICING.get(region, 0.395)
+        
+        # Track whether ANY pricing table lacked this region, so results can be
+        # flagged. When true, the figures use us-east-1 fallback rates and may not
+        # reflect the region's real (often higher) pricing.
+        self.pricing_fallback = (
+            region not in self.FIREWALL_PRICING
+            or region not in self.ENDPOINT_HOURLY_PRICING
+            or region not in self.INTERFACE_ENDPOINT_PRICING
+        )
         
         # Calculate break-even thresholds for this region
         self.same_region_break_even = int(
@@ -151,10 +235,10 @@ class TrafficAnalyzer:
         )
         
         # Warn if using fallback pricing (unknown region)
-        if region not in self.FIREWALL_PRICING:
-            print(f"⚠️  Warning: Region '{region}' not in pricing table. "
-                  f"Using US-East-1 pricing (${self.firewall_cost_per_gb}/GB). "
-                  f"Actual costs may vary.")
+        if self.pricing_fallback:
+            print(f"⚠️  Warning: Region '{region}' not in the pricing tables. "
+                  f"Using US-East-1 fallback rates (${self.firewall_cost_per_gb}/GB data, "
+                  f"${self.endpoint_hourly_rate}/hr endpoint). Actual costs may vary.")
         
         # Auto-detect alert log group if not provided
         if alert_log_group:
@@ -183,204 +267,87 @@ class TrafficAnalyzer:
         """User requested cancellation"""
         self.cancel_requested = True
     
-    def query_flow_logs(self, progress_callback: Optional[Callable] = None) -> tuple:
-        """Query CloudWatch Logs for flow data (netflow events with bytes)
-        
-        Automatically handles pagination when queries exceed 10K record limit by
-        breaking the time range into smaller chunks.
-        
-        Args:
-            progress_callback: Optional callback for progress updates
-            
+    def _get_query_window(self) -> tuple:
+        """Return the (start_time, end_time) datetimes for all CloudWatch queries.
+
+        Single source of truth for the analysis window so that the raw per-flow
+        query, the authoritative totals aggregation, the record-count sizing, and
+        the alert query all cover the EXACT same range. Any drift between them
+        would make the totals and the breakdowns disagree.
+
+        Custom-date mode: [start_date 00:00:00, end_date 23:59:59.999999] - end_date
+        is inclusive through the end of that day (so start==end is a single full
+        day, and 08-19..08-20 is two full days). Naive datetimes are interpreted in
+        the host's local timezone by .timestamp(), matching the local dates shown in
+        the date picker (log @timestamps themselves are UTC).
+
+        Legacy days mode: a rolling window of the last `self.days` * 24 hours ending
+        now.
+
         Returns:
-            Tuple of (flow_logs, bytes_scanned) or (None, None) if cancelled
+            Tuple of (start_time: datetime, end_time: datetime)
         """
-        if self.cancel_requested:
-            return (None, None)
-        
-        # Use custom dates if provided, otherwise calculate from days
         if self.use_custom_dates:
-            # Convert date to datetime with time components
             start_time = datetime.combine(self.start_date, datetime.min.time())
             end_time = datetime.combine(self.end_date, datetime.max.time())
         else:
-            # Legacy behavior
             end_time = datetime.now()
             start_time = end_time - timedelta(days=self.days)
-        
-        # Implement automatic pagination for large queries
-        # Strategy: Start with full range, if we hit 10K limit OR if query fails due to
-        # time range issues (log group created after start date), chunk into smaller periods
-        all_records = []
-        total_bytes_scanned = 0
-        needs_chunking = False
-        
-        # Try initial query
-        records = []
-        bytes_scanned = 0
-        
-        try:
-            records, bytes_scanned, hit_limit = self._execute_flow_query(start_time, end_time, progress_callback)
-            
-            if self.cancel_requested:
-                return (None, None)
-            
-            if not hit_limit:
-                # Query succeeded without hitting limit - we're done
-                return (records, bytes_scanned)
-            
-            # Hit the 10K limit - need to chunk
-            needs_chunking = True
-        except Exception as e:
-            error_msg = str(e)
-            # Check if error is due to time range issues (log group created after query start)
-            if "MalformedQueryException" in error_msg and ("creation time" in error_msg or "before" in error_msg.lower()):
-                # Log group is newer than query start time - need to chunk to find valid range
-                needs_chunking = True
-                if progress_callback:
-                    progress_callback({
-                        'stage': 'Querying flow logs',
-                        'status': 'Log group created after query start - automatically chunking to find data...'
-                    })
-            else:
-                # Different error - re-raise it
-                raise
-        
-        # Need to chunk the time range (either hit limit or log group too new)
-        if progress_callback:
-            progress_callback({
-                'stage': 'Querying flow logs',
-                'status': 'Query exceeded 10K limit - automatically chunking into smaller periods...'
-            })
-        
-        # Calculate chunk size (start with daily chunks)
-        total_duration = end_time - start_time
-        num_chunks = max(2, int(total_duration.total_seconds() / (24 * 3600)))  # At least daily chunks
-        chunk_duration = total_duration / num_chunks
-        
-        all_records = []
-        total_bytes_scanned = 0
-        
-        for chunk_num in range(num_chunks):
-            if self.cancel_requested:
-                return (None, None)
-            
-            chunk_start = start_time + (chunk_duration * chunk_num)
-            chunk_end = start_time + (chunk_duration * (chunk_num + 1))
-            
-            if progress_callback:
-                progress_callback({
-                    'stage': 'Querying flow logs (chunked)',
-                    'status': f'Chunk {chunk_num + 1}/{num_chunks}: {chunk_start.date()} to {chunk_end.date()}...'
-                })
-            
-            # Execute query for this chunk
-            chunk_records, chunk_bytes, chunk_hit_limit = self._execute_flow_query(
-                chunk_start, chunk_end, progress_callback
-            )
-            
-            if self.cancel_requested:
-                return (None, None)
-            
-            # If this chunk STILL hit the 10K limit, recursively subdivide it
-            if chunk_hit_limit:
-                if progress_callback:
-                    progress_callback({
-                        'stage': 'Querying flow logs (recursive chunking)',
-                        'status': f'Chunk {chunk_num + 1} exceeded 10K - subdividing into hourly periods...'
-                    })
-                
-                # Recursively query this chunk with hourly subdivision
-                chunk_records, chunk_bytes = self._query_with_hourly_chunks(
-                    chunk_start, chunk_end, progress_callback
-                )
-                
-                if self.cancel_requested:
-                    return (None, None)
-            
-            all_records.extend(chunk_records)
-            total_bytes_scanned += chunk_bytes
-        
-        if progress_callback:
-            progress_callback({
-                'stage': 'Querying flow logs',
-                'status': f'Retrieved {len(all_records):,} total flow records from {num_chunks} chunks'
-            })
-        
-        return (all_records, total_bytes_scanned)
+        return (start_time, end_time)
     
-    def _query_with_hourly_chunks(self, start_time: datetime, end_time: datetime,
-                                  progress_callback: Optional[Callable] = None) -> tuple:
-        """Query with hourly chunks for high-traffic periods
-        
-        Used when a daily chunk exceeds 10K records. Breaks the day into 24 hourly chunks.
-        
+    def query_flow_totals(self, progress_callback: Optional[Callable] = None) -> tuple:
+        """Query authoritative traffic totals using server-side aggregation.
+
+        CRITICAL: This is the source of truth for volumetric figures (total bytes
+        and per-AZ bytes). It uses a CloudWatch Logs Insights `stats sum() by ...`
+        query, so the 10,000-row result limit applies to the number of returned
+        *aggregate* rows (one per
+        Availability Zone) rather than the number of underlying netflow records,
+        so the totals cannot be truncated by high traffic volume.
+
+        The sum is taken over every netflow record in range. Because Suricata
+        emits one netflow record per direction (to-server always, to-client when
+        response packets are seen) and each carries that direction's byte count,
+        summing all records yields the correct bidirectional processed-byte total
+        for the firewall - the same quantity the per-flow path computes by grouping
+        on flow_id, but without the row-limit truncation.
+
+        This query also returns the total netflow RECORD count, which
+        query_flow_grouped() uses to size its time-chunking in a single pass.
+
         Args:
-            start_time: Chunk start time
-            end_time: Chunk end time  
-            progress_callback: Optional progress callback
-            
+            progress_callback: Optional callback for progress updates
+
         Returns:
-            Tuple of (all_records, total_bytes_scanned)
+            Tuple of (total_bytes, az_bytes, bytes_scanned, total_records) where:
+              - total_bytes (int): authoritative total netflow bytes in range
+              - az_bytes (Dict[str, int]): bytes per availability_zone
+              - bytes_scanned (int): bytes scanned by this query (for query cost)
+              - total_records (int): number of netflow records in range (for chunk sizing)
+            Returns (None, None, None, None) if cancelled.
         """
-        # Break into hourly chunks
-        duration = end_time - start_time
-        num_hours = max(1, int(duration.total_seconds() / 3600))
-        hour_duration = duration / num_hours
-        
-        all_records = []
-        total_bytes = 0
-        
-        for hour_num in range(num_hours):
-            if self.cancel_requested:
-                return ([], 0)
-            
-            hour_start = start_time + (hour_duration * hour_num)
-            hour_end = start_time + (hour_duration * (hour_num + 1))
-            
-            if progress_callback:
-                progress_callback({
-                    'stage': 'Querying flow logs (hourly)',
-                    'status': f'Hour {hour_num + 1}/{num_hours}: {hour_start.strftime("%H:%M")} to {hour_end.strftime("%H:%M")}...'
-                })
-            
-            hour_records, hour_bytes, hour_hit_limit = self._execute_flow_query(
-                hour_start, hour_end, progress_callback
-            )
-            
-            if self.cancel_requested:
-                return ([], 0)
-            
-            all_records.extend(hour_records)
-            total_bytes += hour_bytes
-            
-            # If even an hour hits 10K, log warning but continue
-            # (This would be extremely high traffic - ~240K records/day)
-            if hour_hit_limit:
-                print(f"⚠️  Warning: Single hour still hit 10K limit. "
-                      f"This is extremely high traffic volume. Results may be slightly incomplete.")
-        
-        return (all_records, total_bytes)
-    
-    def _execute_flow_query(self, start_time: datetime, end_time: datetime,
-                           progress_callback: Optional[Callable] = None) -> tuple:
-        """Execute a single flow log query
-        
-        Args:
-            start_time: Query start time
-            end_time: Query end time
-            progress_callback: Optional progress callback
-            
-        Returns:
-            Tuple of (records, bytes_scanned, hit_10k_limit)
-        """
+        if self.cancel_requested:
+            return (None, None, None, None)
+
+        # Use the shared window helper so this aggregation covers the EXACT same
+        # range as the raw per-flow and alert queries.
+        start_time, end_time = self._get_query_window()
+
+        # Aggregate bytes AND record count server-side, grouped by AZ (low
+        # cardinality => never hits the 10K row limit). Grouping by AZ also gives us
+        # the per-AZ distribution needed for endpoint cost attribution.
         query = """
-        fields @timestamp, availability_zone, event.src_ip, event.dest_ip, event.src_port, event.dest_port, 
-               event.proto, event.flow_id, event.netflow.bytes, event.app_proto
+        fields availability_zone, event.netflow.bytes
         | filter event.event_type = "netflow"
+        | stats sum(event.netflow.bytes) as total_bytes, count(*) as rec_count by availability_zone
         """
-        
-        # Start query
+
+        if progress_callback:
+            progress_callback({
+                'stage': 'Querying traffic totals',
+                'status': 'Aggregating processed bytes (authoritative total)...'
+            })
+
         try:
             response = self.logs_client.start_query(
                 logGroupName=self.log_group,
@@ -393,15 +360,294 @@ class TrafficAnalyzer:
             if "ResourceNotFoundException" in error_str or "ResourceNotFound" in error_str:
                 raise Exception(f"FLOW log group not found: '{self.log_group}'. Please verify the name and region.")
             elif "MalformedQueryException" in error_str and ("creation time" in error_str or "before" in error_str.lower()):
-                # Query time range is before log group was created - return empty results for this chunk
-                # This is normal during chunked queries when firewall is new
+                # Query range predates log group creation - no data for this range.
+                return (0, {}, 0, 0)
+            else:
+                raise Exception(f"Failed to start flow totals query on '{self.log_group}': {error_str}")
+
+        query_id = response['queryId']
+
+        start_query_time = time.time()
+        while True:
+            if self.cancel_requested:
+                try:
+                    self.logs_client.stop_query(queryId=query_id)
+                except:
+                    pass
+                return (None, None, None, None)
+
+            result = self.logs_client.get_query_results(queryId=query_id)
+            status = result['status']
+
+            if status in self._TERMINAL_QUERY_STATUSES:
+                break
+
+            # Wall-clock safety net: fail loudly instead of hanging if the query
+            # never reaches a terminal state.
+            elapsed = time.time() - start_query_time
+            if elapsed > self.MAX_QUERY_SECONDS:
+                try:
+                    self.logs_client.stop_query(queryId=query_id)
+                except:
+                    pass
+                raise Exception(f"Flow totals query timed out after {int(elapsed)}s "
+                                f"waiting for CloudWatch Logs Insights (status '{status}').")
+
+            if progress_callback:
+                progress_callback({
+                    'stage': 'Querying traffic totals',
+                    'status': f'Aggregation running... ({int(elapsed)}s elapsed)'
+                })
+
+            time.sleep(2)
+
+        if status != 'Complete':
+            raise Exception(f"Flow totals query {status.lower()}: {result.get('statistics', {})}")
+
+        records = result.get('results', [])
+        statistics = result.get('statistics', {})
+        bytes_scanned = statistics.get('bytesScanned', 0)
+
+        az_bytes = {}
+        total_bytes = 0
+        total_records = 0
+        for row in records:
+            az = self._get_field_value(row, 'availability_zone')
+            bytes_str = self._get_field_value(row, 'total_bytes')
+            count_str = self._get_field_value(row, 'rec_count')
+            try:
+                # stats sum() may return a numeric string (e.g. "12345" or "1.2E7")
+                row_bytes = int(float(bytes_str)) if bytes_str else 0
+            except (ValueError, TypeError):
+                row_bytes = 0
+            try:
+                row_count = int(float(count_str)) if count_str else 0
+            except (ValueError, TypeError):
+                row_count = 0
+            total_bytes += row_bytes
+            total_records += row_count
+            # availability_zone may be absent on some records; bucket under '' so
+            # the grand total still reflects those bytes even if unattributed.
+            az_bytes[az if az else ''] = az_bytes.get(az if az else '', 0) + row_bytes
+
+        if progress_callback:
+            progress_callback({
+                'stage': 'Querying traffic totals',
+                'status': f'Authoritative total: {total_bytes / (1024**3):.2f} GB '
+                          f'across {len(az_bytes)} AZ(s), {total_records:,} records'
+            })
+
+        return (total_bytes, az_bytes, bytes_scanned, total_records)
+
+    # Fields returned by the grouped per-flow aggregation, in query order.
+    _GROUPED_QUERY = """
+        fields event.flow_id, event.src_ip, event.dest_ip, event.src_port, event.dest_port,
+               event.proto, event.app_proto, availability_zone, event.netflow.bytes, @timestamp
+        | filter event.event_type = "netflow"
+        | stats sum(event.netflow.bytes) as bytes, count(*) as recs,
+                min(@timestamp) as first_ts, max(@timestamp) as last_ts
+          by event.flow_id, event.src_ip, event.dest_ip, event.src_port, event.dest_port,
+             event.proto, event.app_proto, availability_zone
+        """
+
+    def query_flow_grouped(self, expected_records: Optional[int] = None,
+                           progress_callback: Optional[Callable] = None) -> tuple:
+        """Retrieve per-flow byte totals via server-side aggregation (truncation-proof).
+
+        Replaces the old raw per-flow row retrieval. Instead of pulling individual
+        netflow rows (capped at 10,000/query and thus a *sample* on busy firewalls),
+        this sums bytes server-side grouped by the flow's identifying dimensions:
+
+            stats sum(bytes), count(*), min/max(@timestamp)
+              by flow_id, src_ip, dest_ip, src_port, dest_port, proto, app_proto, az
+
+        Each returned row is one directional leg of a flow (the two Suricata
+        directional netflow records collapse into two rows sharing a flow_id, with
+        swapped src/dest). correlate_logs re-joins them by flow_id and applies the
+        same direction/port collapse as before, so the downstream breakdowns are
+        byte-accurate at ANY volume while keeping full hostname/service enrichment.
+
+        The 10,000-row limit now applies to the number of returned GROUPS. Group
+        cardinality (distinct flow legs) is far lower than raw record count but can
+        still be large, so we reuse the count-seeded time chunking and adaptive
+        bisection; groups are merged across chunks by their full key. Only if a
+        <=60s window still exceeds the group cap is the result flagged partial (the
+        authoritative totals from query_flow_totals remain exact regardless).
+
+        Args:
+            expected_records: Total netflow record count (from query_flow_totals),
+                used to size chunking. Groups are fewer than records, so this is a
+                conservative (safe) upper bound for chunk sizing.
+            progress_callback: Optional progress callback.
+
+        Returns:
+            Tuple of (grouped_rows, bytes_scanned, truncated) where grouped_rows is a
+            list of dicts with keys: flow_id, src_ip, dest_ip, src_port, dest_port,
+            proto, app_proto, az, bytes, recs, first_ts, last_ts.
+            Returns (None, None, None) if cancelled.
+        """
+        if self.cancel_requested:
+            return (None, None, None)
+
+        start_time, end_time = self._get_query_window()
+
+        # Keep each chunk's returned GROUP count under the 10K cap. Groups are a
+        # fraction of raw records, so sizing by record count is conservative.
+        SAFE_CHUNK_ROWS = 9000
+
+        if not expected_records or expected_records <= SAFE_CHUNK_ROWS:
+            rows, scanned, truncated = self._query_grouped_range_adaptive(
+                start_time, end_time, progress_callback
+            )
+            if self.cancel_requested:
+                return (None, None, None)
+            return (rows, scanned, truncated)
+
+        num_chunks = max(1, -(-expected_records // SAFE_CHUNK_ROWS))  # ceil division
+        total_duration = end_time - start_time
+        chunk_duration = total_duration / num_chunks
+
+        if progress_callback:
+            progress_callback({
+                'stage': 'Querying flow breakdown',
+                'status': f'Aggregating per-flow bytes in {num_chunks} chunks...',
+                'phase': 'flow_chunks',
+                'chunk_current': 0,
+                'chunk_total': num_chunks,
+            })
+
+        # Merge groups across chunks by their full identifying key. bytes/recs are
+        # additive; timestamps take the min/max across chunks. A flow_id is
+        # time-local so this cannot mis-merge distinct flows.
+        merged = {}
+        total_bytes_scanned = 0
+        truncated = False
+
+        for chunk_num in range(num_chunks):
+            if self.cancel_requested:
+                return (None, None, None)
+
+            raw_start = start_time + (chunk_duration * chunk_num)
+            chunk_start = raw_start if chunk_num == 0 else raw_start + timedelta(seconds=1)
+            chunk_end = (end_time if chunk_num == num_chunks - 1
+                         else start_time + (chunk_duration * (chunk_num + 1)))
+
+            if progress_callback:
+                progress_callback({
+                    'stage': 'Querying flow breakdown (chunked)',
+                    'status': f'Chunk {chunk_num + 1}/{num_chunks}...',
+                    'phase': 'flow_chunks',
+                    'chunk_current': chunk_num + 1,
+                    'chunk_total': num_chunks,
+                })
+
+            chunk_rows, chunk_bytes, chunk_trunc = self._query_grouped_range_adaptive(
+                chunk_start, chunk_end, progress_callback
+            )
+            if self.cancel_requested:
+                return (None, None, None)
+
+            total_bytes_scanned += chunk_bytes
+            if chunk_trunc:
+                truncated = True
+            for r in chunk_rows:
+                key = (r['flow_id'], r['src_ip'], r['dest_ip'], r['src_port'],
+                       r['dest_port'], r['proto'], r['app_proto'], r['az'])
+                if key in merged:
+                    m = merged[key]
+                    m['bytes'] += r['bytes']
+                    m['recs'] += r['recs']
+                    if r['first_ts'] and (not m['first_ts'] or r['first_ts'] < m['first_ts']):
+                        m['first_ts'] = r['first_ts']
+                    if r['last_ts'] and (not m['last_ts'] or r['last_ts'] > m['last_ts']):
+                        m['last_ts'] = r['last_ts']
+                else:
+                    merged[key] = dict(r)
+
+        rows = list(merged.values())
+        if progress_callback:
+            status_msg = f'Aggregated {len(rows):,} flow legs from {num_chunks} chunks'
+            if truncated:
+                status_msg += ' (breakdown sampled; totals unaffected)'
+            progress_callback({
+                'stage': 'Querying flow breakdown',
+                'status': status_msg,
+                'phase': 'flow_chunks',
+                'chunk_current': num_chunks,
+                'chunk_total': num_chunks,
+            })
+        return (rows, total_bytes_scanned, truncated)
+
+    def _query_grouped_range_adaptive(self, start_time: datetime, end_time: datetime,
+                                      progress_callback: Optional[Callable] = None) -> tuple:
+        """Run the grouped aggregation for a range; bisect if it hits the group cap.
+
+        If the returned
+        group count hits the 10,000-row cap the range is halved (down to a 60s
+        floor) so no groups are lost; only a <=60s window still at the cap is
+        flagged truncated.
+
+        Returns:
+            Tuple of (grouped_rows, bytes_scanned, truncated)
+        """
+        MIN_CHUNK_SECONDS = 60
+
+        if self.cancel_requested:
+            return ([], 0, False)
+
+        rows, bytes_scanned, hit_limit = self._execute_grouped_query(
+            start_time, end_time, progress_callback
+        )
+        if self.cancel_requested:
+            return ([], 0, False)
+
+        if not hit_limit:
+            return (rows, bytes_scanned, False)
+
+        if (end_time - start_time).total_seconds() <= MIN_CHUNK_SECONDS:
+            print("⚠️  Warning: a <=60s window still hit the 10K group limit; "
+                  "per-flow breakdowns for this period are a sample. "
+                  "Authoritative totals are unaffected.")
+            return (rows, bytes_scanned, True)
+
+        mid = start_time + (end_time - start_time) / 2
+        left_rows, left_bytes, left_trunc = self._query_grouped_range_adaptive(
+            start_time, mid, progress_callback
+        )
+        if self.cancel_requested:
+            return ([], 0, False)
+        right_rows, right_bytes, right_trunc = self._query_grouped_range_adaptive(
+            mid + timedelta(seconds=1), end_time, progress_callback
+        )
+        return (left_rows + right_rows,
+                left_bytes + right_bytes,
+                left_trunc or right_trunc)
+
+    def _execute_grouped_query(self, start_time: datetime, end_time: datetime,
+                               progress_callback: Optional[Callable] = None) -> tuple:
+        """Execute one grouped aggregation query and parse rows.
+
+        Returns:
+            Tuple of (grouped_rows, bytes_scanned, hit_group_cap)
+        """
+        try:
+            response = self.logs_client.start_query(
+                logGroupName=self.log_group,
+                startTime=int(start_time.timestamp()),
+                endTime=int(end_time.timestamp()),
+                queryString=self._GROUPED_QUERY
+            )
+        except Exception as e:
+            error_str = str(e)
+            if "ResourceNotFoundException" in error_str or "ResourceNotFound" in error_str:
+                raise Exception(f"FLOW log group not found: '{self.log_group}'. Please verify the name and region.")
+            elif "MalformedQueryException" in error_str and ("creation time" in error_str or "before" in error_str.lower()):
+                # Range predates log group creation - no data for this chunk.
                 return ([], 0, False)
             else:
-                raise Exception(f"Failed to start flow log query on '{self.log_group}': {error_str}")
-        
+                raise Exception(f"Failed to start flow breakdown query on '{self.log_group}': {error_str}")
+
         query_id = response['queryId']
-        
-        # Wait for query completion
         start_query_time = time.time()
         while True:
             if self.cancel_requested:
@@ -410,36 +656,66 @@ class TrafficAnalyzer:
                 except:
                     pass
                 return ([], 0, False)
-            
+
             result = self.logs_client.get_query_results(queryId=query_id)
             status = result['status']
-            
-            if status in ['Complete', 'Failed', 'Cancelled']:
+            if status in self._TERMINAL_QUERY_STATUSES:
                 break
-            
-            # Progress update
-            elapsed = int(time.time() - start_query_time)
+
+            elapsed = time.time() - start_query_time
+            if elapsed > self.MAX_QUERY_SECONDS:
+                try:
+                    self.logs_client.stop_query(queryId=query_id)
+                except:
+                    pass
+                raise Exception(f"Flow breakdown query timed out after {int(elapsed)}s "
+                                f"waiting for CloudWatch Logs Insights (status '{status}').")
             if progress_callback:
                 progress_callback({
-                    'stage': 'Querying flow logs',
-                    'status': f'Query running... ({elapsed}s elapsed)'
+                    'stage': 'Querying flow breakdown',
+                    'status': f'Aggregation running... ({int(elapsed)}s elapsed)'
                 })
-            
             time.sleep(2)
-        
-        if status == 'Complete':
-            records = result.get('results', [])
-            statistics = result.get('statistics', {})
-            bytes_scanned = statistics.get('bytesScanned', 0)
-            records_matched = statistics.get('recordsMatched', 0)
-            
-            # Check if we hit the 10K limit
-            hit_limit = (len(records) >= 10000 and records_matched > 10000)
-            
-            return (records, bytes_scanned, hit_limit)
-        else:
-            raise Exception(f"Flow log query {status.lower()}: {result.get('statistics', {})}")
-    
+
+        if status != 'Complete':
+            raise Exception(f"Flow breakdown query {status.lower()}: {result.get('statistics', {})}")
+
+        records = result.get('results', [])
+        statistics = result.get('statistics', {})
+        bytes_scanned = statistics.get('bytesScanned', 0)
+        records_matched = statistics.get('recordsMatched', 0)
+        # For a stats query, len(records) is the number of returned GROUPS; hitting
+        # 10K means we must subdivide to avoid dropping groups.
+        hit_limit = (len(records) >= 10000 and records_matched > 10000)
+
+        rows = []
+        for row in records:
+            bytes_str = self._get_field_value(row, 'bytes')
+            recs_str = self._get_field_value(row, 'recs')
+            try:
+                b = int(float(bytes_str)) if bytes_str else 0
+            except (ValueError, TypeError):
+                b = 0
+            try:
+                recs = int(float(recs_str)) if recs_str else 0
+            except (ValueError, TypeError):
+                recs = 0
+            rows.append({
+                'flow_id': self._get_field_value(row, 'event.flow_id'),
+                'src_ip': self._get_field_value(row, 'event.src_ip'),
+                'dest_ip': self._get_field_value(row, 'event.dest_ip'),
+                'src_port': self._get_field_value(row, 'event.src_port'),
+                'dest_port': self._get_field_value(row, 'event.dest_port'),
+                'proto': self._get_field_value(row, 'event.proto'),
+                'app_proto': self._get_field_value(row, 'event.app_proto'),
+                'az': self._get_field_value(row, 'availability_zone'),
+                'bytes': b,
+                'recs': recs,
+                'first_ts': self._get_field_value(row, 'first_ts'),
+                'last_ts': self._get_field_value(row, 'last_ts'),
+            })
+        return (rows, bytes_scanned, hit_limit)
+
     def query_alert_logs(self, progress_callback: Optional[Callable] = None) -> tuple:
         """Query CloudWatch Logs for alert data (hostnames from HTTP and TLS)
         
@@ -454,15 +730,8 @@ class TrafficAnalyzer:
         if self.cancel_requested:
             return (None, None, None, None)
         
-        # Use custom dates if provided, otherwise calculate from days
-        if self.use_custom_dates:
-            # Convert date to datetime with time components
-            start_time = datetime.combine(self.start_date, datetime.min.time())
-            end_time = datetime.combine(self.end_date, datetime.max.time())
-        else:
-            # Legacy behavior
-            end_time = datetime.now()
-            start_time = end_time - timedelta(days=self.days)
+        # Shared window helper: identical range to the flow / totals queries.
+        start_time, end_time = self._get_query_window()
         
         # Query for alert events with hostname/SNI
         query = """
@@ -507,15 +776,25 @@ class TrafficAnalyzer:
             result = self.logs_client.get_query_results(queryId=query_id)
             status = result['status']
             
-            if status in ['Complete', 'Failed', 'Cancelled']:
+            if status in self._TERMINAL_QUERY_STATUSES:
                 break
             
+            # Wall-clock safety net: fail loudly instead of hanging if the query
+            # never reaches a terminal state.
+            elapsed = time.time() - start_query_time
+            if elapsed > self.MAX_QUERY_SECONDS:
+                try:
+                    self.logs_client.stop_query(queryId=query_id)
+                except:
+                    pass
+                raise Exception(f"Alert log query timed out after {int(elapsed)}s "
+                                f"waiting for CloudWatch Logs Insights (status '{status}').")
+            
             # Progress update
-            elapsed = int(time.time() - start_query_time)
             if progress_callback:
                 progress_callback({
                     'stage': 'Querying alert logs',
-                    'status': f'Query running... ({elapsed}s elapsed)'
+                    'status': f'Query running... ({int(elapsed)}s elapsed)'
                 })
             
             time.sleep(2)
@@ -539,14 +818,18 @@ class TrafficAnalyzer:
             for alert in records:
                 timestamp_str = self._get_field_value(alert, '@timestamp')
                 if timestamp_str:
-                    try:
-                        ts = datetime.fromisoformat(timestamp_str.replace('Z', '+00:00'))
+                    # Route through the shared parser so alert timestamps are
+                    # normalized to NAIVE UTC, matching the flow-leg and metadata
+                    # timestamps. Parsing inline with fromisoformat() on a 'Z' form
+                    # yields a tz-aware datetime, which later raises "can't compare
+                    # offset-naive and offset-aware datetimes" when combined with
+                    # the naive flow timestamps in analyze().
+                    ts = self._parse_cw_timestamp(timestamp_str)
+                    if ts:
                         if earliest_alert_ts is None or ts < earliest_alert_ts:
                             earliest_alert_ts = ts
                         if latest_alert_ts is None or ts > latest_alert_ts:
                             latest_alert_ts = ts
-                    except:
-                        pass
             
             return (records, earliest_alert_ts, latest_alert_ts, bytes_scanned)
         else:
@@ -567,18 +850,56 @@ class TrafficAnalyzer:
                 return field.get('value')
         return None
     
-    def correlate_logs(self, flow_logs: List[Dict], alert_logs: List[Dict],
+    @staticmethod
+    def _parse_cw_timestamp(ts_str: Optional[str]) -> Optional[datetime]:
+        """Parse a CloudWatch Logs timestamp string into a datetime, or None.
+
+        Handles both the raw @timestamp ISO form ('2026-07-01T05:00:00.000Z') and
+        the form returned by min()/max(@timestamp) in a stats query, which uses a
+        space separator ('2026-07-01 05:00:00.000'). Returns None on any failure so
+        callers can simply skip unparseable values.
+        """
+        if not ts_str:
+            return None
+        s = ts_str.strip().replace('Z', '+00:00')
+        # min/max(@timestamp) returns 'YYYY-MM-DD HH:MM:SS.sss' (space, no 'T').
+        if 'T' not in s and ' ' in s:
+            s = s.replace(' ', 'T', 1)
+        try:
+            dt = datetime.fromisoformat(s)
+        except (ValueError, TypeError):
+            return None
+        # Normalize to NAIVE UTC. CloudWatch returns @timestamp as naive UTC, so
+        # every timestamp in the analysis (flow legs, alert logs, metadata) is kept
+        # naive and mutually comparable. Mixing naive and tz-aware datetimes raises
+        # "can't compare offset-naive and offset-aware datetimes", so if a source
+        # value happens to carry an offset we convert it to UTC and drop tzinfo.
+        if dt.tzinfo is not None:
+            dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
+        return dt
+    
+    def correlate_logs(self, grouped_rows: List[Dict], alert_logs: List[Dict],
                       progress_callback: Optional[Callable] = None) -> tuple:
-        """Correlate flow and alert logs by flow_id
-        
-        Critical: Groups flows by flow_id and sums bytes bidirectionally.
-        The netflow.bytes field is UNIDIRECTIONAL - must sum both directions.
-        
+        """Correlate the grouped per-flow aggregation with alert logs by flow_id.
+
+        Input is the output of query_flow_grouped(): each row is one directional
+        leg of a flow (dict with flow_id, src_ip, dest_ip, src_port, dest_port,
+        proto, app_proto, az, bytes, recs, first_ts, last_ts), where 'bytes' is
+        already the server-side sum for that leg. The two directional legs of a
+        flow share a flow_id (with src/dest swapped), so we re-join by flow_id and
+        collapse them into one canonical flow exactly as the previous raw-record
+        path did: sum bytes across legs (bidirectional total), pick the canonical
+        src/dest/port via the outbound/return-traffic heuristic, then enrich with
+        hostname (alert join) and AWS service (hostname or dest-IP) info.
+
+        This collapse is order-independent: whether the outbound or return leg is
+        seen first, the canonical dest_port resolves to the same service port.
+
         Args:
-            flow_logs: List of flow log entries
-            alert_logs: List of alert log entries
-            progress_callback: Optional callback for progress updates
-            
+            grouped_rows: List of aggregated flow-leg dicts from query_flow_grouped.
+            alert_logs: List of alert log entries.
+            progress_callback: Optional callback for progress updates.
+
         Returns:
             Tuple of (enriched_flows, unique_azs, az_traffic, earliest_timestamp, latest_timestamp) or (None, None, None, None, None) if cancelled
         """
@@ -607,11 +928,12 @@ class TrafficAnalyzer:
         if progress_callback:
             progress_callback({
                 'stage': 'Correlating logs',
-                'status': f'Processing {len(flow_logs):,} flow records...'
+                'status': f'Processing {len(grouped_rows):,} flow legs...'
             })
         
-        # CRITICAL: Group flows by flow_id and sum bytes bidirectionally
-        # netflow.bytes is UNIDIRECTIONAL - need to sum both directions
+        # Re-join the directional legs by flow_id and sum bytes bidirectionally.
+        # Each grouped row's 'bytes' is already the server-side sum for that leg;
+        # summing across a flow_id's legs yields the correct bidirectional total.
         flow_totals = {}
         
         # Track unique AZs and timestamps for endpoint cost calculation
@@ -621,45 +943,40 @@ class TrafficAnalyzer:
         earliest_timestamp = None
         latest_timestamp = None
         
-        for i, flow in enumerate(flow_logs):
+        for i, row in enumerate(grouped_rows):
             if self.cancel_requested:
                 return (None, None, None, None, None)
             
-            flow_id = self._get_field_value(flow, 'event.flow_id')
-            src_ip = self._get_field_value(flow, 'event.src_ip')
-            dest_ip = self._get_field_value(flow, 'event.dest_ip')
-            src_port = self._get_field_value(flow, 'event.src_port')
-            dest_port = self._get_field_value(flow, 'event.dest_port')
-            proto = self._get_field_value(flow, 'event.proto')
-            bytes_str = self._get_field_value(flow, 'event.netflow.bytes')
-            app_proto = self._get_field_value(flow, 'event.app_proto')
-            az = self._get_field_value(flow, 'availability_zone')
-            timestamp_str = self._get_field_value(flow, '@timestamp')
+            flow_id = row.get('flow_id')
+            src_ip = row.get('src_ip')
+            dest_ip = row.get('dest_ip')
+            src_port = row.get('src_port')
+            dest_port = row.get('dest_port')
+            proto = row.get('proto')
+            app_proto = row.get('app_proto')
+            az = row.get('az')
             
             if not flow_id:
                 continue
             
-            bytes_val = int(bytes_str) if bytes_str else 0
+            bytes_val = row.get('bytes') or 0  # already summed for this leg
             
             # Track AZ for endpoint cost calculation and traffic distribution
             if az:
                 unique_azs.add(az)
-                # Aggregate bytes per AZ
                 if az not in az_traffic:
                     az_traffic[az] = 0
                 az_traffic[az] += bytes_val
             
-            # Track timestamp range for endpoint cost calculation
-            if timestamp_str:
-                try:
-                    # Parse ISO timestamp
-                    ts = datetime.fromisoformat(timestamp_str.replace('Z', '+00:00'))
-                    if earliest_timestamp is None or ts < earliest_timestamp:
-                        earliest_timestamp = ts
-                    if latest_timestamp is None or ts > latest_timestamp:
-                        latest_timestamp = ts
-                except:
-                    pass
+            # Track overall timestamp range from this leg's min/max timestamps.
+            first_ts = self._parse_cw_timestamp(row.get('first_ts'))
+            last_ts = self._parse_cw_timestamp(row.get('last_ts'))
+            if first_ts:
+                if earliest_timestamp is None or first_ts < earliest_timestamp:
+                    earliest_timestamp = first_ts
+            if last_ts:
+                if latest_timestamp is None or last_ts > latest_timestamp:
+                    latest_timestamp = last_ts
             
             # Initialize flow entry if first time seeing this flow_id
             if flow_id not in flow_totals:
@@ -673,23 +990,21 @@ class TrafficAnalyzer:
                     'timestamp': None
                 }
             
-            # Sum bytes from both directions
+            # Sum bytes from both directional legs
             flow_totals[flow_id]['bytes'] += bytes_val
             
-            # Capture timestamp from first packet (or most recent if already set)
-            if timestamp_str and flow_totals[flow_id]['timestamp'] is None:
-                try:
-                    flow_totals[flow_id]['timestamp'] = datetime.fromisoformat(timestamp_str.replace('Z', '+00:00'))
-                except:
-                    pass
+            # Per-flow timestamp: earliest leg start seen for this flow.
+            if first_ts and (flow_totals[flow_id]['timestamp'] is None
+                             or first_ts < flow_totals[flow_id]['timestamp']):
+                flow_totals[flow_id]['timestamp'] = first_ts
             
-            # Determine initiating source and destination
-            # CRITICAL: Only capture port/protocol from OUTBOUND traffic (private → public)
-            # Return traffic (public → private) has ephemeral ports which we must ignore
+            # Determine initiating source and destination.
+            # CRITICAL: Only capture port/protocol from OUTBOUND traffic (private -> public);
+            # return traffic (public -> private) has ephemeral ports we must not use as the port.
             src_is_private = self.aws_service_detector.is_rfc1918_private(src_ip) if src_ip else False
             dest_is_private = self.aws_service_detector.is_rfc1918_private(dest_ip) if dest_ip else False
             
-            # If we don't have IPs yet, capture them from first packet seen
+            # If we don't have IPs yet, capture them from the first leg seen
             if flow_totals[flow_id]['src_ip'] is None:
                 if src_is_private and not dest_is_private:
                     # OUTBOUND: private source, public dest (captures real dest port: 443, 80, etc.)
@@ -699,12 +1014,12 @@ class TrafficAnalyzer:
                     flow_totals[flow_id]['proto'] = proto
                     flow_totals[flow_id]['app_proto'] = app_proto
                 elif not src_is_private and dest_is_private:
-                    # RETURN TRAFFIC: public source, private dest
-                    # CRITICAL: In return traffic, the source port IS the real destination port
-                    # Example: public:443 → private:54321, we want port 443
+                    # RETURN TRAFFIC: public source, private dest.
+                    # In return traffic, the source port IS the real service port
+                    # (e.g. public:443 -> private:54321 => port 443).
                     flow_totals[flow_id]['src_ip'] = dest_ip  # VPC IP
                     flow_totals[flow_id]['dest_ip'] = src_ip  # Internet IP
-                    flow_totals[flow_id]['dest_port'] = src_port  # src_port from return traffic = service port
+                    flow_totals[flow_id]['dest_port'] = src_port  # src_port from return = service port
                     flow_totals[flow_id]['proto'] = proto
                     flow_totals[flow_id]['app_proto'] = app_proto
                 elif src_ip and dest_ip:
@@ -715,22 +1030,21 @@ class TrafficAnalyzer:
                     flow_totals[flow_id]['proto'] = proto
                     flow_totals[flow_id]['app_proto'] = app_proto
             elif flow_totals[flow_id]['dest_port'] is None:
-                # We have IPs but missing port - try to get from outbound packet
+                # We have IPs but missing port - try to get it from an outbound leg
                 if src_is_private and not dest_is_private:
-                    # Found outbound packet - capture the real destination port
                     flow_totals[flow_id]['dest_port'] = dest_port
                     if flow_totals[flow_id]['app_proto'] is None:
                         flow_totals[flow_id]['app_proto'] = app_proto
             
-            # Progress update every 10,000 flows
+            # Progress update every 10,000 legs
             if i > 0 and i % 10000 == 0 and progress_callback:
-                percent = (i / len(flow_logs)) * 100
+                percent = (i / len(grouped_rows)) * 100
                 progress_callback({
                     'stage': 'Correlating logs',
                     'processed': i,
-                    'total': len(flow_logs),
+                    'total': len(grouped_rows),
                     'percent': percent,
-                    'status': f'Grouping flows by flow_id... ({i:,}/{len(flow_logs):,})'
+                    'status': f'Grouping flow legs by flow_id... ({i:,}/{len(grouped_rows):,})'
                 })
         
         if progress_callback:
@@ -1007,106 +1321,140 @@ class TrafficAnalyzer:
         
         return sorted_pairs
     
-    def calculate_vpc_endpoint_recommendations(self, service_totals: Dict) -> List[Dict]:
-        """Calculate VPC endpoint recommendations with cost-benefit analysis
-        
+    def calculate_vpc_endpoint_recommendations(self, service_totals: Dict,
+                                                window_hours: float = 730.0) -> List[Dict]:
+        """Calculate VPC endpoint recommendations with cost-benefit analysis.
+
         CRITICAL: Interface endpoints are deployed in the FIREWALL's region (where the client is),
         not the destination service region. Therefore, endpoint cost is ALWAYS based on
         firewall region pricing, regardless of which region the service is in.
-        
+
+        SCOPING (must stay consistent with the UI columns):
+          - traffic_gb / current_cost / endpoint_cost are WINDOW-scoped: the traffic
+            seen and the data-processing cost for the analyzed window, plus the cost
+            of running the equivalent endpoint for that same window.
+          - monthly_savings is a PROJECTION: it answers "if this window's traffic
+            repeated for a full month, what would deploying the endpoint save?" It is
+            computed by projecting the window data-processing cost to a month
+            (x 730/window_hours) and subtracting the endpoint's MONTHLY cost. This
+            like-for-like (monthly vs monthly) comparison is what makes the number
+            coherent - the previous code subtracted a monthly endpoint price from a
+            window data cost, which under-reported savings by the window/month ratio.
+          - DEPLOY/CONSIDER/SKIP thresholds compare the MONTHLY-projected volume
+            against the (monthly) break-even, so they are scope-consistent too.
+
         Args:
-            service_totals: Dict mapping service -> region -> bytes
-            
+            service_totals: Dict mapping service -> region -> bytes (window totals)
+            window_hours: Length of the analyzed window in hours, used to project
+                window figures to a month (730 hours). Defaults to 730 (=> no
+                projection) for safety if a caller omits it.
+
         Returns:
-            List of recommendation dictionaries sorted by savings
+            List of recommendation dictionaries sorted by projected monthly savings.
         """
         recommendations = []
-        
+
+        # Window -> month projection factor for volume/data cost, and the inverse
+        # (month -> window) factor for expressing a monthly endpoint price over the
+        # analyzed window.
+        month_factor = (730.0 / window_hours) if window_hours else 1.0
+        endpoint_window_factor = (window_hours / 730.0) if window_hours else 1.0
+
         for service, regions in service_totals.items():
             for region, total_bytes in regions.items():
-                traffic_gb = total_bytes / (1024**3)  # Convert to GB
-                current_cost = traffic_gb * self.firewall_cost_per_gb
-                
+                traffic_gb = total_bytes / (1024**3)  # window GB
+                current_cost = traffic_gb * self.firewall_cost_per_gb  # window data cost
+
+                # Monthly-projected volume / data cost (assumes window is representative).
+                projected_monthly_gb = traffic_gb * month_factor
+                projected_monthly_current = current_cost * month_factor
+
                 is_same_region = (region == self.region)
-                
+
                 # Services that support cross-region interface endpoints (as of 2026)
                 # Source: https://docs.aws.amazon.com/vpc/latest/privatelink/aws-services-cross-region-privatelink-support.html
                 CROSS_REGION_SUPPORTED_SERVICES = {
                     'S3', 'LAMBDA', 'ECS', 'KINESIS_FIREHOSE', 
                     'IAM', 'ECR', 'KMS', 'KINESISANALYTICS', 'ROUTE53'
                 }
-                
-                # Determine endpoint type and cost
-                # NOTE: ALL interface endpoints use firewall region pricing (same cost for all)
+
+                # Each branch sets:
+                #   endpoint_type       - label
+                #   endpoint_cost       - WINDOW-scoped cost of the equivalent endpoint
+                #   monthly_savings     - PROJECTED monthly savings (monthly vs monthly)
+                #   recommendation      - DEPLOY / CONSIDER / SKIP...
+                # NOTE: ALL interface endpoints use firewall region pricing.
                 if service in ['S3', 'DYNAMODB']:
                     if is_same_region:
-                        # Gateway endpoint (FREE)
+                        # Gateway endpoint (FREE) - always worth deploying.
                         endpoint_type = 'Gateway'
-                        endpoint_cost = 0
-                        savings = current_cost
+                        endpoint_cost = 0.0
+                        monthly_savings = projected_monthly_current - 0.0
                         recommendation = 'DEPLOY'
                     else:
-                        # Cross-region: Only recommend interface endpoint if service supports it
+                        # Cross-region: Only recommend interface endpoint if supported.
                         if service in CROSS_REGION_SUPPORTED_SERVICES:
                             endpoint_type = 'Interface (cross-region)'
-                            endpoint_cost = self.interface_endpoint_monthly_cost + \
-                                          (traffic_gb * self.INTERFACE_ENDPOINT_DATA_COST_PER_GB)
-                            savings = current_cost - endpoint_cost
-                            
-                            # Smart recommendation logic for S3 cross-region
-                            if traffic_gb > self.cross_region_break_even:
-                                # High traffic: interface endpoint is cost-effective
+                            # Window-scoped endpoint cost: base fee prorated to the
+                            # window + window data processing on the endpoint.
+                            endpoint_cost = (self.interface_endpoint_monthly_cost * endpoint_window_factor
+                                             + traffic_gb * self.INTERFACE_ENDPOINT_DATA_COST_PER_GB)
+                            monthly_endpoint = (self.interface_endpoint_monthly_cost
+                                                + projected_monthly_gb * self.INTERFACE_ENDPOINT_DATA_COST_PER_GB)
+                            monthly_savings = projected_monthly_current - monthly_endpoint
+
+                            # Thresholds compare MONTHLY-projected volume to break-even.
+                            if projected_monthly_gb > self.cross_region_break_even:
                                 recommendation = 'DEPLOY'
-                            elif traffic_gb > 20:
-                                # Moderate traffic: CRR may be viable alternative
-                                # S3 CRR costs ~$0.02/GB, so suggest it for meaningful volumes
+                            elif projected_monthly_gb > 20:
+                                # S3 CRR (~$0.02/GB) may be a better alternative here.
                                 recommendation = 'SKIP - Consider CRR instead'
                             else:
-                                # Low traffic: neither endpoint nor CRR makes sense
                                 recommendation = 'SKIP'
                         else:
-                            # Service doesn't support cross-region endpoints
+                            # Service doesn't support cross-region endpoints.
                             endpoint_type = 'N/A'
                             endpoint_cost = current_cost
-                            savings = 0
+                            monthly_savings = 0.0
                             recommendation = 'SKIP - Cross-region not supported'
                 else:
                     # Interface endpoint (deployed in firewall region)
                     endpoint_type = 'Interface'
-                    
+
                     if is_same_region:
-                        endpoint_cost = self.interface_endpoint_monthly_cost
+                        endpoint_cost = self.interface_endpoint_monthly_cost * endpoint_window_factor
+                        monthly_endpoint = self.interface_endpoint_monthly_cost
+                        monthly_savings = projected_monthly_current - monthly_endpoint
+
                         break_even_gb = self.same_region_break_even
-                        
-                        savings = current_cost - endpoint_cost
-                        
-                        if traffic_gb > break_even_gb:
+                        if projected_monthly_gb > break_even_gb:
                             recommendation = 'DEPLOY'
-                        elif traffic_gb > (break_even_gb * 0.75):
+                        elif projected_monthly_gb > (break_even_gb * 0.75):
                             recommendation = 'CONSIDER'
                         else:
                             recommendation = 'SKIP'
                     else:
                         # Cross-region for non-S3/DynamoDB services
                         if service in CROSS_REGION_SUPPORTED_SERVICES:
-                            endpoint_cost = self.interface_endpoint_monthly_cost + \
-                                          (traffic_gb * self.INTERFACE_ENDPOINT_DATA_COST_PER_GB)
+                            endpoint_cost = (self.interface_endpoint_monthly_cost * endpoint_window_factor
+                                             + traffic_gb * self.INTERFACE_ENDPOINT_DATA_COST_PER_GB)
+                            monthly_endpoint = (self.interface_endpoint_monthly_cost
+                                                + projected_monthly_gb * self.INTERFACE_ENDPOINT_DATA_COST_PER_GB)
+                            monthly_savings = projected_monthly_current - monthly_endpoint
+
                             break_even_gb = self.cross_region_break_even
-                            
-                            savings = current_cost - endpoint_cost
-                            
-                            if traffic_gb > break_even_gb:
+                            if projected_monthly_gb > break_even_gb:
                                 recommendation = 'DEPLOY'
-                            elif traffic_gb > (break_even_gb * 0.75):
+                            elif projected_monthly_gb > (break_even_gb * 0.75):
                                 recommendation = 'CONSIDER'
                             else:
                                 recommendation = 'SKIP'
                         else:
-                            # Service doesn't support cross-region endpoints
+                            # Service doesn't support cross-region endpoints.
                             endpoint_cost = current_cost
-                            savings = 0
+                            monthly_savings = 0.0
                             recommendation = 'SKIP - Cross-region not supported'
-                
+
                 recommendations.append({
                     'service': service,
                     'region': region,
@@ -1115,14 +1463,14 @@ class TrafficAnalyzer:
                     'traffic_gb': round(traffic_gb, 2),
                     'current_cost': round(current_cost, 2),
                     'endpoint_cost': round(endpoint_cost, 2),
-                    'monthly_savings': round(savings, 2),
-                    'annual_savings': round(savings * 12, 0),
+                    'monthly_savings': round(monthly_savings, 2),
+                    'annual_savings': round(monthly_savings * 12, 0),
                     'recommendation': recommendation
                 })
-        
-        # Sort by savings (descending)
+
+        # Sort by projected monthly savings (descending)
         recommendations.sort(key=lambda x: x['monthly_savings'], reverse=True)
-        
+
         return recommendations
     
     def analyze(self, progress_callback: Optional[Callable] = None) -> Dict[str, Any]:
@@ -1141,21 +1489,48 @@ class TrafficAnalyzer:
             - metadata: Analysis metadata (timestamp, region, days, etc.)
         """
         try:
-            # Step 1: Query flow logs
+            # Step 1: Query AUTHORITATIVE traffic totals via server-side aggregation.
+            # This runs FIRST because it is the source of truth for total/per-AZ
+            # bytes (not subject to the 10K-row limit) AND it returns the total
+            # netflow record count, which we use to size the raw per-flow query's
+            # chunking correctly in a single pass.
             if progress_callback:
                 progress_callback({
-                    'stage': 'Querying flow logs',
+                    'stage': 'Querying traffic totals',
                     'status': 'Starting...'
                 })
             
-            flow_result = self.query_flow_logs(progress_callback)
+            totals_result = self.query_flow_totals(progress_callback)
             
-            if self.cancel_requested or flow_result == (None, None):
+            if self.cancel_requested or totals_result == (None, None, None, None):
                 return None
             
-            flow_logs, flow_bytes_scanned = flow_result
+            authoritative_total_bytes, authoritative_az_bytes, totals_bytes_scanned, total_records = totals_result
             
-            # Step 2: Query alert logs
+            # Step 2: Query per-flow byte totals via server-side aggregation (for
+            # top-talkers, drill-down, and the per-hostname/service/VPC breakdowns).
+            # Unlike the old raw-row retrieval, this sums bytes server-side grouped
+            # by flow leg, so the breakdowns are byte-accurate at any volume. Seeded
+            # with the record count to size chunking (groups are fewer than records,
+            # so this is a conservative bound).
+            if progress_callback:
+                progress_callback({
+                    'stage': 'Querying flow breakdown',
+                    'status': 'Starting...'
+                })
+            
+            flow_result = self.query_flow_grouped(expected_records=total_records,
+                                                  progress_callback=progress_callback)
+            
+            if self.cancel_requested or flow_result == (None, None, None):
+                return None
+            
+            # grouped_rows are per-flow-leg aggregates. flow_truncated indicates the
+            # rare case where even a <=60s window exceeded the 10K GROUP cap (the
+            # breakdown becomes a sample); authoritative totals remain exact.
+            grouped_rows, flow_bytes_scanned, flow_truncated = flow_result
+            
+            # Step 3: Query alert logs
             if progress_callback:
                 progress_callback({
                     'stage': 'Querying alert logs',
@@ -1170,14 +1545,14 @@ class TrafficAnalyzer:
             # Unpack alert results (alert_logs, earliest_alert_ts, latest_alert_ts, bytes_scanned)
             alert_logs, earliest_alert_ts, latest_alert_ts, alert_bytes_scanned = alert_result
             
-            # Step 3: Correlate logs
+            # Step 4: Correlate logs
             if progress_callback:
                 progress_callback({
                     'stage': 'Correlating logs',
                     'status': 'Starting correlation...'
                 })
             
-            result_tuple = self.correlate_logs(flow_logs, alert_logs, progress_callback)
+            result_tuple = self.correlate_logs(grouped_rows, alert_logs, progress_callback)
             
             if self.cancel_requested or result_tuple == (None, None, None, None, None):
                 return None
@@ -1205,7 +1580,7 @@ class TrafficAnalyzer:
                 if latest_timestamp is None or latest_alert_ts > latest_timestamp:
                     latest_timestamp = latest_alert_ts
             
-            # Step 4: Aggregate by hostname (Tab 1)
+            # Step 5: Aggregate by hostname (Tab 1)
             if progress_callback:
                 progress_callback({
                     'stage': 'Aggregating traffic',
@@ -1214,7 +1589,7 @@ class TrafficAnalyzer:
             
             hostname_aggregation = self.aggregate_by_hostname(enriched_flows)
             
-            # Step 5: Aggregate by service (Tab 2)
+            # Step 6: Aggregate by service (Tab 2)
             if progress_callback:
                 progress_callback({
                     'stage': 'Aggregating traffic',
@@ -1223,7 +1598,7 @@ class TrafficAnalyzer:
             
             service_totals = self.aggregate_by_service(enriched_flows)
             
-            # Step 6: Aggregate VPC-to-VPC (Tab 3)
+            # Step 7: Aggregate VPC-to-VPC (Tab 3)
             if progress_callback:
                 progress_callback({
                     'stage': 'Aggregating traffic',
@@ -1232,21 +1607,55 @@ class TrafficAnalyzer:
             
             vpc_to_vpc_connections = self.aggregate_vpc_to_vpc(enriched_flows)
             
-            # Step 7: Calculate VPC endpoint recommendations
+            # Window length in hours - the single scope basis for both the fixed
+            # (endpoint) cost and the window->month projection used by the
+            # recommendations. Derived from the shared query window so it matches
+            # exactly what was queried.
+            window_start, window_end = self._get_query_window()
+            window_hours = (window_end - window_start).total_seconds() / 3600
+            if window_hours <= 0:
+                window_hours = self.days * 24  # defensive fallback
+            
+            # Step 8: Calculate VPC endpoint recommendations
             if progress_callback:
                 progress_callback({
                     'stage': 'Calculating recommendations',
                     'status': 'Analyzing VPC endpoint opportunities...'
                 })
             
-            vpc_endpoint_recommendations = self.calculate_vpc_endpoint_recommendations(service_totals)
+            vpc_endpoint_recommendations = self.calculate_vpc_endpoint_recommendations(
+                service_totals, window_hours=window_hours
+            )
             
             # Calculate total traffic and costs
-            total_bytes = sum(flow['bytes'] for flow in enriched_flows)
+            #
+            # AUTHORITATIVE TOTALS: total_bytes comes from the server-side
+            # aggregation query (query_flow_totals), NOT from summing the raw
+            # per-flow sample. The raw sample is capped at 10,000 rows per query
+            # period, so summing it under-reports whenever traffic is high enough
+            # to hit that cap. The aggregation sums every netflow record in range
+            # and cannot be truncated by row count.
+            #
+            # raw_sample_bytes is retained for diagnostics / coverage math and to
+            # fall back on if the aggregation somehow returned nothing.
+            raw_sample_bytes = sum(flow['bytes'] for flow in enriched_flows)
+            
+            if authoritative_total_bytes and authoritative_total_bytes > 0:
+                total_bytes = authoritative_total_bytes
+            else:
+                # Aggregation returned no data (e.g. empty range, or a log format
+                # without availability_zone). Fall back to the raw sample sum so we
+                # never report zero when we do have per-flow rows.
+                total_bytes = raw_sample_bytes
+            
             total_gb = total_bytes / (1024**3)
             total_cost = total_gb * self.firewall_cost_per_gb
             
-            # Calculate hostname coverage statistics
+            # Calculate hostname coverage statistics.
+            # NOTE: hostname enrichment can only be computed over the per-flow
+            # sample we actually retrieved. bytes_coverage_pct is expressed against
+            # the AUTHORITATIVE total so it honestly reflects that, when the sample
+            # is truncated, hostnames cover only part of the real traffic.
             flows_with_hostname = sum(1 for f in enriched_flows if f['hostname'] != "(No hostname)")
             hostname_coverage_pct = (flows_with_hostname / len(enriched_flows) * 100) if enriched_flows else 0
             
@@ -1254,28 +1663,84 @@ class TrafficAnalyzer:
             bytes_coverage_pct = (bytes_with_hostname / total_bytes * 100) if total_bytes > 0 else 0
             
             # Calculate CloudWatch Logs Insights query cost
-            # Pricing: $0.005 per GB scanned (consistent across all regions)
-            total_bytes_scanned = flow_bytes_scanned + alert_bytes_scanned
+            # Pricing: $0.005 per GB scanned (consistent across all regions).
+            # Includes the grouped per-flow aggregation query, the authoritative
+            # totals aggregation query, and the alert query.
+            total_bytes_scanned = flow_bytes_scanned + totals_bytes_scanned + alert_bytes_scanned
             cloudwatch_gb_scanned = total_bytes_scanned / (1024**3)
             cloudwatch_query_cost = cloudwatch_gb_scanned * 0.005
             
-            # Calculate firewall endpoint costs
+            # Calculate firewall endpoint costs.
+            #
+            # AZ attribution uses the authoritative per-AZ byte distribution from
+            # query_flow_totals (authoritative_az_bytes). unique_azs is the union
+            # of AZs seen in either source, so an endpoint that only appears in the
+            # aggregation (e.g. because its per-flow rows were truncated away) is
+            # still counted. The '' bucket (records with no availability_zone) is
+            # excluded from per-endpoint attribution but its bytes remain in the
+            # grand total.
             endpoint_hourly_rate = self.ENDPOINT_HOURLY_PRICING.get(self.region, 0.395)
-            num_endpoints = len(unique_azs)
             
-            # Calculate actual runtime hours from timestamps
-            if earliest_timestamp and latest_timestamp:
-                runtime_hours = (latest_timestamp - earliest_timestamp).total_seconds() / 3600
+            az_traffic_authoritative = {
+                az: b for az, b in authoritative_az_bytes.items() if az
+            } if authoritative_az_bytes else {}
+            
+            # Fall back to the sample-derived az_traffic only if the aggregation
+            # produced no AZ attribution at all.
+            if not az_traffic_authoritative:
+                az_traffic_authoritative = {az: b for az, b in az_traffic.items() if az}
+            
+            all_azs = set(a for a in unique_azs if a) | set(az_traffic_authoritative.keys())
+            num_endpoints = len(all_azs)
+            
+            # Endpoint (fixed) cost is billed per provisioned hour regardless of
+            # traffic. Normally we bill for the FULL selected window: if an endpoint
+            # processed any traffic during the window it is assumed to have been
+            # provisioned for the whole window. This intentionally avoids
+            # under-counting endpoints that were idle at the window edges.
+            #
+            # SPECIAL CASE - log coverage gap: if the logs we found cover materially
+            # less than the selected window (observed span misses either edge of the
+            # window by more than COVERAGE_GAP_THRESHOLD_HOURS), we cannot trust the
+            # window as the provisioning duration. The missing time may be logs that
+            # aged out of CloudWatch retention, OR a firewall that simply did not
+            # exist for the whole window (e.g. deployed mid-window). We cannot tell
+            # these apart from the data, so we bill the fixed cost on the OBSERVED
+            # span instead of the full window - a defensible lower bound. The
+            # endpoint COUNT is unchanged (still the AZs actually observed), so an
+            # endpoint that saw no traffic in the observed span is not counted.
+            COVERAGE_GAP_THRESHOLD_HOURS = 6.0
+
+            coverage_gap = False
+            observed_span_hours = None
+            if earliest_timestamp is not None and latest_timestamp is not None:
+                observed_span_hours = (latest_timestamp - earliest_timestamp).total_seconds() / 3600
+                start_shortfall = (earliest_timestamp - window_start).total_seconds() / 3600
+                end_shortfall = (window_end - latest_timestamp).total_seconds() / 3600
+                # A positive shortfall means observed data starts later than / ends
+                # earlier than the requested window edge.
+                if (start_shortfall > COVERAGE_GAP_THRESHOLD_HOURS
+                        or end_shortfall > COVERAGE_GAP_THRESHOLD_HOURS):
+                    coverage_gap = True
+
+            if coverage_gap and observed_span_hours and observed_span_hours > 0:
+                # Bill the fixed cost on the observed span (lower bound).
+                runtime_hours = observed_span_hours
+                runtime_basis = 'observed_span'
             else:
-                # Fallback: use analysis period if timestamps unavailable
-                runtime_hours = self.days * 24
+                # Normal path: bill the full selected window (unchanged behaviour).
+                # This also covers the degenerate gap case (span <= 0), where falling
+                # back to the window is safer than producing a zero endpoint cost.
+                coverage_gap = False
+                runtime_hours = window_hours
+                runtime_basis = 'window'
             
             # Calculate per-endpoint costs with traffic volume
             endpoint_costs = []
-            sorted_azs = sorted(list(unique_azs))
+            sorted_azs = sorted(all_azs)
             for az in sorted_azs:
                 cost = endpoint_hourly_rate * runtime_hours
-                az_bytes = az_traffic.get(az, 0)
+                az_bytes = az_traffic_authoritative.get(az, 0)
                 az_gb = az_bytes / (1024**3)
                 az_pct = (az_bytes / total_bytes * 100) if total_bytes > 0 else 0
                 
@@ -1307,7 +1772,7 @@ class TrafficAnalyzer:
                     'total_bytes': total_bytes,
                     'total_gb': round(total_gb, 2),
                     'total_cost': round(total_cost, 2),
-                    'flow_logs_retrieved': len(flow_logs),
+                    'flow_logs_retrieved': len(grouped_rows),
                     'alert_logs_retrieved': len(alert_logs),
                     'flows_with_hostname': flows_with_hostname,
                     'hostname_coverage_pct': round(hostname_coverage_pct, 1),
@@ -1318,13 +1783,43 @@ class TrafficAnalyzer:
                     'num_endpoints': num_endpoints,
                     'endpoint_hourly_rate': endpoint_hourly_rate,
                     'runtime_hours': round(runtime_hours, 2),
+                    # Whether the endpoint-hour cost was billed on the full selected
+                    # window ('window') or, in the log-coverage-gap special case, on
+                    # the shorter observed data span ('observed_span').
+                    'runtime_basis': runtime_basis,
+                    # True when the observed log span is materially shorter than the
+                    # selected window (logs likely aged out of retention, or the
+                    # firewall did not exist for the whole window). The UI uses this
+                    # to warn that totals reflect only the observed span.
+                    'coverage_gap': bool(coverage_gap),
+                    'observed_span_hours': (round(observed_span_hours, 2)
+                                            if observed_span_hours else None),
                     'earliest_timestamp': earliest_timestamp,
                     'latest_timestamp': latest_timestamp,
                     'start_date': self.start_date.strftime('%Y-%m-%d') if self.use_custom_dates else None,
                     'end_date': self.end_date.strftime('%Y-%m-%d') if self.use_custom_dates else None,
                     'use_custom_dates': self.use_custom_dates,
                     'cloudwatch_gb_scanned': round(cloudwatch_gb_scanned, 3),
-                    'cloudwatch_query_cost': round(cloudwatch_query_cost, 2)
+                    'cloudwatch_query_cost': round(cloudwatch_query_cost, 2),
+                    # --- Data completeness / accuracy diagnostics ---
+                    # total_bytes/total_gb/total_cost above are authoritative
+                    # (server-side aggregation). The fields below expose whether the
+                    # per-flow SAMPLE used for breakdowns/top-talkers was truncated
+                    # by the 10K-row limit, so the UI can flag partial breakdowns.
+                    'flow_bytes_truncated': bool(flow_truncated),
+                    'is_partial': bool(flow_truncated),
+                    # True when the region was missing from the pricing tables and
+                    # us-east-1 fallback rates were used (costs may be inaccurate).
+                    'pricing_fallback': bool(self.pricing_fallback),
+                    'authoritative_total_bytes': int(authoritative_total_bytes or 0),
+                    'raw_sample_bytes': int(raw_sample_bytes),
+                    # Fraction (0-1) of authoritative bytes represented by the
+                    # per-flow sample. 1.0 when not truncated; <1.0 indicates the
+                    # category/service/hostname breakdowns cover only part of traffic.
+                    'sample_bytes_fraction': (
+                        round(min(1.0, raw_sample_bytes / total_bytes), 4)
+                        if total_bytes > 0 else 1.0
+                    )
                 }
             }
             
@@ -1398,9 +1893,21 @@ class TrafficAnalyzer:
                 'cloudwatch_query_cost': metadata['cloudwatch_query_cost'],
                 'num_endpoints': metadata['num_endpoints'],
                 'runtime_hours': metadata['runtime_hours'],
+                'runtime_basis': metadata.get('runtime_basis', 'window'),
+                'coverage_gap': metadata.get('coverage_gap', False),
+                'observed_span_hours': metadata.get('observed_span_hours'),
                 'earliest_timestamp': earliest_ts_str,
                 'latest_timestamp': latest_ts_str,
-                'endpoint_costs': metadata['endpoint_costs']
+                'endpoint_costs': metadata['endpoint_costs'],
+                # Data completeness diagnostics (preserved so cached/loaded views
+                # can still show the partial-data notice). Defaulted with .get so
+                # older cache files remain loadable.
+                'flow_bytes_truncated': metadata.get('flow_bytes_truncated', False),
+                'is_partial': metadata.get('is_partial', False),
+                'pricing_fallback': metadata.get('pricing_fallback', False),
+                'authoritative_total_bytes': metadata.get('authoritative_total_bytes', 0),
+                'raw_sample_bytes': metadata.get('raw_sample_bytes', 0),
+                'sample_bytes_fraction': metadata.get('sample_bytes_fraction', 1.0)
             },
             
             # Aggregated data (sufficient for UI display)
@@ -1495,6 +2002,11 @@ class TrafficAnalyzer:
                     'cloudwatch_query_cost': metadata['cloudwatch_query_cost'],
                     'num_endpoints': metadata['num_endpoints'],
                     'runtime_hours': metadata['runtime_hours'],
+                    # Coverage-gap diagnostics; default to the normal (full-window)
+                    # basis so older cache files without these keys load cleanly.
+                    'runtime_basis': metadata.get('runtime_basis', 'window'),
+                    'coverage_gap': metadata.get('coverage_gap', False),
+                    'observed_span_hours': metadata.get('observed_span_hours'),
                     'earliest_timestamp': earliest_ts,
                     'latest_timestamp': latest_ts,
                     'endpoint_costs': metadata['endpoint_costs'],
@@ -1505,7 +2017,15 @@ class TrafficAnalyzer:
                     'flows_with_hostname': 0,  # Not saved
                     'bytes_with_hostname': 0,  # Not saved
                     'bytes_coverage_pct': 0,  # Not saved
-                    'cloudwatch_gb_scanned': 0  # Can't recalculate from saved data
+                    'cloudwatch_gb_scanned': 0,  # Can't recalculate from saved data
+                    # Data completeness diagnostics (defaulted for older cache files
+                    # written before these fields existed).
+                    'flow_bytes_truncated': metadata.get('flow_bytes_truncated', False),
+                    'is_partial': metadata.get('is_partial', False),
+                    'pricing_fallback': metadata.get('pricing_fallback', False),
+                    'authoritative_total_bytes': metadata.get('authoritative_total_bytes', 0),
+                    'raw_sample_bytes': metadata.get('raw_sample_bytes', 0),
+                    'sample_bytes_fraction': metadata.get('sample_bytes_fraction', 1.0)
                 }
             }
             

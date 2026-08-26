@@ -21,6 +21,7 @@ from src.managers.template_manager import TemplateManager
 from src.analysis.rule_usage_analyzer import RuleUsageAnalyzer, HAS_BOTO3
 from src.aws.aws_session_manager import AWSSessionManager
 from src.core.constants import SuricataConstants
+from src.core.sid_generator import suggest_next_sid
 from src.core.version import get_main_version, get_analyzer_version, get_flow_tester_version, get_palo_alto_importer_version, get_mrg_version
 from src.core.security_validator import security_validator, validate_rule_input, validate_file_operation
 from src.gui.ai_assistant_panel import AIAssistantPanel, HAS_BOTO3 as HAS_BOTO3_AI
@@ -68,6 +69,13 @@ class SuricataRuleGenerator:
         self.tracking_enabled = False  # Whether change tracking is enabled
         self.pending_history = []  # Pending history entries to write on save
         self.rule_guids = {}  # {sid: guid} mapping for active rules with GUID-based tracking
+        # Session-only SID override anchor. Normally None -> SIDs are suggested
+        # using the date-based scheme. When the user manually overrides a
+        # suggested SID while adding a rule, this is set to that value and
+        # subsequent interactive suggestions become anchor+1 (advancing each
+        # time). Reset to None on any new-file operation (New/Open/import-as-new).
+        self.sid_override_anchor = None
+        self._last_suggested_sid = None  # The SID we most recently suggested (to detect overrides)
         self.config_file = self.get_safe_config_path()  # User config file
         self.aws_session = AWSSessionManager()  # AWS session manager with profile support
         self.rule_analyzer = RuleAnalyzer()  # Rule analysis engine
@@ -1288,17 +1296,77 @@ class SuricataRuleGenerator:
         self.update_status_bar()
         self._invalidate_ai_cache()
     
-    def get_next_available_sid(self, start_sid: int = 100) -> int:
-        """Get the next available SID in the range 100-999999999"""
-        used_sids = {rule.sid for rule in self.rules}
-        
-        for sid in range(start_sid, 1000000000):
-            if sid not in used_sids:
-                return sid
-        
-        # If no SID available in range, return the start_sid (will trigger validation error)
-        return start_sid
+    def get_next_available_sid(self, start_sid: int = None) -> int:
+        """Get the next available (non-conflicting) SID.
+
+        Routes through the shared date-based generator so any caller gets a SID
+        consistent with the rest of the application. The ``start_sid`` argument
+        is retained for backward compatibility but is no longer used to seed a
+        legacy sequential range.
+        """
+        return suggest_next_sid(self._active_sids())
     
+    def _active_sids(self) -> set:
+        """Return the set of SIDs in use by real rules (excluding comments/blank)."""
+        return {rule.sid for rule in self.rules
+                if not getattr(rule, 'is_comment', False)
+                and not getattr(rule, 'is_blank', False)}
+
+    def _next_anchored_sid(self, anchor: int, used: set) -> int:
+        """Return the next SID continuing a manual sequence from ``anchor``.
+
+        Yields ``anchor + 1``, skipping any SID already in ``used`` and staying
+        within the valid range. Shared by interactive authoring and internal
+        clipboard paste so the "continue the user's sequence" logic lives in one
+        place.
+        """
+        candidate = anchor + 1
+        while candidate in used and candidate < SuricataConstants.SID_MAX:
+            candidate += 1
+        return candidate
+
+    def suggest_interactive_sid(self) -> int:
+        """Suggest the next SID for interactive rule authoring.
+
+        Honors the session override anchor: if the user previously overrode a
+        suggested SID, suggestions continue from anchor+1 (skipping any SIDs
+        already in use). Otherwise falls back to the date-based scheme.
+
+        The suggested value is remembered in ``self._last_suggested_sid`` so a
+        later manual override can be detected by comparing against it.
+        """
+        used = self._active_sids()
+
+        if self.sid_override_anchor is not None:
+            suggestion = self._next_anchored_sid(self.sid_override_anchor, used)
+        else:
+            suggestion = suggest_next_sid(used)
+
+        self._last_suggested_sid = suggestion
+        return suggestion
+
+    def note_sid_choice(self, saved_sid: int) -> None:
+        """Record the SID actually saved for a newly-authored rule.
+
+        If it differs from the value we suggested, treat it as a manual
+        override and (re-)anchor the session sequence to that value. If it
+        matches the suggestion, advance the anchor when one is active so the
+        next suggestion continues the sequence.
+        """
+        if self._last_suggested_sid is not None and saved_sid != self._last_suggested_sid:
+            # Manual override -> (re-)anchor to the user's chosen value.
+            self.sid_override_anchor = saved_sid
+        elif self.sid_override_anchor is not None:
+            # User accepted an anchored suggestion -> advance the anchor.
+            self.sid_override_anchor = saved_sid
+        # else: no anchor and suggestion accepted -> stay date-based.
+        self._last_suggested_sid = None
+
+    def reset_sid_anchor(self) -> None:
+        """Reset the session SID override anchor (called on new-file operations)."""
+        self.sid_override_anchor = None
+        self._last_suggested_sid = None
+
     def validate_unique_sid(self, sid: int, exclude_index: int = -1) -> bool:
         """Check if SID is unique (excluding the rule at exclude_index)"""
         for i, rule in enumerate(self.rules):
@@ -1620,9 +1688,8 @@ class SuricataRuleGenerator:
         # Convert to 0-based index
         insert_index = line_num - 1
         
-        # Auto-generate SID
-        max_sid = max([rule.sid for rule in self.rules if not getattr(rule, 'is_comment', False) and not getattr(rule, 'is_blank', False)], default=99)
-        next_sid = max_sid + 1
+        # Auto-generate SID (date-based scheme, honoring any session override anchor)
+        next_sid = self.suggest_interactive_sid()
         
         # Create a new rule with default values (protocol-based content)
         default_protocol = "tcp"
@@ -1648,6 +1715,8 @@ class SuricataRuleGenerator:
                     self.rules.append(updated_rule)
                 else:
                     self.rules.insert(insert_index, updated_rule)
+                # Track the chosen SID for session override-anchor behavior
+                self.note_sid_choice(updated_rule.sid)
                 self.refresh_table()
                 self.modified = True
                 self._invalidate_ai_cache()
@@ -1672,9 +1741,8 @@ class SuricataRuleGenerator:
             messagebox.showerror("Error", "Could not determine insert position.")
             return
         
-        # Auto-generate SID
-        max_sid = max([rule.sid for rule in self.rules if not getattr(rule, 'is_comment', False) and not getattr(rule, 'is_blank', False)], default=99)
-        next_sid = max_sid + 1
+        # Auto-generate SID (date-based scheme, honoring any session override anchor)
+        next_sid = self.suggest_interactive_sid()
         
         # Create a new rule with default values (protocol-based content)
         default_protocol = "tcp"
@@ -1696,6 +1764,8 @@ class SuricataRuleGenerator:
         updated_rule = self.show_edit_rule_dialog("Insert Rule", new_rule)
         if updated_rule:
             if self.validate_unique_sid(updated_rule.sid):
+                # Track the chosen SID for session override-anchor behavior
+                self.note_sid_choice(updated_rule.sid)
                 # Save state for undo
                 self.save_undo_state()
                 
@@ -2096,6 +2166,9 @@ class SuricataRuleGenerator:
         self.pending_history.clear()
         self._invalidate_ai_cache()
 
+        # Reset the session SID override anchor for the new file context
+        self.reset_sid_anchor()
+
         # Reset AI Rule Assistant history for the new file context
         if self.ai_panel is not None:
             self.ai_panel.reset_session()
@@ -2163,6 +2236,9 @@ class SuricataRuleGenerator:
         if filename:
             # Clear pending history from previous file
             self.pending_history.clear()
+            
+            # Reset the session SID override anchor for the new file context
+            self.reset_sid_anchor()
             
             # Reset file session flag for upgrade prompt
             if hasattr(self, '_file_upgrade_prompted'):
@@ -2397,10 +2473,19 @@ class SuricataRuleGenerator:
                     internal_rules.append(internal_rule)
                     original_rules.append(rule)  # Use original rule object
                 else:
-                    # Regular rules - different SIDs for each clipboard
-                    # Internal clipboard: new SID to avoid conflicts
-                    max_sid = max([r.sid for r in self.rules if not getattr(r, 'is_comment', False) and not getattr(r, 'is_blank', False)], default=99)
-                    new_sid = max_sid + len(internal_rules) + 1
+                    # Regular rules - different SIDs for each clipboard.
+                    # Internal clipboard: fresh date-based SID to avoid conflicts.
+                    # (Note: paste_rules re-assigns SIDs at paste time; this keeps
+                    # the internal clipboard's SIDs sane/consecutive in the interim.)
+                    used_for_copy = {r.sid for r in self.rules
+                                     if not getattr(r, 'is_comment', False)
+                                     and not getattr(r, 'is_blank', False)}
+                    used_for_copy.update(
+                        ir.sid for ir in internal_rules
+                        if not getattr(ir, 'is_comment', False)
+                        and not getattr(ir, 'is_blank', False)
+                    )
+                    new_sid = suggest_next_sid(used_for_copy)
                     
                     internal_rule = SuricataRule(
                         action=rule.action,
@@ -2552,48 +2637,49 @@ class SuricataRuleGenerator:
         """Assign safe SIDs to avoid conflicts with existing rules
         
         Only reassigns SIDs when there's an actual conflict. Preserves original
-        SIDs when they don't conflict with existing rules.
+        SIDs when they don't conflict with existing rules. When a conflict is
+        found, the replacement SID uses the date-based scheme (YYMMDDNNNN),
+        allocated consecutively across the pasted batch so multiple conflicting
+        rules get sequential same-day SIDs without colliding with each other.
         """
+        import re
+        
         # Build set of SIDs from existing rules in the program
         existing_sids = {rule.sid for rule in self.rules 
                          if not getattr(rule, 'is_comment', False) 
                          and not getattr(rule, 'is_blank', False)}
         
-        # CRITICAL FIX: Also include ALL SIDs from the new rules being pasted
-        # This prevents assigning a renumbered SID that conflicts with a later rule in the paste batch
+        # Also include ALL SIDs from the new rules being pasted so a renumbered
+        # SID never collides with a later (as-yet-unprocessed) rule in the batch.
         all_new_sids = {rule.sid for rule in new_rules 
                         if not getattr(rule, 'is_comment', False) 
                         and not getattr(rule, 'is_blank', False)}
         
-        # Combine both sets to get the complete picture of all SIDs in use
+        # Complete picture of every SID currently spoken for.
         all_sids_in_use = existing_sids | all_new_sids
         
-        # Find a safe starting point for renumbering (beyond all SIDs in use)
-        next_sid = max(all_sids_in_use, default=99) + 1
-        
         for rule in new_rules:
-            if not getattr(rule, 'is_comment', False) and not getattr(rule, 'is_blank', False):
-                # Check if rule's current SID conflicts with existing rules in the program
-                if rule.sid in existing_sids:
-                    # Conflict detected - find next available SID that doesn't conflict with anything
-                    while next_sid in all_sids_in_use:
-                        next_sid += 1
-                    
-                    # Reassign to avoid conflict
-                    rule.sid = next_sid
-                    # Update original_options to reflect new SID
-                    if rule.original_options:
-                        import re
-                        rule.original_options = re.sub(r'sid:\d+', f'sid:{next_sid}', rule.original_options)
-                    
-                    # Update tracking: remove old SID from all_sids_in_use, add new one
-                    all_sids_in_use.discard(rule.sid)  # Remove original (now unused)
-                    all_sids_in_use.add(next_sid)  # Add new assigned SID
-                    existing_sids.add(next_sid)  # Also track in existing for future conflict checks
-                    next_sid += 1
-                else:
-                    # No conflict - keep original SID and add to existing set
-                    existing_sids.add(rule.sid)
+            if getattr(rule, 'is_comment', False) or getattr(rule, 'is_blank', False):
+                continue
+            
+            if rule.sid in existing_sids:
+                # Conflict detected - allocate a fresh date-based SID that does not
+                # collide with anything already in use (existing or in-batch).
+                new_sid = suggest_next_sid(all_sids_in_use)
+                
+                rule.sid = new_sid
+                # Update original_options to reflect new SID
+                if rule.original_options:
+                    rule.original_options = re.sub(r'sid:\d+', f'sid:{new_sid}', rule.original_options)
+                
+                # Mark the new SID as taken. We intentionally do NOT free the old
+                # SID: a duplicate of it may appear later in this same batch, and
+                # it may also still belong to an existing rule.
+                all_sids_in_use.add(new_sid)
+                existing_sids.add(new_sid)
+            else:
+                # No conflict - keep original SID and add to existing set
+                existing_sids.add(rule.sid)
 
     def paste_rules(self):
         """Paste rules from clipboard at selected position or end"""
@@ -2641,23 +2727,38 @@ class SuricataRuleGenerator:
         elif self.clipboard:
             # Use internal clipboard - but still need to create deep copies and reassign SIDs
             import copy
+            import re
             rules_to_paste = []
             
-            # Generate new SIDs for internal clipboard rules to prevent conflicts (original behavior)
-            max_sid = max([rule.sid for rule in self.rules if not getattr(rule, 'is_comment', False) and not getattr(rule, 'is_blank', False)], default=99)
-            next_sid = max_sid + 1
+            # SIDs currently in use, tracked as we allocate so a multi-rule paste
+            # gets consecutive, non-conflicting SIDs.
+            sids_in_use = {rule.sid for rule in self.rules
+                           if not getattr(rule, 'is_comment', False)
+                           and not getattr(rule, 'is_blank', False)}
             
+            # Internal-clipboard paste is an extension of interactive authoring, so
+            # it honors the session override anchor: when the user has been
+            # hand-numbering (e.g. 100, 101, 102), pasting their own rules continues
+            # that sequence (103, 104, ...) and advances the anchor. With no anchor,
+            # fall back to the date-based scheme.
             for rule in self.clipboard:
                 rule_copy = copy.deepcopy(rule)
                 
-                # Assign new SID for non-comment/non-blank rules (restore original behavior)
+                # Assign new SID for non-comment/non-blank rules
                 if not getattr(rule_copy, 'is_comment', False) and not getattr(rule_copy, 'is_blank', False):
-                    rule_copy.sid = next_sid
+                    if self.sid_override_anchor is not None:
+                        # Continue the manual sequence, skipping occupied SIDs, and
+                        # advance the anchor so subsequent pastes/rules continue on.
+                        new_sid = self._next_anchored_sid(self.sid_override_anchor, sids_in_use)
+                        self.sid_override_anchor = new_sid
+                    else:
+                        new_sid = suggest_next_sid(sids_in_use)
+                    
+                    rule_copy.sid = new_sid
+                    sids_in_use.add(new_sid)
                     # Update original_options with new SID
                     if rule_copy.original_options:
-                        import re
-                        rule_copy.original_options = re.sub(r'sid:\d+', f'sid:{next_sid}', rule_copy.original_options)
-                    next_sid += 1
+                        rule_copy.original_options = re.sub(r'sid:\d+', f'sid:{new_sid}', rule_copy.original_options)
                 
                 rules_to_paste.append(rule_copy)
             source = "internal"
@@ -4135,7 +4236,7 @@ class SuricataRuleGenerator:
         else:
             self.content_var.set("flow: to_server")
         
-        self.sid_var.set("100")
+        self.sid_var.set(str(self.suggest_interactive_sid()))
         if hasattr(self, 'rev_var'):
             self.rev_var.set("1")
         
@@ -4189,6 +4290,13 @@ class SuricataRuleGenerator:
                 sid = int(sid_str)
                 if not (SuricataConstants.SID_MIN <= sid <= SuricataConstants.SID_MAX):
                     messagebox.showerror("Error", f"SID must be between {SuricataConstants.SID_MIN} and {SuricataConstants.SID_MAX}.")
+                    return
+                
+                # Enforce SID uniqueness. This replaces a blank line with a new
+                # rule; blank/comment rows are excluded by validate_unique_sid, so
+                # no index needs to be excluded here.
+                if not self.validate_unique_sid(sid):
+                    messagebox.showerror("Error", f"SID {sid} is already in use. Please choose a different SID.")
                     return
                 
                 # Validate network fields
@@ -4361,6 +4469,9 @@ class SuricataRuleGenerator:
                 
                 # Replace the blank line with the new rule
                 self.rules[self.selected_rule_index] = new_rule
+                
+                # Track the chosen SID for session override-anchor behavior
+                self.note_sid_choice(new_rule.sid)
                 
                 # Refresh and auto-detect variables
                 self.refresh_table()
@@ -4934,9 +5045,8 @@ class SuricataRuleGenerator:
             self.set_default_editor_values()  # Populate with defaults
             # Update category button state after setting default protocol to tcp
             self.ui_manager.update_category_button_state()
-            # Auto-generate next available SID for convenience
-            max_sid = max([rule.sid for rule in self.rules if not getattr(rule, 'is_comment', False) and not getattr(rule, 'is_blank', False)], default=99)
-            self.sid_var.set(str(max_sid + 1))
+            # Auto-generate next available SID for convenience (date-based, honors anchor)
+            self.sid_var.set(str(self.suggest_interactive_sid()))
         else:
             # Check if clicking on already selected item to toggle selection
             current_selection = self.tree.selection()
@@ -4972,6 +5082,11 @@ class SuricataRuleGenerator:
             sid = int(sid_str)
             if not (SuricataConstants.SID_MIN <= sid <= SuricataConstants.SID_MAX):
                 messagebox.showerror("Error", f"SID must be between {SuricataConstants.SID_MIN} and {SuricataConstants.SID_MAX}.")
+                return
+            
+            # Enforce SID uniqueness (this path inserts a NEW rule, so no rule is excluded)
+            if not self.validate_unique_sid(sid):
+                messagebox.showerror("Error", f"SID {sid} is already in use. Please choose a different SID.")
                 return
             
             # Validate network fields
@@ -5110,6 +5225,9 @@ class SuricataRuleGenerator:
             # Insert the rule
             self.rules.insert(self.selected_rule_index, new_rule)
             
+            # Track the chosen SID for session override-anchor behavior
+            self.note_sid_choice(new_rule.sid)
+            
             # If filters are active and new rule doesn't match, temporarily clear filters so user can see their new rule
             filters_were_active = self.rule_filter.is_active()
             if filters_were_active and not self.rule_filter.matches(new_rule):
@@ -5135,10 +5253,9 @@ class SuricataRuleGenerator:
             self.add_placeholder_row()
             self.selected_rule_index = len(self.rules)  # Set to end for next insertion
             
-            # Set up editor for next rule with new SID
+            # Set up editor for next rule with new SID (date-based, honors anchor)
             self.set_default_editor_values()
-            max_sid = max([rule.sid for rule in self.rules if not getattr(rule, 'is_comment', False) and not getattr(rule, 'is_blank', False)], default=99)
-            self.sid_var.set(str(max_sid + 1))
+            self.sid_var.set(str(self.suggest_interactive_sid()))
             
         except ValueError:
             messagebox.showerror("Error", "SID must be a valid number.")
@@ -8135,11 +8252,17 @@ class SuricataRuleGenerator:
         
         ttk.Label(sid_frame, text="Starting SID:").pack(side=tk.LEFT, padx=(0, 5))
         
-        # Get suggested starting SID
+        # Get suggested starting SID. Pass an anchor-aware suggester so computed
+        # starting SIDs continue the user's manual sequence when a session
+        # override anchor is active (falling back to the date-based scheme
+        # otherwise). The Default Block template's predefined reserved SIDs are
+        # NOT affected — the template manager returns those verbatim.
         existing_sids = {r.sid for r in self.rules 
                         if not getattr(r, 'is_comment', False) 
                         and not getattr(r, 'is_blank', False)}
-        suggested_sid = self.template_manager.get_suggested_starting_sid(template, existing_sids)
+        suggested_sid = self.template_manager.get_suggested_starting_sid(
+            template, existing_sids,
+            sid_suggester=lambda _sids: self.suggest_interactive_sid())
         
         sid_var = tk.StringVar(value=str(suggested_sid))
         sid_entry = ttk.Entry(sid_frame, textvariable=sid_var, width=10)

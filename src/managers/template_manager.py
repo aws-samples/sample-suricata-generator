@@ -10,6 +10,7 @@ import json
 import os
 from typing import List, Dict, Optional, Any
 from src.core.suricata_rule import SuricataRule
+from src.core.sid_generator import suggest_next_sid
 
 
 class TemplateManager:
@@ -737,20 +738,32 @@ class TemplateManager:
             
             return '\n'.join(preview_lines)
     
-    def get_suggested_starting_sid(self, template: Dict, 
-                                   existing_sids: set) -> int:
+    def get_suggested_starting_sid(self, template: Dict,
+                                   existing_sids: set,
+                                   sid_suggester=None) -> int:
         """Get suggested starting SID for template
         
         Default Block template uses predefined SIDs (unless conflicts exist).
-        All other templates get next available SID (max + 1).
+        All other templates get a computed SID; the Default Block conflict
+        fallback uses it too.
         
         Args:
             template: Template dictionary
             existing_sids: Set of SIDs already in use
+            sid_suggester: Optional callable taking the set of existing SIDs and
+                returning the next SID to suggest. When provided, it is used for
+                all *computed* suggestions so callers can honor the session
+                override anchor (continue the user's manual sequence). When
+                None, falls back to the date-based scheme (suggest_next_sid).
+                The Default Block template's predefined SIDs are never routed
+                through this — they are returned verbatim when there's no conflict.
             
         Returns:
             Suggested starting SID
         """
+        def _suggest(sids):
+            return sid_suggester(sids) if sid_suggester is not None else suggest_next_sid(sids)
+
         template_id = template.get('id', '')
         
         # Default Block template has predefined SIDs in the JSON
@@ -775,23 +788,18 @@ class TemplateManager:
             has_conflict = any(sid in existing_sids for sid in template_sids)
             
             if has_conflict:
-                # Conflict detected - use next available SID like any other template
-                if not existing_sids:
-                    return 100
-                return max(existing_sids) + 1
+                # Conflict detected - use a computed SID like any other template
+                return _suggest(existing_sids)
             else:
                 # No conflict - return the first predefined SID (will be used as start_sid)
-                # The actual predefined SIDs from JSON will be used in generate_static_rules_from_list
+                # The actual predefined SIDs from JSON will be used in generate_static_rules_from_list.
+                # These are intentional reserved SIDs and are NEVER routed through
+                # the anchor/date suggester.
                 if template_sids:
                     return min(template_sids)
-                # Fallback if no SIDs defined
-                if not existing_sids:
-                    return 100
-                return max(existing_sids) + 1
+                # Fallback if no predefined SIDs defined
+                return _suggest(existing_sids)
         
-        # All other templates: find next available SID (max + 1)
-        if not existing_sids:
-            return 100
-        
-        # Return max + 1 for next available (like main program window)
-        return max(existing_sids) + 1
+        # All other templates: compute the next SID (anchor-aware when a
+        # suggester is provided, otherwise date-based)
+        return _suggest(existing_sids)

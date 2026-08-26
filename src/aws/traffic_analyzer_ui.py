@@ -554,7 +554,7 @@ class TrafficAnalyzerUI:
         # Create progress dialog
         progress_dialog = tk.Toplevel(self.parent.root)
         progress_dialog.title("Analyzing Network Traffic...")
-        progress_dialog.geometry("500x220")
+        progress_dialog.geometry("500x260")
         progress_dialog.transient(self.parent.root)
         progress_dialog.grab_set()
         progress_dialog.resizable(False, False)
@@ -577,6 +577,13 @@ class TrafficAnalyzerUI:
         progress_bar = ttk.Progressbar(main_frame, mode='indeterminate', length=450)
         progress_bar.pack(pady=10)
         progress_bar.start(10)
+        
+        # Persistent progress line (e.g. "Flow logs: chunk 4 of 18 (22%)").
+        # Updated only on structured chunk events, so it is NOT overwritten by the
+        # per-poll "Query running... (Ns)" detail updates and stays readable.
+        progress_line_label = ttk.Label(main_frame, text="",
+                                        font=("TkDefaultFont", 9, "bold"))
+        progress_line_label.pack(pady=(0, 3))
         
         # Details label
         details_label = ttk.Label(main_frame, text="Starting analysis...")
@@ -620,10 +627,34 @@ class TrafficAnalyzerUI:
                     status_label.config(text=f"{stage}...")
                     details_label.config(text=status)
                     
-                    # Update progress bar if percentage available
-                    if 'percent' in update:
-                        progress_bar.config(mode='determinate')
+                    chunk_total = update.get('chunk_total')
+                    chunk_current = update.get('chunk_current')
+                    
+                    if chunk_total:
+                        # Flow-log chunk phase: drive a DETERMINATE bar from the
+                        # fraction of chunks issued, and keep a persistent summary
+                        # line that survives the per-poll detail updates.
+                        pct = (chunk_current / chunk_total * 100.0) if chunk_total else 0.0
+                        try:
+                            progress_bar.stop()  # halt the indeterminate marquee
+                        except Exception:
+                            pass
+                        progress_bar.config(mode='determinate', maximum=100)
+                        progress_bar['value'] = pct
+                        progress_line_label.config(
+                            text=f"Flow logs: chunk {chunk_current} of {chunk_total} ({pct:.0f}%)"
+                        )
+                    elif 'percent' in update:
+                        try:
+                            progress_bar.stop()
+                        except Exception:
+                            pass
+                        progress_bar.config(mode='determinate', maximum=100)
                         progress_bar['value'] = update['percent']
+                    # For phases without a known count (totals, alerts, correlation),
+                    # leave the bar as-is: it bounces (indeterminate) before the flow
+                    # phase and holds at 100% for the brief tail phases after it, so
+                    # progress never visibly regresses.
                     
                     progress_dialog.update()
                 except:
@@ -730,7 +761,10 @@ class TrafficAnalyzerUI:
         # Create results window
         results_window = tk.Toplevel(self.parent.root)
         results_window.title("Analyze Traffic Costs - Results")
-        results_window.geometry("1000x750")
+        # Height accommodates the tallest header case (the multi-line coverage-gap
+        # warning) while keeping the bottom Help/Save/Close buttons visible. The
+        # extra height applies to all runs, not just when the warning is shown.
+        results_window.geometry("1000x870")
         results_window.transient(self.parent.root)
         results_window.resizable(True, True)
         
@@ -786,14 +820,96 @@ class TrafficAnalyzerUI:
         ttk.Label(info_frame, text=cost_text,
                  font=("TkDefaultFont", 8), foreground="#0066CC").pack(anchor=tk.W, pady=(0, 5))
         
-        # Show warning if low hostname coverage
-        if hostname_cov < 50:
+        # Show a coverage-gap warning when the logs found cover materially less than
+        # the selected window (observed span misses a window edge by >6h; set by the
+        # analyzer as coverage_gap). Common cause: older logs aged out of CloudWatch
+        # retention, or the firewall did not exist for the whole window. In this case
+        # the analyzer bills endpoint hours on the OBSERVED span (not the full
+        # window), so BOTH the endpoint-hour cost and the data-processing cost reflect
+        # only the observed span and are a lower bound for the range requested.
+        coverage_gap = bool(metadata.get('coverage_gap'))
+        if coverage_gap:
+            # Prefer the observed data span from the timestamps; fall back gracefully.
+            earliest = metadata.get('earliest_timestamp')
+            latest = metadata.get('latest_timestamp')
+
+            def _fmt_ts(ts):
+                try:
+                    return ts.strftime('%Y-%m-%d %H:%M')
+                except AttributeError:
+                    return str(ts) if ts else "unknown"
+
+            if metadata.get('use_custom_dates'):
+                selected_range = f"{metadata.get('start_date')} to {metadata.get('end_date')}"
+            else:
+                selected_range = f"the last {metadata.get('time_range_days')} days"
+
+            observed_hours = metadata.get('observed_span_hours')
+            span_note = ""
+            if isinstance(observed_hours, (int, float)) and observed_hours > 0:
+                span_note = f" (~{observed_hours / 24:.1f} days of data)"
+
+            gap_text = (
+                "⚠️ Log coverage gap: the logs found span only "
+                f"{_fmt_ts(earliest)} to {_fmt_ts(latest)}{span_note}, which is shorter "
+                f"than the selected range ({selected_range}). Older logs may have aged "
+                "out of CloudWatch (log retention), or the firewall may not have existed "
+                "for the whole range. Because the missing time cannot be measured, BOTH "
+                "the traffic/data-processing cost AND the endpoint-hour cost shown here "
+                "reflect only the observed span — they are a LOWER BOUND for the range you "
+                "requested, not the full-range total. An endpoint that passed no traffic "
+                "during the observed span is not counted."
+            )
+            ttk.Label(info_frame, text=gap_text,
+                     font=("TkDefaultFont", 8), foreground="#D32F2F",
+                     wraplength=950, justify=tk.LEFT).pack(anchor=tk.W, pady=(0, 5))
+        
+        # Show warning if low hostname coverage. Suppressed during a coverage gap:
+        # a gap naturally tanks hostname coverage, and the gap warning already
+        # explains the incompleteness, so showing both is redundant noise.
+        if hostname_cov < 50 and not coverage_gap:
             warning_text = (f"⚠️ Warning: Only {hostname_cov:.0f}% of flows have hostname information. "
                           f"This typically means alert logging is not enabled for all traffic. "
                           f"Consider enabling HTTP/TLS alert logging for better visibility.")
             ttk.Label(info_frame, text=warning_text,
                      font=("TkDefaultFont", 8), foreground="#FF6600",
                      wraplength=950, justify=tk.LEFT).pack(anchor=tk.W)
+        
+        # Show notice if the per-flow sample was truncated by the 10K-row limit.
+        # The headline totals/costs remain authoritative (server-side aggregation);
+        # only the per-flow breakdowns (top talkers, per-hostname/service/VPC) are a
+        # sample of the traffic when this fires.
+        if metadata.get('is_partial') or metadata.get('flow_bytes_truncated'):
+            sample_fraction = metadata.get('sample_bytes_fraction', None)
+            if isinstance(sample_fraction, (int, float)) and sample_fraction < 1.0:
+                coverage_note = (f" The per-flow detail covers ~{sample_fraction * 100:.0f}% "
+                                 f"of total traffic by volume.")
+            else:
+                coverage_note = ""
+            partial_text = (
+                "ℹ️ High traffic volume exceeded the CloudWatch Logs Insights 10,000-row "
+                "limit, so the per-flow breakdowns below (Top Talkers and the per-hostname, "
+                "per-service, and VPC-to-VPC tables) are based on a sample." + coverage_note +
+                " Total traffic and cost figures are authoritative — they are computed by "
+                "server-side aggregation and are not affected by this limit."
+            )
+            ttk.Label(info_frame, text=partial_text,
+                     font=("TkDefaultFont", 8), foreground="#B26A00",
+                     wraplength=950, justify=tk.LEFT).pack(anchor=tk.W, pady=(5, 0))
+        
+        # Warn when region pricing was not found and us-east-1 fallback rates were
+        # used, since costs for that region may be inaccurate (often too low).
+        if metadata.get('pricing_fallback'):
+            region_name = metadata.get('region', 'this region')
+            pricing_text = (
+                f"⚠️ Pricing note: region '{region_name}' is not in the built-in pricing "
+                f"tables, so all cost figures use US-East-1 fallback rates ($0.395/hr endpoint, "
+                f"$0.065/GB data processing). Actual costs for this region may differ — treat "
+                f"these dollar amounts as rough estimates."
+            )
+            ttk.Label(info_frame, text=pricing_text,
+                     font=("TkDefaultFont", 8), foreground="#D32F2F",
+                     wraplength=950, justify=tk.LEFT).pack(anchor=tk.W, pady=(5, 0))
         
         # Refresh and Export buttons
         ttk.Button(header_frame, text="Refresh", 
@@ -1059,8 +1175,8 @@ class TrafficAnalyzerUI:
         recommendations = results['vpc_endpoint_recommendations']
         total_savings = sum(r['monthly_savings'] for r in recommendations if r['recommendation'] == 'DEPLOY')
         
-        summary_text = (f"AWS Service Traffic: ~{total_aws_gb:.1f} GB ({aws_pct:.0f}% of total)\n"
-                       f"Potential Monthly Savings (with recommended endpoints): ${total_savings:.2f} (~${total_savings*12:.0f}/year)")
+        summary_text = (f"AWS Service Traffic: ~{total_aws_gb:.1f} GB ({aws_pct:.0f}% of total, for the analyzed window)\n"
+                       f"Projected Monthly Savings (with recommended endpoints): ${total_savings:.2f} (~${total_savings*12:.0f}/year)")
         ttk.Label(summary_frame, text=summary_text,
                  font=("TkDefaultFont", 10), foreground="#2E7D32").pack(padx=15, pady=15, anchor=tk.W)
         
@@ -1080,11 +1196,11 @@ class TrafficAnalyzerUI:
                     command=lambda: self._sort_tree_column(tree, "Type", False))
         tree.heading("Traffic", text="Traffic (GB)",
                     command=lambda: self._sort_tree_column(tree, "Traffic", True))
-        tree.heading("Current", text="Current Cost",
+        tree.heading("Current", text="Current Cost (window)",
                     command=lambda: self._sort_tree_column(tree, "Current", True))
-        tree.heading("Endpoint", text="Total Endpoint Cost",
+        tree.heading("Endpoint", text="Endpoint Cost (window)",
                     command=lambda: self._sort_tree_column(tree, "Endpoint", True))
-        tree.heading("Savings", text="Monthly Savings",
+        tree.heading("Savings", text="Projected Monthly Savings",
                     command=lambda: self._sort_tree_column(tree, "Savings", True))
         tree.heading("Action", text="Recommendation",
                     command=lambda: self._sort_tree_column(tree, "Action", False))
@@ -1093,9 +1209,9 @@ class TrafficAnalyzerUI:
         tree.column("Region", width=100, stretch=False)
         tree.column("Type", width=120, stretch=False)
         tree.column("Traffic", width=100, stretch=False)
-        tree.column("Current", width=100, stretch=False)
-        tree.column("Endpoint", width=100, stretch=False)
-        tree.column("Savings", width=120, stretch=False)
+        tree.column("Current", width=110, stretch=False)
+        tree.column("Endpoint", width=150, stretch=False)
+        tree.column("Savings", width=170, stretch=False)
         tree.column("Action", width=150, stretch=True)
         
         # Scrollbars
@@ -1147,6 +1263,8 @@ class TrafficAnalyzerUI:
         help_frame.pack(fill=tk.X, pady=(5, 0))
         help_text = (
             "💡 Aggregation: Traffic grouped by AWS service and destination region\n"
+            "   Traffic (GB), Current Cost, and Endpoint Cost are for the analyzed window. "
+            "Projected Monthly Savings assumes this window's traffic repeats for a full month.\n"
             "   Click column headers to sort | Double-click any row to see source IP + hostname breakdown"
         )
         ttk.Label(help_frame, text=help_text,
@@ -1180,7 +1298,7 @@ class TrafficAnalyzerUI:
         overview_frame.pack(fill=tk.X, pady=(0, 10))
         
         overview_text = (f"Total Internal Traffic: ~{total_gb:.1f} GB ({vpc_pct:.0f}% of total)\n"
-                        f"Est. Firewall Cost: ${total_cost:.2f}/month")
+                        f"Est. Firewall Data-Processing Cost: ${total_cost:.2f} (for the analyzed window)")
         ttk.Label(overview_frame, text=overview_text,
                  font=("TkDefaultFont", 10)).pack(padx=15, pady=15, anchor=tk.W)
         
@@ -2121,6 +2239,12 @@ This feature analyzes your AWS Network Firewall logs to:
    • Internal east-west traffic patterns
    • PrivateLink opportunities
 
+Note on figures:
+Traffic volumes and costs are reported for the time range you select (the
+"analyzed window"), not per month. The one exception is "Projected Monthly
+Savings" on the AWS Service Traffic tab, which extrapolates the window's traffic
+to a full month. For a monthly estimate close to your AWS bill, analyze ~30 days.
+
 Prerequisites:
 • AWS Network Firewall with alert and flow logs enabled
 • Logs sent to CloudWatch Logs
@@ -2224,6 +2348,133 @@ Typical cost: $0.50 - $2.00 for 30-day analysis."""
 
 COMMON QUESTIONS & INSIGHTS
 
+Q: Are the costs shown monthly, or for the time range I analyzed?
+A: Almost everything is for the ANALYZED WINDOW (the time range shown at the
+   top of this window), not a month:
+
+   • Traffic (GB), the traffic breakdown, "Current Cost", the fixed
+     endpoint-hour costs, and the "Endpoint Cost (window)" column are all
+     totals for the window you selected.
+   • The ONLY projected-to-a-month figure is "Projected Monthly Savings" on
+     the AWS Service Traffic tab. It answers: "if this window's traffic
+     repeated for a full month, how much would the recommended endpoint save?"
+     It scales the window's data-processing cost to a month (x 730 hours /
+     window hours) and subtracts the endpoint's monthly price.
+
+   Tip: for a monthly estimate that lines up with your AWS bill, analyze a
+   ~30-day window (or use the projected-savings figure as your monthly guide).
+   A very short window makes the monthly projection less reliable.
+
+Q: How is the fixed endpoint (per-hour) cost calculated?
+A: AWS bills each firewall endpoint per hour it is provisioned, whether or not
+   it processes traffic. If an endpoint saw ANY traffic during the window, this
+   tool assumes it ran for the ENTIRE window and charges hourly_rate x
+   window_hours x number_of_endpoints. Endpoints that processed zero traffic
+   emit no logs and therefore cannot be detected here.
+
+   IMPORTANT - PRIMARY endpoints only: this calculation assumes the standard
+   PRIMARY firewall endpoint hourly rate for every Availability Zone observed.
+   It does NOT account for SECONDARY firewall endpoints (the additional endpoints
+   created when a firewall is associated with multiple VPCs), which AWS bills at
+   a different, reduced hourly rate. If your firewall uses secondary endpoints,
+   the fixed cost shown here will not match your bill for those endpoints.
+
+Q: Does this include Advanced Inspection (TLS inspection) charges?
+A: No. When TLS inspection is enabled, AWS adds a separate per-hour Advanced
+   Inspection endpoint charge on top of the standard endpoint hours. This tool
+   does NOT estimate that charge, so if your firewall policy uses TLS inspection
+   your actual bill will be higher than the fixed cost shown here.
+
+Q: My AWS bill shows more endpoint hours than this tool reports. Why?
+A: Two common reasons:
+   • Multiple firewalls: AWS Cost Explorer aggregates Network Firewall endpoint
+     hours across ALL firewalls in the account/region under the same usage type
+     (e.g. "USE1-Endpoint-Hour"); it does not break them out per firewall unless
+     you use cost allocation tags. This tool analyzes one firewall's logs, so its
+     endpoint count reflects only that firewall's Availability Zones.
+   • Idle/secondary endpoints: endpoints (including secondary VPC endpoint
+     associations) that processed no logged traffic are invisible here, but AWS
+     still bills for every hour they are provisioned.
+   Treat the fixed endpoint cost as a LOWER BOUND based on the Availability Zones
+   observed in this firewall's logs.
+
+Q: I selected a full month but the results show a "Log coverage gap" warning.
+   What does that mean for the costs?
+A: It means the logs actually found cover materially less time than the range you
+   selected (the observed span misses a window edge by more than 6 hours). The two
+   usual causes are:
+   • Log retention: CloudWatch Logs only keep events for the configured retention
+     period, so for an older range the early part of the window may have aged out.
+   • The firewall did not exist for the whole range (e.g. it was deployed partway
+     through the selected window).
+
+   These two cases cannot be told apart from the data, so the tool does NOT assume
+   the firewall ran for the full selected window. Instead, in this special case:
+   • Endpoint-hour cost is billed on the OBSERVED span (earliest to latest log
+     seen), not the full window. This is a change from the normal behavior, where
+     endpoint hours cover the entire selected window.
+   • Data-processing/traffic cost already reflects only the traffic in the logs
+     found, which is the observed span.
+
+   So during a coverage gap BOTH cost components describe only the observed span
+   and are a LOWER BOUND for the range you asked for — they will be lower than your
+   actual AWS bill for that full range. An endpoint that passed no traffic during
+   the observed span is not counted. To get complete results, analyze a range that
+   falls entirely within your CloudWatch Logs retention period.
+
+Q: How can I get accurate AWS billing for ONE specific firewall?
+A: Use cost allocation tags so Cost Explorer can separate each firewall's cost:
+
+   1. Tag each firewall. Give every firewall a distinct tag, e.g.
+      Key = "firewall-name", Value = "ANF-Sandbox".
+      Console: Network Firewall > Firewalls > (select) > Tags > Manage tags.
+      CLI:  aws network-firewall tag-resource \\
+              --resource-arn <firewall-arn> \\
+              --tags Key=firewall-name,Value=ANF-Sandbox
+
+   2. Activate the tag as a cost allocation tag (one-time, done by a management/
+      payer account with billing access):
+      Billing and Cost Management > Cost allocation tags > User-defined tags >
+      select "firewall-name" > Activate.
+      Note: activation is NOT retroactive - only usage AFTER activation is
+      broken out, and it can take ~24 hours to start appearing.
+
+   3. Filter Cost Explorer by that tag to see one firewall's cost:
+      CLI:  aws ce get-cost-and-usage \\
+              --time-period Start=2026-08-01,End=2026-09-01 \\
+              --granularity MONTHLY --metrics UnblendedCost UsageQuantity \\
+              --filter '{"And":[
+                          {"Dimensions":{"Key":"SERVICE",
+                             "Values":["AWS Network Firewall"]}},
+                          {"Tags":{"Key":"firewall-name",
+                             "Values":["ANF-Sandbox"]}}]}' \\
+              --group-by Type=DIMENSION,Key=USAGE_TYPE
+      (Console: Cost Explorer > filter by Service = AWS Network Firewall and by
+      the "firewall-name" tag.)
+
+   With per-firewall tagging in place, the bill's endpoint hours for a single
+   firewall should line up with this tool's estimate for that same firewall
+   (aside from Advanced Inspection, which this tool does not include).
+
+Q: Are the total traffic and cost figures accurate for a high-traffic
+   firewall, or can they be under-reported?
+A: They are accurate at any traffic volume. Total bytes, the per-Availability-
+   Zone distribution, and the traffic-category/service/VPC byte totals are
+   computed by a server-side aggregation query (stats sum(...)), whose result
+   limit applies to the number of returned groups (e.g. Availability Zones),
+   NOT to the number of underlying flow records. So the headline volume and
+   cost cannot be silently truncated, even for firewalls processing very large
+   numbers of flows.
+
+   You may occasionally see an amber notice at the top of the results that the
+   per-flow breakdowns are "based on a sample." That refers ONLY to the detail
+   tables (Top Talkers and the per-hostname, per-service, and VPC-to-VPC lists),
+   which are retrieved per-flow and are subject to the CloudWatch Logs Insights
+   10,000-row limit in extreme cases. When that happens the notice also shows
+   roughly what fraction of traffic the sample covers. The total traffic and
+   cost figures remain authoritative regardless, because they come from the
+   aggregation query rather than the per-flow rows.
+
 Q: Why do I see "(No hostname)" in the results?
 A: Hostnames require traffic to match alert rules (or pass rules with 'alert' keyword).
 
@@ -2255,20 +2506,26 @@ A: S3 supports multiple URL formats, and applications may use different ones:
    → These are S3 redirects or metadata operations
    → Bulk traffic uses correct region URL
 
-Q: Why do "Total Endpoint Cost" values vary for cross-region?
-A: Interface endpoints have TWO cost components:
+Q: What is the "Endpoint Cost (window)" column, and why do cross-region
+   values vary?
+A: It is the cost of running the equivalent interface endpoint for the SAME
+   window you analyzed (so it is comparable to the window-scoped "Current
+   Cost" next to it). Interface endpoints have TWO cost components:
 
-   1. Base infrastructure: $7.30/month (us-east-1)
-      → Same for ALL endpoints in firewall region
+   1. Base infrastructure: $7.30/month (us-east-1), prorated to the window
+      → Same for ALL endpoints in the firewall region
+      → e.g. a 7-day window shows $7.30 x (168 / 730) ≈ $1.68
 
    2. Data processing: $0.01/GB (cross-region only)
-      → Varies based on traffic volume
+      → Varies with the window's traffic volume
 
-   Example:
-   • S3 us-east-2 (12 GB): $7.30 + $0.12 = $7.42
-   • S3 us-west-2 (0 GB):  $7.30 + $0.00 = $7.30
+   So two cross-region rows differ only by their traffic volume, not by a
+   different endpoint price. (Gateway endpoints for S3/DynamoDB are free, so
+   their Endpoint Cost is $0.00.)
 
-   The difference reflects traffic volume, not different endpoint costs.
+   Note: the "Projected Monthly Savings" column instead uses the FULL monthly
+   base fee ($7.30) versus a full month of projected traffic - that is why the
+   savings are a monthly projection while this column is window-scoped.
 
 Q: What does 0.00 GB traffic with many flows mean?
 A: Small operations that don't transfer much data:
@@ -2292,9 +2549,22 @@ UNDERSTANDING RECOMMENDATIONS
 • DEPLOY: Cost-effective, implement immediately
 • CONSIDER: Near break-even, evaluate
 • SKIP: Not cost-effective
-• SKIP - Use CRR instead: S3 Cross-Region Replication better option
+• SKIP - Consider CRR instead: S3 Cross-Region Replication may be a better option
 
-All costs are ESTIMATES based on list pricing for planning purposes."""
+Recommendation thresholds compare the MONTHLY-projected traffic volume against
+the endpoint break-even point, so they stay consistent with the projected
+monthly savings.
+
+All costs are ESTIMATES based on list pricing for planning purposes. Total
+traffic and cost come from a server-side aggregation query and are not subject
+to per-flow row limits, so they stay accurate at any traffic volume. Traffic and
+per-window costs are scoped to the analyzed window; only "Projected Monthly
+Savings" is extrapolated to a month. Advanced Inspection (TLS inspection) hourly
+charges are NOT included, and fixed endpoint costs reflect only the Availability
+Zones seen in this firewall's logs. If a "Log coverage gap" warning is shown, the
+logs cover less than the selected range, so endpoint-hour and data-processing
+costs are billed on the observed span only and are a lower bound for the full
+range requested."""
         
         dialog = tk.Toplevel(self.parent.root)
         dialog.title("Understanding Results - Common Questions")

@@ -1,5 +1,113 @@
 # Release Notes
 
+## Version 2.6.6 - August 26, 2026
+
+### Load AWS Best Practices Template: Broken Link Fix
+
+This release restores the "Load AWS Best Practices Template" feature (File menu), which had stopped working after AWS moved the sample rules to a new page.
+
+### Bug Fixes
+
+- **Fixed broken AWS best practices template download**: The template's source page was relocated to the new `sample-suricata-rules` guide, so the feature could no longer find or fetch the rules. The download URL was updated to the new location, and the HTML extraction was reworked to target the page's "Complete rules template" section and correctly handle its updated markup (per-line anchor tags are now stripped and HTML entities decoded). Loading the template pulls the current ready-to-deploy ruleset again.
+
+### SID Anchor Consistency Across Rule-Generation Paths
+
+Building on the manual SID numbering introduced in 2.6.4, every feature that generates or suggests SIDs now honors the active session anchor, so a file you are hand-numbering stays consistent no matter how rules are added.
+
+- **AI Rule Assistant respects the anchor**: AI-inserted rules now continue your manual SID sequence (instead of always using a date-based SID), and the SID shown in the chat preview matches the SID that will actually be assigned on insert.
+
+- **AI rules insert at the selected line**: The "Insert Rules" button now places generated rules just after the rule currently selected in the main editor, rather than always appending to the end. With no selection, it still appends.
+
+- **Import Domain List honors the anchor**: The "Starting SID" default for both local-file and AWS-hosted domain list imports now continues your manual sequence when an anchor is active (date-based otherwise).
+
+- **Insert Rules From Template honors the anchor**: A template's suggested "Starting SID" now continues your manual sequence when an anchor is active. The Default Block template's predefined reserved SIDs are unchanged and are still used as-is (unless they conflict with existing rules).
+
+### Bug Fixes (SID Handling)
+
+- **AI rule SID display/insert mismatch**: An AI-inserted rule could show one SID in the main table but a different SID in the editor fields, because the raw rule text kept the model's original SID after reassignment. The rule text is now kept in sync with the assigned SID.
+
+---
+
+## Version 2.6.5 - August 24, 2026
+
+### Analyze Traffic Costs: Timezone Crash Fix
+
+This release fixes a crash in the Analyze Traffic Costs feature and tidies up the query-cost accounting introduced in 2.6.3.
+
+### Bug Fixes
+
+- **Fixed "can't compare offset-naive and offset-aware datetimes" crash**: When a selected window contained alert-log records, the analysis could fail at the very end while combining flow-log and alert-log timestamps. Alert-log timestamps were parsed inline into timezone-aware datetimes, which could not be compared against the naive timestamps used everywhere else in the analysis. All CloudWatch timestamps (flow legs, alert logs, and metadata) are now normalized to naive UTC through a single shared parser, so they are always mutually comparable.
+
+### Improvements
+
+- **Corrected CloudWatch query-cost documentation**: Updated the inline description of the CloudWatch Logs Insights query cost so it names the current queries (grouped per-flow aggregation, authoritative totals aggregation, and alert query) instead of the retired raw per-flow query. The reported cost already summed scanned bytes across all queries; this is a documentation-only clarification.
+
+---
+
+## Version 2.6.4 - August 22, 2026
+
+### SID Handling: Date-Based Suggestions & Stronger Validation
+
+This release revamps how rule SIDs are suggested and tightens SID validation across both editors.
+
+### Improvements
+
+- **Date-based SID suggestions (`YYMMDDNNNN`)**: New rules are now suggested a date-encoded SID (2-digit year/month/day plus a 4-digit daily counter, e.g. `2608220001`) instead of a small sequential number, making rules easier to trace and to find in firewall logs. The counter continues from the highest existing same-day SID and skips any SID already in use. Existing SIDs are never changed — only new rules are affected, and the suggestion can always be overridden.
+
+- **Manual numbering carries through the session**: If you override a suggested SID with your own value, the tool continues that sequence for subsequent new rules (e.g. `100` → `101` → `102`) and for internal copy/paste, until you start or open a different file.
+
+- **Live SID validation in the Advanced Editor**: Duplicate SIDs and non-numeric SIDs (e.g. `sid:100abc`) are now flagged in real time with a red underline and a hover tooltip, in addition to being caught when you click OK.
+
+- **Wider SID filter fields**: The SID range filter boxes in the main editor were widened so full 10-digit SIDs are no longer clipped.
+
+### Bug Fixes
+
+- **Main editor no longer accepts duplicate SIDs from the rule editor**: Saving a new rule (or replacing a blank line) whose SID was already in use is now blocked, matching the behavior of the other add/insert paths.
+
+- **Advanced Editor no longer hangs on OK**: A failure while applying changes could leave the Advanced Editor subprocess running with the main window frozen. The OK handler now always closes cleanly, and the subprocess reliably imports its core modules (fixing a `SuricataRule is not defined` error that could occur on OK).
+
+- **Corrected the documented maximum SID** in the README (4294967294).
+
+---
+
+## Version 2.6.3 - August 22, 2026
+
+### Analyze Traffic Costs: Accuracy & Reliability Overhaul
+
+This release addresses a report that the Analyze Traffic Costs feature was significantly under-reporting AWS Network Firewall costs, and improves the reliability and clarity of the whole feature.
+
+### Bug Fixes
+
+- **Fixed traffic cost under-reporting from silent log truncation**: Total traffic and cost were summed from raw per-flow CloudWatch Logs Insights rows, which are capped at 10,000 rows per query. High-traffic firewalls silently exceeded this cap (the finest fallback was an hourly chunk that dropped the overflow with no warning), so the headline volume and cost were under-reported. Authoritative totals (total bytes, per-AZ distribution, and the traffic-category/service/VPC byte totals) now come from a server-side `stats sum(...)` aggregation query, whose row limit applies to the number of returned Availability-Zone groups rather than the underlying record count — so the totals can no longer be truncated regardless of traffic volume.
+
+- **Fixed the "1-day" custom range actually querying 2 days**: A custom range treats the end date as inclusive through the end of that day, so selecting e.g. Aug 19–Aug 20 spans ~48 hours. The reported day count did not reflect this (it showed 1 day for a 2-day window), which also skewed the fixed-cost fallback. The day count is now consistent with the inclusive window.
+
+- **Fixed incoherent VPC endpoint savings math (window vs. month mismatch)**: Endpoint recommendation savings subtracted a *monthly* endpoint price from a *window* data-processing cost, understating savings by the window-to-month ratio. Savings are now a like-for-like monthly comparison: the window's data-processing cost is projected to a full month before subtracting the endpoint's monthly cost, and DEPLOY/CONSIDER/SKIP thresholds compare monthly-projected volume against the break-even point.
+
+- **Fixed the "/month" mislabel on the Internal Traffic tab**: This figure was a window-scoped cost incorrectly labeled per month (a leftover from when the query was hard-coded to one month). It now reads as the cost for the analyzed window.
+
+- **Fixed endpoint hours under-counting idle edges**: The fixed (per-endpoint-hour) cost was based on the span between the first and last observed flow, which under-counted endpoints that were provisioned but idle at the edges of the window. It now bills for the full selected window (if an endpoint saw any traffic during the window, it is assumed provisioned for the whole window).
+
+- **Hardened CloudWatch query polling against hangs**: Query polling only treated `Complete`/`Failed`/`Cancelled` as terminal and had no time cap, so a query returning `Timeout`/`Unknown` (or one that never reached a terminal state) could loop indefinitely. Those statuses are now terminal and a wall-clock cap stops and fails a stuck query loudly.
+
+### Improvements
+
+- **Dramatically faster large-window analysis**: The raw per-flow retrieval no longer uses a blind full-range → daily → hourly chunk cascade. The exact record count (from the aggregation query) is used to split the window into the near-minimum number of chunks in a single pass, with adaptive bisection (down to a 60-second floor) only for unexpectedly dense chunks. This cuts a run that previously issued dozens of sequential queries down to a handful, while keeping the per-flow breakdowns complete. Chunk time boundaries are also disjoint, eliminating a small double-count of records that fell on a chunk boundary.
+
+- **Clearer window vs. monthly labelling**: Traffic volumes and per-window costs are now explicitly scoped to the analyzed window. The AWS Service Traffic tab's savings column is renamed **Projected Monthly Savings** (the only extrapolated figure), and the Current Cost / Endpoint Cost columns are labeled as window-scoped, with a caption explaining the distinction.
+
+- **Partial-data transparency**: In the rare extreme case where even a 60-second window exceeds the 10,000-row limit, the per-flow breakdowns are flagged as a sample (the authoritative totals remain exact) rather than silently truncated.
+
+- **Better progress reporting**: The analysis progress dialog now shows a persistent "Flow logs: chunk X of Y" line and a determinate progress bar during the flow-log phase, so long multi-chunk runs show real progress instead of a bouncing bar with fleeting status text.
+
+- **Updated Help content**: The feature's Help now explains window vs. monthly scoping, how the fixed endpoint-hour cost is calculated, the window-scoped meaning of the recommendation columns, that Advanced Inspection (TLS) charges are not included, that endpoint costs reflect primary endpoints only (secondary endpoints use a different rate), why the AWS bill may show more endpoint hours (multiple firewalls, idle/secondary endpoints), and how to use cost allocation tags to get accurate per-firewall billing.
+
+- **Refreshed and expanded regional pricing (validated against the AWS Price List API)**: The endpoint-hour, data-processing, and interface-endpoint pricing tables were validated against current AWS pricing and corrected — several regions were previously overstated (for example, `sa-east-1`, `eu-west-1`, and `us-west-1` endpoint rates were listed above their actual $0.395/hour, and per-GB data processing was overstated in many regions versus the current $0.065/GB). Coverage was expanded from 20 to 36 regions (all commercial regions plus GovCloud), adding previously-missing regions such as `ca-west-1`, `eu-central-2`, `eu-south-1/2`, `ap-south-2`, `ap-southeast-4/5/6/7`, `ap-east-1`, `il-central-1`, `me-central-1`, and `mx-central-1`.
+
+- **Added an unknown-region pricing warning**: If a firewall's region is not in the pricing tables, the results window now shows a clear warning that US-East-1 fallback rates were used and the cost figures for that region are rough estimates, rather than silently applying fallback pricing.
+
+---
+
 ## Version 2.6.2 - August 18, 2026
 
 ### Bug Fixes

@@ -3068,12 +3068,13 @@ class PaloAltoImporter:
         # Perform conversion
         from src.core.version import get_main_version, get_palo_alto_importer_version
 
-        # Get starting SID default
+        # Get starting SID default (date-based scheme, YYMMDDNNNN)
+        from src.core.sid_generator import suggest_next_sid
         existing_sids = [r.sid for r in self.parent.rules
                         if not getattr(r, 'is_comment', False)
                         and not getattr(r, 'is_blank', False)
                         and hasattr(r, 'sid')]
-        default_start_sid = max(existing_sids, default=99) + 1 if existing_sids else 100
+        default_start_sid = suggest_next_sid(existing_sids)
 
         # Build dialog
         dialog = tk.Toplevel(self.parent.root)
@@ -3291,6 +3292,9 @@ class PaloAltoImporter:
         self.parent.rules.clear()
         self.parent.variables.clear()
         self.parent.tags.clear()
+
+        # Reset the session SID override anchor for the new file context
+        self.parent.reset_sid_anchor()
 
         # Parse the output lines into SuricataRule objects
         rules_to_import = []

@@ -1500,20 +1500,21 @@ class StatefulRuleImporter:
         conflict_info = self.check_sid_conflicts(rules_to_import)
         
         if conflict_info['has_conflicts']:
-            # Auto-renumber duplicate SIDs within imported rules
-            # Find max SID in imported rules to start renumbering from
-            imported_sids = [rule.sid for rule in rules_to_import 
-                           if not getattr(rule, 'is_comment', False) 
-                           and not getattr(rule, 'is_blank', False)]
-            max_sid = max(imported_sids) if imported_sids else 99
-            next_sid = max_sid + 1
+            # Auto-renumber duplicate SIDs within imported rules using the shared
+            # date-based scheme (YYMMDDNNNN), allocated consecutively while
+            # avoiding every SID already present in the imported set.
+            from src.core.sid_generator import suggest_next_sid
+            sids_in_use = {rule.sid for rule in rules_to_import
+                           if not getattr(rule, 'is_comment', False)
+                           and not getattr(rule, 'is_blank', False)}
             
             for rule in rules_to_import:
                 if (not getattr(rule, 'is_comment', False) and 
                     not getattr(rule, 'is_blank', False)):
                     if rule.sid in conflict_info['conflicts']:
-                        rule.sid = next_sid
-                        next_sid += 1
+                        new_sid = suggest_next_sid(sids_in_use)
+                        rule.sid = new_sid
+                        sids_in_use.add(new_sid)
         
         # Disable change tracking for new content operations
         self.parent.tracking_enabled = False
@@ -1526,6 +1527,9 @@ class StatefulRuleImporter:
         self.parent.has_header = False
         self.parent.created_timestamp = None
         self.parent.pending_history.clear()
+        
+        # Reset the session SID override anchor for the new file context
+        self.parent.reset_sid_anchor()
         
         # Create metadata comments from RuleGroupResponse if available
         metadata_comments = self.create_metadata_comments(parsed_data.get('original_json', {}))

@@ -13,6 +13,14 @@ import json
 import re
 from dataclasses import dataclass, field
 
+# This module is launched as a standalone subprocess (python advanced_editor.py),
+# so sys.path[0] is this file's directory (src/gui), not the project root. Add the
+# project root (three levels up: src/gui -> src -> root) so the shared `src.*`
+# packages import reliably regardless of the subprocess's working directory.
+_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+if _PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, _PROJECT_ROOT)
+
 # Try to import wxPython
 try:
     import wx
@@ -23,21 +31,69 @@ except ImportError:
     print("ERROR: wxPython not installed. Cannot launch advanced editor.")
     print("Install with: pip install wxPython")
 
-# Import constants and rule analyzer (reuse from main app)
+# Import constants and rule analyzer (reuse from main app).
+# NOTE: keep this block focused on the ESSENTIAL imports. Do not add optional
+# imports here — a failure of any single import drops the whole block into the
+# fallback, and the fallback must fully substitute for every name below.
 try:
     from src.core.constants import SuricataConstants
     from src.analysis.rule_analyzer import RuleAnalyzer
     from src.core.suricata_rule import SuricataRule
     HAS_RULE_ANALYZER = True
 except ImportError:
-    # Minimal fallback
+    # Minimal fallback so the editor still runs standalone. This MUST define
+    # every name the try-block provides that is used elsewhere in this module.
     class SuricataConstants:
         SUPPORTED_ACTIONS = ['pass', 'alert', 'drop', 'reject']
         SUPPORTED_PROTOCOLS = ['tcp', 'udp', 'icmp', 'ip', 'http', 'tls', 'dns', 
                               'dhcp', 'ftp', 'smb', 'ssh', 'smtp']
         SID_MIN = 1
-        SID_MAX = 999999999
+        SID_MAX = 4294967294
+
+    RuleAnalyzer = None
+    # With the sys.path bootstrap above, the try-block should always succeed, so
+    # this branch is a last-resort safety net. We cannot meaningfully rebuild the
+    # full SuricataRule class inline; leave it unset and flag degraded mode. The
+    # subprocess entry point checks this and aborts cleanly rather than raising a
+    # confusing NameError deep inside rule parsing.
+    SuricataRule = None
     HAS_RULE_ANALYZER = False
+
+
+# Import the shared SID generator in its OWN block so a failure here can never
+# strand the essential imports above. Falls back to a local implementation that
+# mirrors src/core/sid_generator.py's date-based scheme (YYMMDDNNNN).
+try:
+    from src.core.sid_generator import suggest_next_sid as _suggest_next_sid
+except ImportError:
+    def _suggest_next_sid(existing_sids, today=None):
+        from datetime import date
+        used = set()
+        for s in existing_sids:
+            try:
+                used.add(int(s))
+            except (TypeError, ValueError):
+                continue
+        if today is None:
+            today = date.today()
+        base = ((today.year % 100) * 10000 + today.month * 100 + today.day) * 10000
+        day_start, day_end = base + 1, base + 9999
+        used_today = [s for s in used if day_start <= s <= day_end]
+        candidate = (max(used_today) + 1) if used_today else day_start
+        while candidate <= day_end:
+            if candidate not in used:
+                return candidate
+            candidate += 1
+        # Day exhausted: fall back to max + 1, then scan for a free slot if that
+        # value is already taken (mirrors the shared generator's D-2/D-3 path).
+        candidate = max(used, default=SuricataConstants.SID_MIN - 1) + 1
+        if candidate < SuricataConstants.SID_MIN:
+            candidate = SuricataConstants.SID_MIN
+        while candidate <= SuricataConstants.SID_MAX:
+            if candidate not in used:
+                return candidate
+            candidate += 1
+        return SuricataConstants.SID_MAX
 
 
 @dataclass
@@ -73,6 +129,13 @@ def main():
         print("ERROR: wxPython not installed. Cannot launch advanced editor.")
         print("Install with: pip install wxPython")
         sys.exit(2)
+    
+    if not HAS_RULE_ANALYZER or SuricataRule is None:
+        # Essential shared modules failed to import. Abort cleanly with a clear
+        # message instead of launching the GUI and raising a NameError on OK.
+        print("ERROR: could not import core modules (src.core.suricata_rule). "
+              "Advanced editor cannot start.")
+        sys.exit(4)
     
     # Load input data
     try:
@@ -695,6 +758,56 @@ class AdvancedEditorWx(wx.Dialog):
                     self.coloring_timer.Stop()
                 self.coloring_timer = wx.CallLater(500, self.apply_sig_type_coloring)
     
+    def _find_sid_span(self, line):
+        """Locate the sid: field on a rule line.
+
+        Returns (sid_value, start_col, end_col) for the sid:<n> token, or None
+        if the line has no options section or no sid. Mirrors the span logic
+        used by validate_line's SID range check so duplicate squiggles land on
+        the same characters.
+        """
+        if '(' not in line or ')' not in line:
+            return None
+        paren_start = line.find('(')
+        paren_end = line.rfind(')')
+        content_section = line[paren_start + 1:paren_end]
+        if 'sid:' not in content_section.lower():
+            return None
+        # Match the full sid value token (up to ; or whitespace). A non-numeric
+        # SID (e.g. "sid:100abc") is not a valid SID, so return None here and let
+        # the format check flag it — this avoids also reporting a bogus duplicate.
+        sid_match = re.search(r'sid:\s*([^;\s]+)', content_section, re.IGNORECASE)
+        if not sid_match:
+            return None
+        raw_sid = sid_match.group(1)
+        if not raw_sid.isdigit():
+            return None
+        try:
+            sid_value = int(raw_sid)
+        except (ValueError, OverflowError):
+            return None
+        start_col = line.find(sid_match.group(0), paren_start)
+        end_col = start_col + len(sid_match.group(0))
+        return sid_value, start_col, end_col
+
+    def _build_sid_line_index(self, lines):
+        """Build a map of {sid_value: [line_num, ...]} across all real rules.
+
+        Comments and blank lines are skipped. Used to detect duplicate SIDs
+        during real-time validation. O(number of lines), one regex per line.
+        """
+        sid_lines = {}
+        for line_num, line in enumerate(lines):
+            stripped = line.strip()
+            if not stripped or stripped.startswith('#'):
+                continue
+            span = self._find_sid_span(line)
+            if span is None:
+                continue
+            sid_value = span[0]
+            sid_lines.setdefault(sid_value, []).append(line_num)
+        return sid_lines
+
     def perform_realtime_validation(self):
         """Real-time validation with indicators"""
         # Clear previous indicators (squiggles and backgrounds)
@@ -710,6 +823,11 @@ class AdvancedEditorWx(wx.Dialog):
         text = self.editor.GetText()
         lines = text.split('\n')
         
+        # Build a document-wide SID index so duplicate SIDs can be flagged live.
+        # A SID appearing on more than one real-rule line is a duplicate; ALL of
+        # its occurrences are highlighted (not just the later ones).
+        sid_line_index = self._build_sid_line_index(lines)
+        
         total_errors = 0
         total_warnings = 0
         
@@ -722,6 +840,18 @@ class AdvancedEditorWx(wx.Dialog):
             
             # Validate this line
             errors, warnings = self.validate_line(line, line_num)
+            
+            # Duplicate-SID detection (cross-line, so handled here rather than in
+            # the single-line validate_line). If this line's SID appears on any
+            # other line, flag it as an error and underline the sid: token.
+            span = self._find_sid_span(line)
+            if span is not None:
+                sid_value, sid_start, sid_end = span
+                other_lines = [ln for ln in sid_line_index.get(sid_value, []) if ln != line_num]
+                if other_lines:
+                    human_lines = ", ".join(str(ln + 1) for ln in sorted(other_lines))
+                    errors.append((sid_start, sid_end,
+                                   f"Duplicate SID {sid_value}: also used on line(s) {human_lines}"))
             
             if errors:
                 self.validation_errors[line_num] = errors
@@ -859,13 +989,23 @@ class AdvancedEditorWx(wx.Dialog):
             
             # Validate SID format
             if 'sid:' in content_section.lower():
-                sid_match = re.search(r'sid:\s*(\d+)', content_section, re.IGNORECASE)
-                if sid_match:
-                    sid_value = int(sid_match.group(1))
-                    if sid_value < SuricataConstants.SID_MIN or sid_value > SuricataConstants.SID_MAX:
-                        sid_start = line.find(sid_match.group(0), paren_start)
-                        sid_end = sid_start + len(sid_match.group(0))
-                        errors.append((sid_start, sid_end, f"SID must be between {SuricataConstants.SID_MIN}-{SuricataConstants.SID_MAX}"))
+                # Capture the RAW sid value token (everything up to the next
+                # semicolon or whitespace) so non-numeric SIDs like "sid:100abc"
+                # or "sid:abc" are caught instead of silently matching just the
+                # leading digits.
+                sid_value_match = re.search(r'sid:\s*([^;\s]+)', content_section, re.IGNORECASE)
+                if sid_value_match:
+                    raw_sid = sid_value_match.group(1)
+                    sid_start = line.find(sid_value_match.group(0), paren_start)
+                    sid_end = sid_start + len(sid_value_match.group(0))
+                    if not raw_sid.isdigit():
+                        # SID contains non-numeric characters
+                        errors.append((sid_start, sid_end,
+                                       f"Invalid SID '{raw_sid}': SID must contain only digits (0-9)"))
+                    else:
+                        sid_value = int(raw_sid)
+                        if sid_value < SuricataConstants.SID_MIN or sid_value > SuricataConstants.SID_MAX:
+                            errors.append((sid_start, sid_end, f"SID must be between {SuricataConstants.SID_MIN}-{SuricataConstants.SID_MAX}"))
             
             # Check for missing semicolons and invalid keyword syntax
             # Parse through content more carefully to detect:
@@ -1897,6 +2037,12 @@ class AdvancedEditorWx(wx.Dialog):
                 elif 'SID must be' in msg:
                     tooltip_lines.append(msg)
                     tooltip_lines.append(f"\nSID must be between {SuricataConstants.SID_MIN}-{SuricataConstants.SID_MAX}")
+                elif 'Duplicate SID' in msg:
+                    tooltip_lines.append(msg)
+                    tooltip_lines.append("\nEach rule must have a unique SID.")
+                elif 'Invalid SID' in msg:
+                    tooltip_lines.append(msg)
+                    tooltip_lines.append("\nA SID must contain only digits (0-9).")
                 elif 'Invalid port' in msg or 'Invalid network' in msg:
                     tooltip_lines.append(msg)
                 else:
@@ -2281,11 +2427,10 @@ class AdvancedEditorWx(wx.Dialog):
                 if sid_match:
                     used_sids.add(int(sid_match.group(1)))
             
-            # Find next available SID (max + 1, like main program)
-            if used_sids:
-                next_sid = max(used_sids) + 1
-            else:
-                next_sid = 100
+            # Suggest the next SID using the shared date-based scheme (YYMMDDNNNN),
+            # matching the main program. Fall back to a local implementation if the
+            # shared module is unavailable (e.g. editor run standalone).
+            next_sid = _suggest_next_sid(used_sids)
             
             return [f'{next_sid};']  # Include semicolon in suggestion
         
@@ -3515,67 +3660,97 @@ Code Folding:
             self.editor.SetFoldMarginHiColour(True, wx.WHITE)
     
     def on_ok(self, event):
-        """Handle OK button"""
-        # Validate and parse rules
-        parsed_rules, errors, warnings, undefined_vars = self.validate_and_parse_rules()
-        
-        # Show validation results if there are issues
-        if errors or warnings:
-            report = "Validation Results:\n\n"
-            
-            if errors:
-                report += "ERRORS (rules commented out):\n"
-                for line_num, error_msg in errors[:10]:  # Show first 10
-                    report += f"- Line {line_num}: {error_msg}\n"
-                if len(errors) > 10:
-                    report += f"... and {len(errors) - 10} more errors\n"
-                report += "\n"
-            
-            if warnings:
-                report += "WARNINGS (rules preserved):\n"
-                for line_num, warning_msg in warnings[:10]:
-                    report += f"- Line {line_num}: {warning_msg}\n"
-                if len(warnings) > 10:
-                    report += f"... and {len(warnings) - 10} more warnings\n"
-                report += "\n"
-            
-            if undefined_vars:
-                report += f"Undefined variables will be auto-created:\n"
-                for var in sorted(list(undefined_vars)[:5]):
-                    report += f"- {var}\n"
-                if len(undefined_vars) > 5:
-                    report += f"... and {len(undefined_vars) - 5} more\n"
-                report += "\n"
-            
-            report += "Continue with these changes?"
-            
-            dlg = wx.MessageDialog(self, report, "Validation Results",
-                                  wx.YES_NO | wx.ICON_QUESTION)
-            if dlg.ShowModal() != wx.ID_YES:
-                dlg.Destroy()
-                return
-            dlg.Destroy()
-        
-        # Auto-create undefined variables
-        for var in undefined_vars:
-            if var not in self.variables:
-                self.variables[var] = ""
-        
-        # Get result data with validated rules
-        result_data = {
-            'ok': True,
-            'rules': [self._rule_dict_from_suricata_rule(r) for r in parsed_rules],
-            'variables': self.variables
-        }
-        
-        # Write to output file
+        """Handle OK button.
+
+        Robustness note: this handler must always either (a) call EndModal so
+        the dialog closes and the subprocess exits, or (b) intentionally return
+        to keep the editor open (only when the user declines the validation
+        prompt). If it returned or raised without EndModal, ShowModal would
+        never return, the subprocess would never exit, and the parent process
+        (which waits on subprocess.run) would hang. Every other path is wrapped
+        so an unexpected error ends the modal as a cancel rather than freezing.
+        """
         try:
+            # Validate and parse rules
+            parsed_rules, errors, warnings, undefined_vars = self.validate_and_parse_rules()
+            
+            # Show validation results if there are issues
+            if errors or warnings:
+                report = "Validation Results:\n\n"
+                
+                if errors:
+                    report += "ERRORS (rules commented out):\n"
+                    for line_num, error_msg in errors[:10]:  # Show first 10
+                        report += f"- Line {line_num}: {error_msg}\n"
+                    if len(errors) > 10:
+                        report += f"... and {len(errors) - 10} more errors\n"
+                    # Call out duplicate-SID handling explicitly, since it's a
+                    # common case and the consequence isn't obvious.
+                    if any('Duplicate SID' in msg for _, msg in errors):
+                        report += ("\nNote: SIDs must be unique. Each rule with a duplicate "
+                                   "SID will be commented out (not added as an active rule) "
+                                   "if you accept these changes.\n")
+                    report += "\n"
+                
+                if warnings:
+                    report += "WARNINGS (rules preserved):\n"
+                    for line_num, warning_msg in warnings[:10]:
+                        report += f"- Line {line_num}: {warning_msg}\n"
+                    if len(warnings) > 10:
+                        report += f"... and {len(warnings) - 10} more warnings\n"
+                    report += "\n"
+                
+                if undefined_vars:
+                    report += f"Undefined variables will be auto-created:\n"
+                    for var in sorted(list(undefined_vars)[:5]):
+                        report += f"- {var}\n"
+                    if len(undefined_vars) > 5:
+                        report += f"... and {len(undefined_vars) - 5} more\n"
+                    report += "\n"
+                
+                report += "Continue with these changes?"
+                
+                dlg = wx.MessageDialog(self, report, "Validation Results",
+                                      wx.YES_NO | wx.ICON_QUESTION)
+                proceed = dlg.ShowModal() == wx.ID_YES
+                dlg.Destroy()
+                if not proceed:
+                    # User chose to keep editing. Intentionally leave the dialog
+                    # open (no EndModal) — this is the one valid non-exit path.
+                    return
+            
+            # Auto-create undefined variables
+            for var in undefined_vars:
+                if var not in self.variables:
+                    self.variables[var] = ""
+            
+            # Get result data with validated rules
+            result_data = {
+                'ok': True,
+                'rules': [self._rule_dict_from_suricata_rule(r) for r in parsed_rules],
+                'variables': self.variables
+            }
+            
+            # Write to output file
             with open(self.output_file, 'w', encoding='utf-8') as f:
                 json.dump(result_data, f, indent=2)
             
             self.EndModal(wx.ID_OK)
         except Exception as e:
-            wx.MessageBox(f"Error saving result: {e}", "Error", wx.OK | wx.ICON_ERROR)
+            # Any unexpected failure must NOT strand the subprocess. Surface the
+            # error, then close the dialog as a cancel so the parent regains
+            # control (it will simply not apply changes on a non-OK exit).
+            import traceback
+            traceback.print_exc()
+            try:
+                wx.MessageBox(
+                    f"Error applying changes: {e}\n\nThe editor will close without "
+                    f"saving these changes.",
+                    "Advanced Editor Error", wx.OK | wx.ICON_ERROR
+                )
+            except Exception:
+                pass
+            self.EndModal(wx.ID_CANCEL)
     
     def on_cancel(self, event):
         """Handle Cancel button"""
@@ -3607,6 +3782,7 @@ Code Folding:
         errors = []
         warnings = []
         undefined_vars = set()
+        seen_sids = set()  # SIDs already used by earlier real rules (duplicate detection)
         
         for i, line in enumerate(lines, 1):
             line_stripped = line.strip()
@@ -3656,6 +3832,17 @@ Code Folding:
                             errors.append((i, f"Invalid protocol: {rule.protocol}"))
                             error_found = True
                     
+                    # Check for duplicate SID (AWS Network Firewall requires unique
+                    # SIDs; the main editor blocks duplicates too). Only SIDs of
+                    # rules that are actually KEPT count (tracked below), so a rule
+                    # commented out for other reasons never causes a false duplicate.
+                    # The first use of a SID is kept; any later rule reusing it is
+                    # flagged as an error and commented out.
+                    if rule.sid in seen_sids:
+                        if not any('Duplicate SID' in msg for _, msg in errors if _ == i):
+                            errors.append((i, f"Duplicate SID: {rule.sid} is already used by an earlier rule"))
+                            error_found = True
+                    
                     # Check for undefined variables
                     for field in [rule.src_net, rule.dst_net, rule.src_port, rule.dst_port]:
                         if field.startswith(('$', '@')) and field not in self.variables:
@@ -3670,6 +3857,8 @@ Code Folding:
                         comment_rule.comment_text = f"# [SYNTAX ERROR] {line}"
                         edited_rules.append(comment_rule)
                     else:
+                        # Rule is kept: record its SID so later duplicates are caught.
+                        seen_sids.add(rule.sid)
                         edited_rules.append(rule)
                 else:
                     errors.append((i, "Failed to parse rule"))

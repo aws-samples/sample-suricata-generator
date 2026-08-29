@@ -3,7 +3,7 @@ from tkinter import ttk, messagebox, simpledialog, filedialog
 import re
 import os
 from typing import Optional
-from src.core.constants import SuricataConstants
+from src.core.constants import SuricataConstants, classify_reference_arn, looks_like_valid_reference_arn, CONTAINER_ASSOCIATION_ARN_RE
 from src.core.suricata_rule import SuricataRule
 from datetime import datetime, timedelta
 
@@ -8529,7 +8529,15 @@ Would you like to run a complete analysis?"""
         
         ttk.Button(var_buttons_frame, text="Add IP Set ($)", command=lambda: self.add_variable("ip_set")).pack(side=tk.LEFT, padx=(0, 5))
         ttk.Button(var_buttons_frame, text="Add Port Set ($)", command=lambda: self.add_variable("port_set")).pack(side=tk.LEFT, padx=(0, 5))
-        ttk.Button(var_buttons_frame, text="Add Reference (@)", command=lambda: self.add_variable("reference")).pack(side=tk.LEFT, padx=(0, 5))
+        # Store references to the two @-style buttons so their enabled/disabled
+        # state can be toggled for the Reference_Exclusivity_Rule (task 5.4).
+        self.add_reference_btn = ttk.Button(var_buttons_frame, text="Add Reference (@)", command=lambda: self.add_variable("reference"))
+        self.add_reference_btn.pack(side=tk.LEFT, padx=(0, 5))
+        self.add_container_btn = ttk.Button(var_buttons_frame, text="Add Container Association (@)", command=lambda: self.add_variable("container_association"))
+        self.add_container_btn.pack(side=tk.LEFT, padx=(0, 5))
+        # Expose on parent so other components (e.g. exclusivity button-state logic) can reach them.
+        self.parent.add_reference_btn = self.add_reference_btn
+        self.parent.add_container_btn = self.add_container_btn
         ttk.Button(var_buttons_frame, text="Add Common Ports", command=self.show_add_common_ports_dialog).pack(side=tk.LEFT, padx=(10, 5))
         ttk.Button(var_buttons_frame, text="Edit", command=self.edit_variable).pack(side=tk.LEFT, padx=(10, 5))
         ttk.Button(var_buttons_frame, text="Delete", command=self.delete_variable).pack(side=tk.LEFT, padx=(0, 5))
@@ -9573,168 +9581,10 @@ Would you like to run a complete analysis?"""
             definition_hint = "AWS VPC IP Set Reference ARN"
             if not var_name:
                 name_var.set("@")
-        else:
-            hint_text = "$ for IP sets and port sets, @ for references"
-            definition_label = "Definition:"
-            definition_hint = ""
-        
-        ttk.Label(dialog, text=hint_text, font=("TkDefaultFont", 8)).pack(pady=(0, 10))
-        
-        # Definition
-        ttk.Label(dialog, text=definition_label).pack(pady=5)
-        
-        # Get existing variable data (handle both old and new formats)
-        existing_data = self.parent.variables.get(var_name, {}) if var_name else {}
-        if isinstance(existing_data, dict):
-            existing_def = existing_data.get("definition", "")
-            existing_desc = existing_data.get("description", "")
-        else:
-            # Legacy format
-            existing_def = existing_data
-            existing_desc = ""
-        
-        definition_var = tk.StringVar(value=existing_def)
-        definition_entry = ttk.Entry(dialog, textvariable=definition_var, width=60)
-        definition_entry.pack(pady=5)
-        
-        if definition_hint:
-            ttk.Label(dialog, text=definition_hint, font=("TkDefaultFont", 8)).pack(pady=(0, 10))
-        
-        # Description field (NEW)
-        ttk.Label(dialog, text="Description (optional):").pack(pady=5)
-        description_var = tk.StringVar(value=existing_desc)
-        description_entry = ttk.Entry(dialog, textvariable=description_var, width=60)
-        description_entry.pack(pady=5)
-        ttk.Label(dialog, text="Brief description of what this variable is for", 
-                 font=("TkDefaultFont", 8), foreground="#666666").pack(pady=(0, 10))
-        
-        # Buttons
-        button_frame = ttk.Frame(dialog)
-        button_frame.pack(pady=10)
-        
-        def save_variable():
-            name = name_var.get().strip()
-            definition = definition_var.get().strip()
-            description = description_var.get().strip()
-            
-            if not name:
-                messagebox.showerror("Error", "Variable name is required.")
-                return
-            
-            # Use context-aware validation based on var_type or actual usage
-            if definition:  # Only validate if definition is provided
-                # For new variables, use var_type first; for existing variables, analyze usage
-                # Check var_type parameter first (most reliable for new variables)
-                if var_type == "port_set":
-                    # Port Set validation (AWS Network Firewall requires $ prefix for port variables)
-                    if not self.parent.validate_port_list(definition):
-                        messagebox.showerror("Port Validation Error", 
-                            "Invalid port definition. Port ranges and lists MUST use brackets:\n" +
-                            "• Single port: 80\n" +
-                            "• Port range: [8080:8090]\n" +
-                            "• Multiple ports: [80,443,8080]\n" +
-                            "• Complex specs: [80:100,!85]\n\n" +
-                            "Suricata syntax requires brackets for all port ranges and complex port specifications.")
-                        return
-                elif var_type == "ip_set":
-                    # IP Set validation (for explicit ip_set type)
-                    if not self.parent.validate_cidr_list(definition):
-                        messagebox.showerror("CIDR Validation Error", 
-                            "Invalid CIDR definition. AWS Network Firewall requires brackets for multiple CIDR blocks:\n" +
-                            "• Single CIDR: 192.168.1.0/24\n" +
-                            "• Multiple CIDRs: [192.168.1.0/24,192.168.2.0/24]\n" +
-                            "• With negation: [192.168.1.0/24,!172.16.0.0/12]")
-                        return
-                elif var_type == "reference":
-                    # Reference Set validation
-                    if not definition.strip():
-                        messagebox.showerror("Error", "Reference ARN is required for reference variables.")
-                        return
-                else:
-                    # Fallback: Analyze current variable usage to determine correct validation
-                    variable_usage = self.parent.file_manager.analyze_variable_usage(self.parent.rules)
-                    determined_type = self.parent.file_manager.get_variable_type_from_usage(name, variable_usage)
-                    
-                    # Validate based on determined type from usage
-                    if determined_type == "Port Set":
-                        # Port Set validation
-                        if not self.parent.validate_port_list(definition):
-                            messagebox.showerror("Port Validation Error", 
-                                "Invalid port definition. Port ranges and lists MUST use brackets:\n" +
-                                "• Single port: 80\n" +
-                                "• Port range: [8080:8090]\n" +
-                                "• Multiple ports: [80,443,8080]\n" +
-                                "• Complex specs: [80:100,!85]\n\n" +
-                                "Suricata syntax requires brackets for all port ranges and complex port specifications.")
-                            return
-                    elif determined_type == "Reference":
-                        # Reference Set - minimal validation
-                        if not definition.strip():
-                            messagebox.showerror("Error", "Reference ARN is required for reference variables.")
-                            return
-                    else:
-                        # Default to IP Set validation (determined_type == "IP Set" or other)
-                        if not self.parent.validate_cidr_list(definition):
-                            messagebox.showerror("Error", "Invalid CIDR definition. Use comma-separated CIDR blocks.")
-                            return
-            
-            # Determine if this is adding a new variable or editing existing one
-            is_new_variable = var_name is None or var_name not in self.parent.variables
-            action_type = 'variable_added' if is_new_variable else 'variable_modified'
-            
-            self.parent.variables[name] = definition
-            self.parent.add_history_entry(action_type, {'variable': name, 'definition': definition})
-            self.parent.refresh_variables_table()
-            self.parent.update_status_bar()  # Update status bar to reflect variable definition changes
-            self.parent._invalidate_ai_cache()
-            # Auto-update $EXTERNAL_NET if $HOME_NET was modified
-            if name == '$HOME_NET':
-                self.parent._on_home_net_changed()
-                self.parent.refresh_variables_table()
-            dialog.destroy()
-        
-        ttk.Button(button_frame, text="Save", command=save_variable).pack(side=tk.LEFT, padx=5)
-        ttk.Button(button_frame, text="Cancel", command=dialog.destroy).pack(side=tk.LEFT, padx=5)
-        
-        # Focus on name entry and position cursor appropriately
-        name_entry.focus()
-        
-        # If we pre-filled with "$" for ip_set/port_set or "@" for reference, position cursor after it
-        if var_type in ["ip_set", "port_set", "reference"] and not var_name:
-            name_entry.icursor(1)  # Position cursor after the "$" or "@"
-    
-    def show_variable_dialog(self, title, var_name=None, var_type=None):
-        """Show dialog for adding/editing variables with description field"""
-        dialog = tk.Toplevel(self.parent.root)
-        dialog.title(title)
-        dialog.geometry("550x360")
-        dialog.transient(self.parent.root)
-        dialog.grab_set()
-        
-        # Variable name with prefix hint
-        ttk.Label(dialog, text="Variable Name:").pack(pady=5)
-        name_var = tk.StringVar(value=var_name or "")
-        name_entry = ttk.Entry(dialog, textvariable=name_var, width=40)
-        name_entry.pack(pady=5)
-        
-        # Show prefix hint based on type and existing variable name
-        if var_type == "ip_set":
-            hint_text = "Must start with $ (e.g., $HOME_NET)"
-            definition_label = "CIDR Definition:"
-            definition_hint = "Single: 192.168.1.0/24 or Multiple: [10.0.0.0/8,172.16.0.0/12]"
-            if not var_name:
-                name_var.set("$")
-        elif var_type == "port_set":
-            # AWS Network Firewall requires port variables to use $ prefix only
-            hint_text = "Must start with $ (e.g., $WEB, $SRC_PORTS)"
-            definition_label = "Port Definition:"
-            definition_hint = "e.g., [80,443] or [8080:8090]"
-            if not var_name:
-                name_var.set("$")
-        elif var_type == "reference":
-            hint_text = "Must start with @ (e.g., @ALLOW_LIST, @VPC_CIDR)"
-            definition_label = "Reference ARN:"
-            definition_hint = "AWS VPC IP Set Reference ARN"
+        elif var_type == "container_association":
+            hint_text = "Must start with @ (e.g., @ECS_CONTAINERS)"
+            definition_label = "Container Association ARN:"
+            definition_hint = "AWS Network Firewall container association ARN"
             if not var_name:
                 name_var.set("@")
         else:
@@ -9814,6 +9664,10 @@ Would you like to run a complete analysis?"""
                     if not definition.strip():
                         messagebox.showerror("Error", "Reference ARN is required for reference variables.")
                         return
+                elif var_type == "container_association":
+                    # Container Association validation is handled below (name/ARN
+                    # checks and the soft ARN-shape warning); no CIDR/port checks.
+                    pass
                 else:
                     # Fallback: Analyze current variable usage to determine correct validation
                     variable_usage = self.parent.file_manager.analyze_variable_usage(self.parent.rules)
@@ -9846,13 +9700,8 @@ Would you like to run a complete analysis?"""
             is_new_variable = var_name is None or var_name not in self.parent.variables
             action_type = 'variable_added' if is_new_variable else 'variable_modified'
             
-            # Save in new dict format with definition and description
-            self.parent.variables[name] = {
-                "definition": definition,
-                "description": description
-            }
-            
-            self.parent.add_history_entry(action_type, {'variable': name, 'definition': definition, 'description': description})
+            self.parent.variables[name] = definition
+            self.parent.add_history_entry(action_type, {'variable': name, 'definition': definition})
             self.parent.refresh_variables_table()
             self.parent.update_status_bar()  # Update status bar to reflect variable definition changes
             self.parent._invalidate_ai_cache()
@@ -9868,8 +9717,301 @@ Would you like to run a complete analysis?"""
         # Focus on name entry and position cursor appropriately
         name_entry.focus()
         
-        # If we pre-filled with "$" for ip_set/port_set or "@" for reference, position cursor after it
-        if var_type in ["ip_set", "port_set", "reference"] and not var_name:
+        # If we pre-filled with "$" for ip_set/port_set or "@" for reference/container, position cursor after it
+        if var_type in ["ip_set", "port_set", "reference", "container_association"] and not var_name:
+            name_entry.icursor(1)  # Position cursor after the "$" or "@"
+    
+    def show_variable_dialog(self, title, var_name=None, var_type=None):
+        """Show dialog for adding/editing variables with description field"""
+        dialog = tk.Toplevel(self.parent.root)
+        dialog.title(title)
+        dialog.geometry("550x360")
+        dialog.transient(self.parent.root)
+        dialog.grab_set()
+        
+        # Variable name with prefix hint
+        ttk.Label(dialog, text="Variable Name:").pack(pady=5)
+        name_var = tk.StringVar(value=var_name or "")
+        name_entry = ttk.Entry(dialog, textvariable=name_var, width=40)
+        name_entry.pack(pady=5)
+        
+        # Show prefix hint based on type and existing variable name
+        if var_type == "ip_set":
+            hint_text = "Must start with $ (e.g., $HOME_NET)"
+            definition_label = "CIDR Definition:"
+            definition_hint = "Single: 192.168.1.0/24 or Multiple: [10.0.0.0/8,172.16.0.0/12]"
+            if not var_name:
+                name_var.set("$")
+        elif var_type == "port_set":
+            # AWS Network Firewall requires port variables to use $ prefix only
+            hint_text = "Must start with $ (e.g., $WEB, $SRC_PORTS)"
+            definition_label = "Port Definition:"
+            definition_hint = "e.g., [80,443] or [8080:8090]"
+            if not var_name:
+                name_var.set("$")
+        elif var_type == "reference":
+            hint_text = "Must start with @ (e.g., @ALLOW_LIST, @VPC_CIDR)"
+            definition_label = "Reference ARN:"
+            definition_hint = "AWS VPC IP Set Reference ARN"
+            if not var_name:
+                name_var.set("@")
+        elif var_type == "container_association":
+            hint_text = "Must start with @ (e.g., @ECS_CONTAINERS)"
+            definition_label = "Container Association ARN:"
+            definition_hint = "AWS Network Firewall container association ARN"
+            if not var_name:
+                name_var.set("@")
+        else:
+            hint_text = "$ for IP sets and port sets, @ for references"
+            definition_label = "Definition:"
+            definition_hint = ""
+        
+        ttk.Label(dialog, text=hint_text, font=("TkDefaultFont", 8)).pack(pady=(0, 10))
+        
+        # Definition
+        ttk.Label(dialog, text=definition_label).pack(pady=5)
+        
+        # Get existing variable data (handle both old and new formats)
+        existing_data = self.parent.variables.get(var_name, {}) if var_name else {}
+        if isinstance(existing_data, dict):
+            existing_def = existing_data.get("definition", "")
+            existing_desc = existing_data.get("description", "")
+        else:
+            # Legacy format
+            existing_def = existing_data
+            existing_desc = ""
+        
+        definition_var = tk.StringVar(value=existing_def)
+        definition_entry = ttk.Entry(dialog, textvariable=definition_var, width=60)
+        definition_entry.pack(pady=5)
+        
+        if definition_hint:
+            ttk.Label(dialog, text=definition_hint, font=("TkDefaultFont", 8)).pack(pady=(0, 10))
+        
+        # Description field (NEW)
+        ttk.Label(dialog, text="Description (optional):").pack(pady=5)
+        description_var = tk.StringVar(value=existing_desc)
+        description_entry = ttk.Entry(dialog, textvariable=description_var, width=60)
+        description_entry.pack(pady=5)
+        ttk.Label(dialog, text="Brief description of what this variable is for", 
+                 font=("TkDefaultFont", 8), foreground="#666666").pack(pady=(0, 10))
+        
+        # Buttons
+        button_frame = ttk.Frame(dialog)
+        button_frame.pack(pady=10)
+        
+        def save_variable():
+            name = name_var.get().strip()
+            definition = definition_var.get().strip()
+            description = description_var.get().strip()
+            
+            if not name:
+                messagebox.showerror("Error", "Variable name is required.")
+                return
+            
+            # Use context-aware validation based on var_type or actual usage
+            if definition:  # Only validate if definition is provided
+                # For new variables, use var_type first; for existing variables, analyze usage
+                # Check var_type parameter first (most reliable for new variables)
+                if var_type == "port_set":
+                    # Port Set validation (AWS Network Firewall requires $ prefix for port variables)
+                    if not self.parent.validate_port_list(definition):
+                        messagebox.showerror("Port Validation Error", 
+                            "Invalid port definition. Port ranges and lists MUST use brackets:\n" +
+                            "• Single port: 80\n" +
+                            "• Port range: [8080:8090]\n" +
+                            "• Multiple ports: [80,443,8080]\n" +
+                            "• Complex specs: [80:100,!85]\n\n" +
+                            "Suricata syntax requires brackets for all port ranges and complex port specifications.")
+                        return
+                elif var_type == "ip_set":
+                    # IP Set validation (for explicit ip_set type)
+                    if not self.parent.validate_cidr_list(definition):
+                        messagebox.showerror("CIDR Validation Error", 
+                            "Invalid CIDR definition. AWS Network Firewall requires brackets for multiple CIDR blocks:\n" +
+                            "• Single CIDR: 192.168.1.0/24\n" +
+                            "• Multiple CIDRs: [192.168.1.0/24,192.168.2.0/24]\n" +
+                            "• With negation: [192.168.1.0/24,!172.16.0.0/12]")
+                        return
+                elif var_type == "reference":
+                    # Reference Set validation
+                    if not definition.strip():
+                        messagebox.showerror("Error", "Reference ARN is required for reference variables.")
+                        return
+                elif var_type == "container_association":
+                    # Container Association validation is handled below (name/ARN
+                    # checks and the soft ARN-shape warning); no CIDR/port checks.
+                    pass
+                else:
+                    # Fallback: Analyze current variable usage to determine correct validation
+                    variable_usage = self.parent.file_manager.analyze_variable_usage(self.parent.rules)
+                    determined_type = self.parent.file_manager.get_variable_type_from_usage(name, variable_usage)
+                    
+                    # Validate based on determined type from usage
+                    if determined_type == "Port Set":
+                        # Port Set validation
+                        if not self.parent.validate_port_list(definition):
+                            messagebox.showerror("Port Validation Error", 
+                                "Invalid port definition. Port ranges and lists MUST use brackets:\n" +
+                                "• Single port: 80\n" +
+                                "• Port range: [8080:8090]\n" +
+                                "• Multiple ports: [80,443,8080]\n" +
+                                "• Complex specs: [80:100,!85]\n\n" +
+                                "Suricata syntax requires brackets for all port ranges and complex port specifications.")
+                            return
+                    elif determined_type == "Reference":
+                        # Reference Set - minimal validation
+                        if not definition.strip():
+                            messagebox.showerror("Error", "Reference ARN is required for reference variables.")
+                            return
+                    else:
+                        # Default to IP Set validation (determined_type == "IP Set" or other)
+                        if not self.parent.validate_cidr_list(definition):
+                            messagebox.showerror("Error", "Invalid CIDR definition. Use comma-separated CIDR blocks.")
+                            return
+            
+            # Determine if this is adding a new variable or editing existing one
+            is_new_variable = var_name is None or var_name not in self.parent.variables
+            action_type = 'variable_added' if is_new_variable else 'variable_modified'
+
+            # Resolve the effective @-variable type. On edit, preserve the
+            # variable's stored type so a Container edit never silently becomes
+            # a Reference (and vice versa); the dialog's var_type argument only
+            # reflects the table label, not the persisted type.
+            effective_type = var_type
+            if name.startswith('@') and not is_new_variable:
+                stored = self.parent.file_manager.resolve_reference_type(name, self.parent.variables)
+                effective_type = "container_association" if stored == "Container" else "reference"
+
+            # Container Association-specific handling (name/ARN validation,
+            # soft ARN-shape warning, duplicate rejection, stored type).
+            if effective_type == "container_association":
+                # Name must start with @ and otherwise be alphanumeric/underscore
+                if not re.match(r'^@[A-Za-z0-9_]+$', name):
+                    messagebox.showerror(
+                        "Error",
+                        "Container association name must start with @ and contain only "
+                        "letters, numbers, and underscores (e.g., @ECS_CONTAINERS).")
+                    return
+                # ARN is required (hard block)
+                if not definition:
+                    messagebox.showerror("Error", "Container Association ARN is required.")
+                    return
+                # Reject a name that duplicates an existing variable (new variables only)
+                if is_new_variable and name in self.parent.variables:
+                    messagebox.showerror("Error", f"A variable named {name} already exists.")
+                    return
+                # Soft-warn when the ARN doesn't look like a container association
+                # ARN, but still allow the user to proceed (AWS is authoritative).
+                if not CONTAINER_ASSOCIATION_ARN_RE.match(definition):
+                    if not messagebox.askyesno(
+                        "Warning",
+                        "The value entered does not look like a container association ARN "
+                        "(expected arn:aws:network-firewall:<region>:<account>:"
+                        "container-association/<name>).\n\n"
+                        "Save this value anyway?"):
+                        return
+                self.parent.variables[name] = {
+                    "definition": definition,
+                    "description": description,
+                    "type": "container",
+                }
+            elif name.startswith('@'):
+                # Traditional @ reference save path. Apply non-blocking R15
+                # value validation (warnings only; never hard-block; never
+                # touches file-open/load paths, only user-initiated saves).
+                store_as_container = False
+                if definition:
+                    if classify_reference_arn(definition) == "container":
+                        # R15.3: value looks like a container association ARN.
+                        # Warn and offer to treat the variable as a Container.
+                        if messagebox.askyesno(
+                            "Switch to Container?",
+                            "The value entered appears to be a container association "
+                            "ARN, not a traditional reference ARN.\n\n"
+                            "Do you want to treat this variable as a Container "
+                            "Association instead?"):
+                            # R15.4/R11: check exclusivity FIRST against the
+                            # prospective variable set (existing vars minus this
+                            # var's old entry, plus this var as a container). If
+                            # switching would create a mixed file, warn and do
+                            # NOT switch; fall back to storing as a reference.
+                            prospective = dict(self.parent.variables)
+                            prospective.pop(name, None)
+                            prospective[name] = {
+                                "definition": definition,
+                                "description": description,
+                                "type": "container",
+                            }
+                            ok, message = self.parent.file_manager._check_reference_exclusivity(prospective)
+                            if ok:
+                                store_as_container = True
+                            else:
+                                messagebox.showwarning(
+                                    "Cannot Switch to Container",
+                                    "This variable can't be switched to a Container "
+                                    "Association because the file already contains "
+                                    "traditional references. Mixing the two reference "
+                                    "types in one rule group is not allowed by AWS.\n\n"
+                                    "The value will be stored as a traditional "
+                                    "reference instead.")
+                                # store_as_container stays False -> store as reference
+                    elif not looks_like_valid_reference_arn(definition):
+                        # R15.2: value doesn't look like an ARN at all. Soft-warn
+                        # but allow the user to proceed and store as reference.
+                        if not messagebox.askyesno(
+                            "Warning",
+                            "The value entered does not look like a valid reference "
+                            "ARN (expected an arn:aws... value).\n\n"
+                            "Save this value anyway?"):
+                            return
+
+                if store_as_container:
+                    self.parent.variables[name] = {
+                        "definition": definition,
+                        "description": description,
+                        "type": "container",
+                    }
+                else:
+                    # Traditional @ reference: store an explicit type so newly
+                    # authored/edited @ variables always carry a stored type.
+                    self.parent.variables[name] = {
+                        "definition": definition,
+                        "description": description,
+                        "type": "reference",
+                    }
+            else:
+                # $ variables keep their usage-derived type (no stored type).
+                self.parent.variables[name] = {
+                    "definition": definition,
+                    "description": description
+                }
+
+            # History payload carries the stored type for @ variables (design
+            # §5 / R11.1) so the change log reflects Reference vs Container; $
+            # variables have no stored type and omit it.
+            history_details = {'variable': name, 'definition': definition, 'description': description}
+            stored_entry = self.parent.variables.get(name)
+            if isinstance(stored_entry, dict) and 'type' in stored_entry:
+                history_details['type'] = stored_entry['type']
+            self.parent.add_history_entry(action_type, history_details)
+            self.parent.refresh_variables_table()
+            self.parent.update_status_bar()  # Update status bar to reflect variable definition changes
+            self.parent._invalidate_ai_cache()
+            # Auto-update $EXTERNAL_NET if $HOME_NET was modified
+            if name == '$HOME_NET':
+                self.parent._on_home_net_changed()
+                self.parent.refresh_variables_table()
+            dialog.destroy()
+        
+        ttk.Button(button_frame, text="Save", command=save_variable).pack(side=tk.LEFT, padx=5)
+        ttk.Button(button_frame, text="Cancel", command=dialog.destroy).pack(side=tk.LEFT, padx=5)
+        
+        # Focus on name entry and position cursor appropriately
+        name_entry.focus()
+        
+        # If we pre-filled with "$" for ip_set/port_set or "@" for reference/container, position cursor after it
+        if var_type in ["ip_set", "port_set", "reference", "container_association"] and not var_name:
             name_entry.icursor(1)  # Position cursor after the "$" or "@"
     
     def refresh_history_display(self):

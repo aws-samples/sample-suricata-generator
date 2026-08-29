@@ -1013,23 +1013,36 @@ class StatefulRuleImporter:
     def parse_reference_sets(self, reference_sets: dict) -> dict:
         """Parse ReferenceSets section (IP set references)
         
-        IP set references are AWS VPC Managed Prefix Lists that are referenced by ARN.
-        These use the @ prefix (not $) and the value is the ARN itself.
+        IP set references use the @ prefix (not $) and their value is the ARN.
+        Each reference is classified by its ReferenceArn: an ARN matching the
+        container-association pattern becomes a Container variable
+        (type "container"), and any other reference ARN becomes a traditional
+        Reference variable (type "reference"). See R8.1. This is the one place
+        the application distinguishes the two @ types by inspecting the ARN
+        (elsewhere the persisted type is authoritative).
         
         Args:
             reference_sets: ReferenceSets dictionary from JSON
             
         Returns:
-            Dictionary of variables with @ prefix and ARN values
+            Dictionary of @-prefixed variables mapped to the dict form
+            ``{"definition": arn, "description": "", "type": "container"|"reference"}``
         """
+        from src.core.constants import classify_reference_arn
+        
         variables = {}
         
         # Parse IPSetReferences
         ip_set_references = reference_sets.get('IPSetReferences', {})
         for var_name, var_data in ip_set_references.items():
             reference_arn = var_data.get('ReferenceArn', '')
-            # Add @ prefix (not $) and use the ARN as the value
-            variables[f'@{var_name}'] = reference_arn
+            # Add @ prefix (not $) and store the classified dict form so the
+            # imported reference type (container vs reference) round-trips.
+            variables[f'@{var_name}'] = {
+                'definition': reference_arn,
+                'description': '',
+                'type': classify_reference_arn(reference_arn),
+            }
         
         return variables
     
@@ -1346,8 +1359,15 @@ class StatefulRuleImporter:
             # Show first 10 variables
             var_items = list(parsed_data['variables'].items())[:10]
             for var_name, var_value in var_items:
+                # @ reference/container variables are stored as dicts
+                # ({"definition", "description", "type"}); $ variables are
+                # bare strings. Display the definition in both cases.
+                if isinstance(var_value, dict):
+                    value_str = var_value.get('definition', '')
+                else:
+                    value_str = var_value
                 # Truncate long values
-                display_value = var_value[:60] + "..." if len(var_value) > 60 else var_value
+                display_value = value_str[:60] + "..." if len(value_str) > 60 else value_str
                 vars_text.insert(tk.END, f"{var_name} = {display_value}\n")
             
             if len(parsed_data['variables']) > 10:
@@ -1592,6 +1612,10 @@ class StatefulRuleImporter:
         self.parent.current_file = None
         self.parent.modified = True
         self.parent.update_status_bar()
+        # Apply the reference/container exclusivity button state so imported
+        # container files immediately grey out the conflicting Add button (R8.2).
+        if hasattr(self.parent, 'update_reference_button_states'):
+            self.parent.update_reference_button_states()
         self.parent._invalidate_ai_cache()
         self.parent.root.title(f"Suricata Rule Generator - {parsed_data['name']}")
         

@@ -1665,6 +1665,21 @@ class AdvancedEditor:
                 comment_rule.comment_text = f"# [SYNTAX ERROR] {line}"
                 edited_rules.append(comment_rule)
         
+        # Type-aware @ reference-count limit (5/30) and reference-type
+        # exclusivity, consistent with the main editor and the wxPython editor
+        # (R10.2, R10.3). Surface these as warnings in the validation report
+        # (shown in on_ok) rather than hard-blocking, matching this editor's
+        # convention. Undefined @ vars are treated like @ references here
+        # (R10.1); they will be auto-created with the file's active type in
+        # on_ok.
+        try:
+            warnings.extend(
+                self._check_reference_limits_and_exclusivity(edited_rules, undefined_vars)
+            )
+        except Exception:
+            # Never let the advisory check break parsing/apply.
+            pass
+        
         return edited_rules, errors, warnings, undefined_vars
     
     def on_ok(self):
@@ -1705,10 +1720,25 @@ class AdvancedEditor:
             if not messagebox.askyesno("Validation Results", report, parent=self.dialog):
                 return
         
-        # Auto-create undefined variables
+        # Auto-create undefined variables. For @ variables, assign the dict form
+        # with the file's active type so the stored type round-trips on
+        # sync-back (R10.4): container if the file is in container mode, else
+        # reference (default, preserves existing behavior). $ variables keep the
+        # existing bare-string/empty behavior. Existing @ dict entries in
+        # self.variables are never downgraded here — they are preserved verbatim,
+        # keeping their stored type.
+        active_mode = self._active_reference_mode(self.variables)
+        new_at_type = "container" if active_mode == "container" else "reference"
         for var in undefined_vars:
             if var not in self.variables:
-                self.variables[var] = ""
+                if var.startswith('@'):
+                    self.variables[var] = {
+                        "definition": "",
+                        "description": "",
+                        "type": new_at_type,
+                    }
+                else:
+                    self.variables[var] = ""
         
         # Set result
         self.result = parsed_rules
@@ -1725,6 +1755,145 @@ class AdvancedEditor:
         self.result = None
         self.dialog.destroy()
     
+    def _active_reference_mode(self, variables):
+        """Determine the active reference mode for the given @ variables.
+
+        Mirrors FileManager.active_reference_mode (and the wxPython editor) but
+        is local to this class. The stored type is the source of truth for @
+        variables.
+
+        Returns:
+            str: "container" if any @ var is a dict with type == "container";
+                 "reference" if any @ var exists (stored-reference/untyped);
+                 "none" if there are no @ variables at all.
+        """
+        if not variables:
+            return "none"
+
+        has_container = False
+        has_reference = False
+        for var_name, entry in variables.items():
+            if not var_name.startswith('@'):
+                continue
+            if isinstance(entry, dict) and entry.get("type") == "container":
+                has_container = True
+            else:
+                # Untyped @ variables default to reference (backward compat)
+                has_reference = True
+
+        if has_container:
+            return "container"
+        if has_reference:
+            return "reference"
+        return "none"
+
+    def _check_reference_exclusivity(self, variables):
+        """Check that @ variables do not mix container and reference types.
+
+        Mirrors FileManager._check_reference_exclusivity (and the wxPython
+        editor). AWS requires a rule group's IPSet references to be either all
+        traditional references or all container associations; mixing them is
+        rejected at deploy time.
+
+        Returns:
+            tuple[bool, str]: (True, "") when valid (no mix); (False, message)
+                when both a stored-container @ var and a stored-reference/
+                untyped @ var are present.
+        """
+        if not variables:
+            return True, ""
+
+        container_vars = []
+        reference_vars = []
+        for var_name, entry in variables.items():
+            if not var_name.startswith('@'):
+                continue
+            if isinstance(entry, dict) and entry.get("type") == "container":
+                container_vars.append(var_name)
+            else:
+                reference_vars.append(var_name)
+
+        if container_vars and reference_vars:
+            message = (
+                "Reference-type exclusivity: this file mixes container "
+                "association and traditional reference @ variables. AWS Network "
+                "Firewall requires a rule group's references to be all container "
+                "associations or all traditional references, not both. "
+                f"Containers: {', '.join(sorted(container_vars))}; "
+                f"References: {', '.join(sorted(reference_vars))}."
+            )
+            return False, message
+
+        return True, ""
+
+    def _check_reference_limits_and_exclusivity(self, parsed_rules, undefined_vars):
+        """Type-aware @ reference-count limit (R10.2) and exclusivity (R10.3).
+
+        Mirrors the wxPython editor: counts DISTINCT @ variables used in the
+        KEPT rules' src_net/dst_net fields. The active mode (container -> 30,
+        else reference/none -> 5) is derived from self.variables, augmented with
+        any undefined @ variables that will be auto-created (they inherit the
+        file's active type per on_ok).
+
+        Returns:
+            list[tuple[int, str]]: (line_num, message) warning tuples to append
+                to the validation report, consistent with the existing
+                (line_num, msg) convention. Empty when nothing to report.
+        """
+        report = []
+
+        # Build the effective variable set: existing vars plus the undefined @
+        # vars that on_ok will auto-create with the file's active type. Undefined
+        # $ vars do not affect reference-type mode/exclusivity.
+        effective_vars = dict(self.variables)
+        active_mode = self._active_reference_mode(self.variables)
+        new_at_type = "container" if active_mode == "container" else "reference"
+        for var in undefined_vars:
+            if var.startswith('@') and var not in effective_vars:
+                effective_vars[var] = {
+                    "definition": "",
+                    "description": "",
+                    "type": new_at_type,
+                }
+
+        # Count DISTINCT @ variables used across KEPT rules' network fields.
+        reference_sets = set()
+        for rule in parsed_rules:
+            if getattr(rule, 'is_comment', False) or getattr(rule, 'is_blank', False):
+                continue
+            src_net = getattr(rule, 'src_net', '') or ''
+            dst_net = getattr(rule, 'dst_net', '') or ''
+            if src_net.startswith('@'):
+                reference_sets.add(src_net)
+            if dst_net.startswith('@'):
+                reference_sets.add(dst_net)
+
+        # Determine the applicable limit from the effective variable set (which
+        # includes any @ vars used only in rules and about to be auto-created).
+        mode = self._active_reference_mode(effective_vars)
+        if mode == "container":
+            limit = 30
+            type_name = "Container Associations"
+        else:
+            limit = 5
+            type_name = "IP Set References"
+
+        total = len(reference_sets)
+        if total > limit:
+            report.append((
+                0,
+                f"{type_name} exceed AWS Network Firewall limit: {total} used, "
+                f"maximum {limit} per rule group. Remove or consolidate @ "
+                f"references before deploying."
+            ))
+
+        # Exclusivity check over the effective variable set (R10.3).
+        ok, msg = self._check_reference_exclusivity(effective_vars)
+        if not ok:
+            report.append((0, msg))
+
+        return report
+
     def show_tooltip_at_index(self, index):
         """Show tooltip at the given text index if there's an error/warning"""
         # Check if there's an error or warning tag at this position

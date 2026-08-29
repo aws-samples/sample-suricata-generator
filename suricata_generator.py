@@ -20,7 +20,7 @@ from src.core.rule_filter import RuleFilter
 from src.managers.template_manager import TemplateManager
 from src.analysis.rule_usage_analyzer import RuleUsageAnalyzer, HAS_BOTO3
 from src.aws.aws_session_manager import AWSSessionManager
-from src.core.constants import SuricataConstants
+from src.core.constants import SuricataConstants, classify_reference_arn
 from src.core.sid_generator import suggest_next_sid
 from src.core.version import get_main_version, get_analyzer_version, get_flow_tester_version, get_palo_alto_importer_version, get_mrg_version
 from src.core.security_validator import security_validator, validate_rule_input, validate_file_operation
@@ -228,6 +228,16 @@ class SuricataRuleGenerator:
                     del self.variables[var]
                 # If variable has a definition, keep it even if not currently used in rules
         
+        # Determine the file-level type to assign to any NEW @ variables detected
+        # in this pass, based on the CURRENT variables (existing @ vars) so all
+        # newly-created @ vars inherit the same type consistently:
+        #   - container if the file already contains a stored-container @ var
+        #   - reference if the file already contains any @ var (stored-reference/untyped)
+        #   - reference by default when there are no @ vars yet (preserves behavior)
+        # Container associations get no default value (R16.4) - only a type marker.
+        active_mode = self.file_manager.active_reference_mode(self.variables)
+        new_at_type = "container" if active_mode == "container" else "reference"
+
         # PHASE 3: Create new variables with sensible defaults
         # For each detected variable that doesn't exist yet, create it with appropriate defaults
         for var in detected_vars:
@@ -243,8 +253,17 @@ class SuricataRuleGenerator:
                     # Will be auto-defined in Phase 4 based on $HOME_NET
                     # This ensures $EXTERNAL_NET is always the inverse of $HOME_NET
                     pass
+                elif var.startswith('@'):
+                    # New @ reference variable - create with empty definition (no
+                    # auto-populated default, even for containers per R16.4) and
+                    # tag it with the file-level type determined above (R12.2-12.4).
+                    self.variables[var] = {
+                        "definition": "",
+                        "description": "",
+                        "type": new_at_type
+                    }
                 else:
-                    # Unknown variable - create with empty definition for user to fill in
+                    # Unknown $ variable - create with empty definition for user to fill in
                     self.variables[var] = {
                         "definition": "",
                         "description": ""
@@ -381,7 +400,7 @@ class SuricataRuleGenerator:
         
         # Add variables to table with usage-based type detection
         for var, var_data in sorted(self.variables.items()):
-            var_type = self.file_manager.get_variable_type_from_usage(var, variable_usage)
+            var_type = self.file_manager.get_variable_type_from_usage(var, variable_usage, self.variables)
             
             # Extract definition and description from new dict format (with backward compatibility)
             if isinstance(var_data, dict):
@@ -413,7 +432,129 @@ class SuricataRuleGenerator:
                     item = self.variables_tree.insert("", tk.END, values=(var, var_type, display_definition, auto_description), tags=row_tags)
             else:
                 item = self.variables_tree.insert("", tk.END, values=(var, var_type, definition, description))
-    
+
+        # Keep the Add Reference / Add Container button states in sync with the
+        # Reference_Exclusivity_Rule after every table refresh (R4).
+        self.update_reference_button_states()
+
+    def update_reference_button_states(self):
+        """Enable/disable the two @-style Add buttons per the Reference_Exclusivity_Rule.
+
+        AWS requires a rule group's IPSet references to be either all traditional
+        references or all container associations, never a mix (R4). This method
+        greys out the button that would introduce the opposite type:
+
+        - Reference @ variable(s) present -> disable "Add Container Association"
+        - Container @ variable(s) present -> disable "Add Reference"
+        - Neither present -> enable both
+
+        A disabled button gets an explanatory tooltip describing why (R4.5).
+        Called after add/edit/delete, file open, import, New File, and Advanced
+        Editor sync. Guarded so early calls (before the buttons exist) are no-ops.
+        """
+        add_reference_btn = getattr(self, 'add_reference_btn', None)
+        add_container_btn = getattr(self, 'add_container_btn', None)
+        if add_reference_btn is None or add_container_btn is None:
+            return
+
+        try:
+            mode = self.file_manager.active_reference_mode(self.variables)
+
+            reference_disabled_hint = (
+                "Disabled: this file already uses container associations. "
+                "AWS requires a rule group's references to be all container "
+                "associations or all traditional references, not a mix. Delete "
+                "the container association variables to re-enable this."
+            )
+            container_disabled_hint = (
+                "Disabled: this file already uses traditional references. "
+                "AWS requires a rule group's references to be all container "
+                "associations or all traditional references, not a mix. Delete "
+                "the reference variables to re-enable this."
+            )
+
+            if mode == "container":
+                # Containers present -> only allow adding more containers.
+                add_reference_btn.config(state="disabled")
+                add_container_btn.config(state="normal")
+                self._set_reference_button_tooltip(add_reference_btn, reference_disabled_hint)
+                self._set_reference_button_tooltip(add_container_btn, None)
+            elif mode == "reference":
+                # References present -> only allow adding more references.
+                add_reference_btn.config(state="normal")
+                add_container_btn.config(state="disabled")
+                self._set_reference_button_tooltip(add_reference_btn, None)
+                self._set_reference_button_tooltip(add_container_btn, container_disabled_hint)
+            else:
+                # Neither type present -> both enabled (e.g. New File).
+                add_reference_btn.config(state="normal")
+                add_container_btn.config(state="normal")
+                self._set_reference_button_tooltip(add_reference_btn, None)
+                self._set_reference_button_tooltip(add_container_btn, None)
+        except Exception:
+            # Never let button-state bookkeeping break a refresh.
+            pass
+
+    def _set_reference_button_tooltip(self, widget, text):
+        """Attach or remove a hover tooltip explaining why an Add button is disabled.
+
+        A lightweight tooltip consistent with the existing tkinter tooltip
+        patterns in this project. Passing text=None removes any existing
+        tooltip so an enabled button shows no hint.
+        """
+        # Remove any previously attached tooltip bindings/state.
+        existing = getattr(widget, '_ref_tooltip_state', None)
+        if existing is not None:
+            try:
+                widget.unbind('<Enter>', existing.get('enter_id'))
+                widget.unbind('<Leave>', existing.get('leave_id'))
+            except Exception:
+                pass
+            window = existing.get('window')
+            if window is not None:
+                try:
+                    if window.winfo_exists():
+                        window.destroy()
+                except Exception:
+                    pass
+            widget._ref_tooltip_state = None
+
+        if not text:
+            return
+
+        state = {'window': None, 'enter_id': None, 'leave_id': None}
+
+        def show(event):
+            if state['window'] is not None:
+                return
+            try:
+                tip = tk.Toplevel(widget)
+                tip.wm_overrideredirect(True)
+                tip.wm_geometry(f"+{event.x_root + 10}+{event.y_root + 10}")
+                label = tk.Label(
+                    tip, text=text, background="lightyellow", relief="solid",
+                    borderwidth=1, font=("TkDefaultFont", 9), justify=tk.LEFT,
+                    wraplength=320
+                )
+                label.pack()
+                state['window'] = tip
+            except Exception:
+                state['window'] = None
+
+        def hide(event=None):
+            window = state['window']
+            if window is not None:
+                try:
+                    if window.winfo_exists():
+                        window.destroy()
+                except Exception:
+                    pass
+                state['window'] = None
+
+        state['enter_id'] = widget.bind('<Enter>', show, add='+')
+        state['leave_id'] = widget.bind('<Leave>', hide, add='+')
+        widget._ref_tooltip_state = state
+
     def refresh_tags_table(self):
         """Refresh the AWS tags table display"""
         # Safety check: Only refresh if tags_tree exists (UI has been initialized)
@@ -656,7 +797,9 @@ class SuricataRuleGenerator:
             'protocols': {protocol: 0 for protocol in SuricataConstants.SUPPORTED_PROTOCOLS},
             'sid_range': {'min': None, 'max': None},
             'undefined_vars': 0,
-            'reference_sets': 0
+            'reference_sets': 0,
+            'container_associations': 0,
+            'reference_mode': 'none'
         }
         stats['protocols']['other'] = 0  # Add 'other' category for unsupported protocols
         
@@ -714,10 +857,20 @@ class SuricataRuleGenerator:
         undefined_vars = [var for var in undefined_vars if var != '$EXTERNAL_NET']
         stats['undefined_vars'] = len(undefined_vars)
         
-        # Count unique IP Set References (@variables) - count ALL defined @ variables in self.variables
-        # AWS limit (5 references per rule group) applies to defined references, not just used ones
-        reference_sets = [var for var in self.variables.keys() if var.startswith('@')]
+        # Count @ variables split by type. Container associations and
+        # traditional references have separate AWS limits (30 vs 5) and are
+        # mutually exclusive within a rule group. 'reference_sets' now means
+        # the traditional-reference count (stored-reference or untyped @);
+        # 'container_associations' counts stored-container @ variables.
+        at_vars = [var for var in self.variables.keys() if var.startswith('@')]
+        container_associations = [
+            var for var in at_vars
+            if self.file_manager.resolve_reference_type(var, self.variables) == "Container"
+        ]
+        reference_sets = [var for var in at_vars if var not in container_associations]
+        stats['container_associations'] = len(container_associations)
         stats['reference_sets'] = len(reference_sets)
+        stats['reference_mode'] = self.file_manager.active_reference_mode(self.variables)
         
         return stats
     
@@ -847,9 +1000,18 @@ class SuricataRuleGenerator:
                 self.reject_label.pack_forget()
                 self.alert_label.pack_forget()
         
-        # Update IP Set References count label (always show as requested)
-        reference_count = stats['reference_sets']
-        self.refs_label.config(text=f" | IP Set References: {reference_count}/5")
+        # Update the reference counter label (type-aware). When the file
+        # contains container associations, show the container counter against
+        # its 30 limit and hide the IP Set References indicator; otherwise show
+        # the IP Set References counter against its 5 limit (including the
+        # 0/5 empty state). The two indicators are mutually exclusive - a single
+        # label with switched text guarantees both are never shown at once (R13).
+        container_count = stats['container_associations']
+        if container_count > 0:
+            self.refs_label.config(text=f" | Container Associations: {container_count}/30")
+        else:
+            reference_count = stats['reference_sets']
+            self.refs_label.config(text=f" | IP Set References: {reference_count}/5")
         self.refs_label.pack(side=tk.LEFT, pady=2)
     
     def get_safe_config_path(self):
@@ -1436,18 +1598,21 @@ class SuricataRuleGenerator:
     
     def validate_ip_set_references(self, new_rule: Optional[SuricataRule] = None, 
                                    exclude_index: int = -1) -> bool:
-        """Validate total IP Set References don't exceed 5 (AWS limit)
+        """Validate total @ references don't exceed the AWS limit (type-aware)
         
-        AWS Network Firewall allows maximum 5 IP Set References (@ variables)
-        per rule group. This validation counts existing references and checks
-        if adding/modifying a rule would exceed this limit.
+        AWS Network Firewall allows a maximum of 5 traditional IP Set
+        References or 30 Container Association references (@ variables) per
+        rule group. The applicable limit depends on the file's active
+        reference type: Reference mode caps at 5, Container mode caps at 30.
+        Because the Reference_Exclusivity_Rule prevents both types from
+        coexisting, exactly one limit applies per call.
         
         Args:
             new_rule: Optional new rule being added/modified
             exclude_index: Index of rule being modified (to exclude from count)
             
         Returns:
-            bool: True if IP Set Reference count is valid, False otherwise
+            bool: True if the @ reference count is valid, False otherwise
         """
         # Collect all IP Set References (@ variables) from current rules
         reference_sets = set()
@@ -1476,35 +1641,57 @@ class SuricataRuleGenerator:
             if new_rule.dst_net.startswith('@'):
                 reference_sets.add(new_rule.dst_net)
         
+        # Determine the active reference type and its AWS limit. Exclusivity
+        # guarantees a single active mode, so exactly one limit applies here.
+        mode = self.file_manager.active_reference_mode(self.variables)
+        if mode == "container":
+            limit = 30
+            type_name = "Container Associations"
+        else:
+            # "reference" and "none" both use the traditional 5-reference cap
+            limit = 5
+            type_name = "IP Set References"
+        
         # Check if we exceed the limit
         total_references = len(reference_sets)
         
-        if total_references > 5:
+        if total_references > limit:
             # Build list of references for error message
             ref_list = '\n'.join([f"  • {ref}" for ref in sorted(reference_sets)])
             
+            if mode == "container":
+                remediation = (
+                    f"To fix this issue:\n"
+                    f"• Consolidate multiple container associations where possible\n"
+                    f"• Remove unused Container Association references from rules"
+                )
+            else:
+                remediation = (
+                    f"To fix this issue:\n"
+                    f"• Consolidate multiple IP sets into fewer sets\n"
+                    f"• Use $ variables instead of @ references where possible\n"
+                    f"• Remove unused IP Set References from rules"
+                )
+            
             messagebox.showerror(
                 "AWS Network Firewall Quota Violation",
-                f"IP Set References exceed AWS Network Firewall limit!\n\n"
-                f"Total IP Set References: {total_references}\n"
-                f"AWS limit: 5 per rule group\n\n"
+                f"{type_name} exceed AWS Network Firewall limit!\n\n"
+                f"Total {type_name}: {total_references}\n"
+                f"AWS limit: {limit} per rule group\n\n"
                 f"Current references:\n{ref_list}\n\n"
-                f"To fix this issue:\n"
-                f"• Consolidate multiple IP sets into fewer sets\n"
-                f"• Use $ variables instead of @ references where possible\n"
-                f"• Remove unused IP Set References from rules"
+                f"{remediation}"
             )
             return False
         
-        # Warn if at limit (5 references)
-        if total_references == 5:
+        # Warn if at limit
+        if total_references == limit:
             ref_list = '\n'.join([f"  • {ref}" for ref in sorted(reference_sets)])
             messagebox.showwarning(
-                "IP Set Reference Limit Reached",
+                f"{type_name} Limit Reached",
                 f"You have reached the AWS Network Firewall limit!\n\n"
-                f"Total IP Set References: 5 (at maximum)\n\n"
+                f"Total {type_name}: {limit} (at maximum)\n\n"
                 f"Current references:\n{ref_list}\n\n"
-                f"Cannot add more IP Set References (@) without\n"
+                f"Cannot add more {type_name} (@) without\n"
                 f"removing or consolidating existing ones."
             )
         
@@ -2909,11 +3096,29 @@ class SuricataRuleGenerator:
         
         self.refresh_table()
         self.modified = True
-        # Auto-detect variables after paste operation
+        # Auto-detect variables after paste operation. Paste preserves @/$
+        # variable references verbatim (R11.2) and auto_detect only creates
+        # entries for undefined @ vars (typed per the file's active mode); it
+        # never renames or reclassifies an existing referenced variable.
         self.auto_detect_variables()
         self.update_status_bar()
         self._invalidate_ai_cache()
-        
+
+        # Paste exclusivity (R11.3): if the resulting @ variable set mixes
+        # container and reference types, warn consistently with the other
+        # invalid-paste messageboxes above rather than silently leaving a
+        # mixed-type file. auto_detect assigns a single file-level type, so a
+        # true mix implies pre-existing mixed state; guard defensively per R11.3.
+        is_valid, exclusivity_message = self.file_manager._check_reference_exclusivity(self.variables)
+        if not is_valid:
+            messagebox.showwarning(
+                "Reference-Type Exclusivity Warning",
+                "The pasted rules resulted in a file that mixes container "
+                "association and traditional reference variables.\n\n"
+                f"{exclusivity_message}"
+            )
+            return
+
         # Show appropriate success message based on source
         rule_text = "rule" if count == 1 else "rules"
         source_text = " from external source" if source == "external" else ""
@@ -3091,15 +3296,54 @@ class SuricataRuleGenerator:
             self.show_aws_rule_group_config_dialog(test_mode)
             return
         
-        # STEP 3: Show file save dialog with appropriate defaults for Terraform/CloudFormation
+        # STEP 2.5: Prompt for the rule group name to embed in the IaC template
+        # (Terraform/CloudFormation). Mirrors the Direct Deploy name dialog
+        # (filename-based suggestion + AWS-name validation) without the region
+        # selector or Help button. Cancelling aborts the export.
+        rule_group_name = self.show_iac_rule_group_name_dialog(export_format, test_mode)
+        if not rule_group_name:
+            return  # User cancelled
+        
+        # STEP 2.6: Block on undefined variables (same check as Direct Deploy).
+        undefined_vars = self._get_undefined_variables()
+        if undefined_vars:
+            var_list = '\n'.join(f"  • {var}" for var in undefined_vars)
+            messagebox.showerror(
+                "Undefined Variables",
+                f"Cannot export with undefined variables:\n\n{var_list}\n\n"
+                "Please define these variables in the Variables tab before exporting."
+            )
+            return
+        
+        # STEP 2.7: Enforce the AWS 2 MB rules-string limit before writing the
+        # template. Applies to both Terraform and CloudFormation (this is the
+        # Network Firewall RulesString limit, independent of the
+        # CloudFormation template-size checks below).
+        within_limit, size_bytes, max_bytes = self.file_manager.check_rules_string_size(
+            self.rules, test_mode
+        )
+        if not within_limit:
+            messagebox.showerror(
+                "Rules Too Large",
+                f"The rules string is {size_bytes:,} bytes, which exceeds the AWS "
+                f"Network Firewall limit of {max_bytes:,} bytes (2 MB).\n\n"
+                f"The export has been cancelled. To reduce the size:\n"
+                f"• Remove or consolidate rules\n"
+                f"• Shorten rule messages and content\n"
+                f"• Split the rules across multiple rule groups"
+            )
+            return
+        
+        # STEP 3: Show file save dialog with appropriate defaults for Terraform/CloudFormation.
+        # Seed the default filename from the chosen rule group name.
         if export_format == 'terraform':
-            initial_filename = "network-firewall-rules_test.tf" if test_mode else "network-firewall-rules.tf"
             file_extension = ".tf"
             filetypes = [("Terraform files", "*.tf"), ("All files", "*.*")]
+            initial_filename = f"{rule_group_name}.tf"
         else:  # cloudformation
-            initial_filename = "network-firewall-rules_test.cft" if test_mode else "network-firewall-rules.cft"
             file_extension = ".cft"
             filetypes = [("CloudFormation templates", "*.cft"), ("All files", "*.*")]
+            initial_filename = f"{rule_group_name}.cft"
         
         filename = filedialog.asksaveasfilename(
             title="Export Infrastructure Template",
@@ -3109,18 +3353,47 @@ class SuricataRuleGenerator:
         )
         
         if filename:
-            # STEP 3: Generate content with test_mode parameter and tags
-            if export_format == "terraform":
-                content = self.file_manager.generate_terraform_template(
-                    self.rules, self.variables, self.tags, test_mode=test_mode
+            # STEP 2.9: Warn when container references exceed the AWS limit of 30
+            # (R7.5). Non-blocking: allow the user to proceed (AWS is authoritative).
+            # The template generators are pure (no UI), so the warning lives here.
+            if self.variables and self.file_manager.active_reference_mode(self.variables) == "container":
+                container_count = sum(
+                    1 for name, entry in self.variables.items()
+                    if name.startswith('@') and isinstance(entry, dict)
+                    and entry.get("type") == "container"
                 )
-            else:  # cloudformation
-                content = self.file_manager.generate_cloudformation_template(
-                    self.rules, self.variables, self.tags, test_mode=test_mode
-                )
-                
-                # AWS CloudFormation Quota Validation (Priority 1 & 2)
-                # Validate CloudFormation template size against AWS limits
+                if container_count > 30:
+                    proceed = messagebox.askyesno(
+                        "Container Association Limit Exceeded",
+                        f"This rule group has {container_count} container association "
+                        f"references, but AWS Network Firewall allows at most 30 per "
+                        f"rule group.\n\nAWS will reject the deployment if it exceeds "
+                        f"the limit.\n\nDo you want to continue with the export anyway?"
+                    )
+                    if not proceed:
+                        return
+
+            # STEP 3: Generate content with test_mode parameter and tags.
+            # The pure generators raise ValueError on a mixed reference/container
+            # file (Reference_Exclusivity_Rule, R7.4); surface it and abort.
+            try:
+                if export_format == "terraform":
+                    content = self.file_manager.generate_terraform_template(
+                        self.rules, self.variables, self.tags, test_mode=test_mode,
+                        rule_group_name=rule_group_name
+                    )
+                else:  # cloudformation
+                    content = self.file_manager.generate_cloudformation_template(
+                        self.rules, self.variables, self.tags, test_mode=test_mode,
+                        rule_group_name=rule_group_name
+                    )
+            except ValueError as e:
+                messagebox.showerror("Reference-Type Exclusivity Violation", str(e))
+                return
+
+            # AWS CloudFormation Quota Validation (Priority 1 & 2)
+            # Validate CloudFormation template size against AWS limits
+            if export_format == "cloudformation":
                 template_size = len(content.encode('utf-8'))
                 rule_count = len([r for r in self.rules if not getattr(r, 'is_comment', False) 
                                  and not getattr(r, 'is_blank', False)])
@@ -3630,6 +3903,185 @@ class SuricataRuleGenerator:
         
         return (True, "Valid rule group name")
     
+    def _get_undefined_variables(self) -> list:
+        """Return variables used by the current rules that lack a definition.
+
+        Shared by the Direct Deploy and IaC (Terraform/CloudFormation) export
+        paths so all three block on undefined variables identically. A
+        variable is undefined if it is used in a rule but missing from
+        ``self.variables`` or defined with an empty value. ``$EXTERNAL_NET``
+        is excluded because AWS Network Firewall defines it implicitly.
+        """
+        used_vars = self.file_manager.scan_rules_for_variables(self.rules)
+        undefined_vars = []
+        for var in used_vars:
+            if var == '$EXTERNAL_NET':
+                continue  # Auto-defined by AWS
+            if var not in self.variables:
+                undefined_vars.append(var)
+            else:
+                var_data = self.variables[var]
+                if isinstance(var_data, dict):
+                    var_def = var_data.get('definition', '')
+                else:
+                    var_def = var_data
+                if not var_def.strip():
+                    undefined_vars.append(var)
+        return undefined_vars
+    
+    def show_iac_rule_group_name_dialog(self, export_format: str, test_mode: bool) -> Optional[str]:
+        """Prompt for the rule group name to embed in a Terraform/CloudFormation export.
+
+        Mirrors the name section of the Direct Deploy dialog (filename-based
+        suggestion, live AWS-name validation, requirements box) but omits the
+        Region selector and Help button, which are only relevant to a live
+        deploy. Region is resolved at apply/deploy time by the IaC tooling, and
+        generating a template needs no AWS credentials.
+
+        Per ui-conventions.md: no transient() call, minsize() set, buttons
+        packed BOTTOM before content, resizable by default.
+
+        Args:
+            export_format: 'terraform' or 'cloudformation' (used in the title).
+            test_mode: If True, seed the name with a '-test' suffix.
+
+        Returns:
+            The chosen AWS-compliant rule group name, or None if cancelled.
+        """
+        # Suggest a name from the current filename (same logic as Direct Deploy).
+        if self.current_file:
+            base_name = os.path.basename(self.current_file)
+            suggested_name = self.sanitize_rule_group_name(base_name)
+        else:
+            suggested_name = "suricata-generator-rg"
+        if test_mode:
+            suggested_name = f"{suggested_name}-test"
+
+        format_label = "Terraform" if export_format == "terraform" else "CloudFormation"
+
+        result = [None]
+
+        dialog = tk.Toplevel(self.root)
+        dialog.title(f"{format_label} Export - Rule Group Name")
+        dialog.geometry("560x430")
+        dialog.minsize(520, 400)
+        dialog.grab_set()
+        # NOTE: no transient() call — per ui-conventions.md rule 3.
+
+        # Center dialog relative to the main window.
+        dialog.geometry("+%d+%d" % (
+            self.root.winfo_rootx() + 150,
+            self.root.winfo_rooty() + 100
+        ))
+
+        # ── Buttons packed at BOTTOM first (ui-conventions rule 5) ──
+        button_frame = ttk.Frame(dialog)
+        button_frame.pack(side=tk.BOTTOM, fill=tk.X, padx=20, pady=(0, 15))
+
+        export_button = ttk.Button(button_frame, text="Export", state="normal")
+
+        # ── Content ──
+        main_frame = ttk.Frame(dialog)
+        main_frame.pack(side=tk.TOP, fill=tk.BOTH, expand=True, padx=20, pady=20)
+
+        ttk.Label(main_frame, text=f"Export {format_label} Rule Group",
+                  font=("TkDefaultFont", 12, "bold")).pack(pady=(0, 15))
+
+        # Name input section
+        name_frame = ttk.LabelFrame(main_frame, text="Rule Group Name")
+        name_frame.pack(fill=tk.X, pady=(0, 15))
+
+        name_input_frame = ttk.Frame(name_frame)
+        name_input_frame.pack(fill=tk.X, padx=10, pady=10)
+
+        ttk.Label(name_input_frame, text="Name:").pack(side=tk.LEFT, padx=(0, 5))
+
+        validation_frame = ttk.Frame(name_input_frame)
+        validation_frame.pack(side=tk.LEFT, fill=tk.X, expand=True)
+
+        name_var = tk.StringVar(value=suggested_name)
+        name_entry = ttk.Entry(validation_frame, textvariable=name_var, width=50)
+        name_entry.pack(side=tk.LEFT, fill=tk.X, expand=True)
+
+        validation_icon = ttk.Label(validation_frame, text="\u2713", foreground="green")
+        validation_icon.pack(side=tk.LEFT, padx=(5, 0))
+
+        char_count_label = ttk.Label(name_frame, text="0/128 characters",
+                                     font=("TkDefaultFont", 8), foreground="#666666")
+        char_count_label.pack(anchor=tk.E, padx=10, pady=(0, 5))
+
+        validation_msg = ttk.Label(name_frame, text="Valid rule group name",
+                                   font=("TkDefaultFont", 8), foreground="green")
+        validation_msg.pack(anchor=tk.W, padx=10, pady=(0, 5))
+
+        # Requirements section
+        req_frame = ttk.LabelFrame(main_frame, text="AWS Requirements")
+        req_frame.pack(fill=tk.X, pady=(0, 15))
+        req_text = (
+            "\u2022 1-128 characters\n"
+            "\u2022 Valid characters: a-z, A-Z, 0-9, - (hyphen)\n"
+            "\u2022 Cannot start or end with hyphen\n"
+            "\u2022 Cannot contain consecutive hyphens (--)"
+        )
+        ttk.Label(req_frame, text=req_text, font=("TkDefaultFont", 9),
+                  justify=tk.LEFT).pack(anchor=tk.W, padx=10, pady=10)
+
+        # Summary section (no region line — not applicable to IaC export)
+        summary_frame = ttk.LabelFrame(main_frame, text="Export Summary")
+        summary_frame.pack(fill=tk.X, pady=(0, 5))
+
+        rule_count = len([r for r in self.rules
+                          if not getattr(r, 'is_comment', False)
+                          and not getattr(r, 'is_blank', False)])
+        capacity = rule_count + 100
+        mode_text = "Test Mode (alert-only)" if test_mode else "Production"
+        summary_text = (
+            f"\u2022 Rules to export: {rule_count}\n"
+            f"\u2022 Export mode: {mode_text}\n"
+            f"\u2022 Capacity required: {capacity}"
+        )
+        ttk.Label(summary_frame, text=summary_text, font=("TkDefaultFont", 9),
+                  justify=tk.LEFT).pack(anchor=tk.W, padx=10, pady=10)
+
+        # Real-time validation
+        def validate_name(*args):
+            name = name_var.get()
+            char_count_label.config(text=f"{len(name)}/128 characters")
+            is_valid, msg = self.validate_rule_group_name(name)
+            if is_valid:
+                validation_icon.config(text="\u2713", foreground="green")
+                validation_msg.config(text=msg, foreground="green")
+                name_entry.config(foreground="black")
+                export_button.config(state="normal")
+            else:
+                validation_icon.config(text="\u2717", foreground="red")
+                validation_msg.config(text=msg, foreground="red")
+                name_entry.config(foreground="red")
+                export_button.config(state="disabled")
+
+        name_var.trace_add('write', validate_name)
+        validate_name()
+
+        def on_export():
+            name = name_var.get().strip()
+            is_valid, _ = self.validate_rule_group_name(name)
+            if not is_valid:
+                return
+            result[0] = name
+            dialog.destroy()
+
+        export_button.config(command=on_export)
+        export_button.pack(side=tk.RIGHT, padx=(0, 5))
+        ttk.Button(button_frame, text="Cancel", command=dialog.destroy).pack(side=tk.RIGHT)
+
+        name_entry.focus()
+        name_entry.select_range(0, tk.END)
+        # Enter submits when valid.
+        dialog.bind('<Return>', lambda e: on_export())
+
+        dialog.wait_window()
+        return result[0]
+    
     def show_aws_rule_group_config_dialog(self, test_mode: bool):
         """Show AWS configuration dialog with pre-validation
         
@@ -3874,26 +4326,7 @@ class SuricataRuleGenerator:
                 return
             
             # Check for undefined variables (same validation as Terraform/CloudFormation export)
-            used_vars = self.file_manager.scan_rules_for_variables(self.rules)
-            undefined_vars = []
-            
-            for var in used_vars:
-                if var == '$EXTERNAL_NET':
-                    continue  # Skip $EXTERNAL_NET (auto-defined by AWS)
-                
-                if var not in self.variables:
-                    undefined_vars.append(var)
-                else:
-                    # Handle both dict and string formats
-                    var_data = self.variables[var]
-                    if isinstance(var_data, dict):
-                        var_def = var_data.get('definition', '')
-                    else:
-                        var_def = var_data
-                    
-                    if not var_def.strip():
-                        undefined_vars.append(var)
-            
+            undefined_vars = self._get_undefined_variables()
             if undefined_vars:
                 var_list = '\n'.join(f"  • {var}" for var in undefined_vars)
                 messagebox.showerror(
@@ -6516,6 +6949,13 @@ class SuricataRuleGenerator:
                     # Refresh UI
                     self.refresh_table()
                     self.auto_detect_variables()
+                    # Explicitly refresh the Reference/Container Add button
+                    # states so button greying reflects the synced @ variable
+                    # types (R10.4). auto_detect_variables() -> refresh_variables_table()
+                    # already calls this, but the explicit call keeps the R10.4
+                    # sync-back wiring self-documenting and robust to changes in
+                    # that chain; it is idempotent.
+                    self.update_reference_button_states()
                     self.modified = True
                     self.update_status_bar()
                     self._invalidate_ai_cache()
@@ -6819,7 +7259,20 @@ class SuricataRuleGenerator:
             messagebox.showinfo("Analysis Cancelled", "Rule analysis was cancelled by user.")
     
     def get_variable_definitions(self, undefined_vars=None):
-        """Get CIDR definitions for undefined variables"""
+        """Get definitions for undefined variables.
+
+        For ``$`` variables the returned value is the entered string (CIDR /
+        port definition), preserving the historical shape. For ``@`` variables
+        the user may additionally choose whether the variable is a traditional
+        Reference or a Container association; those are returned in dict form
+        ``{"definition": value, "description": "", "type": "reference"|"container"}``
+        so the stored type survives (R12.5). If the entered value matches the
+        container association ARN pattern the variable is auto-reclassified as a
+        container regardless of the selector (R12.6). Before returning, the
+        combined set of the file's existing @ variables plus the newly typed @
+        entries is checked for reference-type exclusivity; a violating set is
+        rejected with a warning and the dialog is kept open (R12.7 / R16.2).
+        """
         if undefined_vars is None:
             # Find all variables used in rules
             variables = set()
@@ -6835,18 +7288,25 @@ class SuricataRuleGenerator:
         if not undefined_vars:
             return {}  # No variables to define
         
+        # Default type for @ variables follows the file's current active mode:
+        # container mode -> Container; reference/none -> Reference (R12.2-12.4).
+        active_mode = self.file_manager.active_reference_mode(self.variables)
+        default_at_type = "Container" if active_mode == "container" else "Reference"
+
         # Create dialog for variable definitions
         dialog = tk.Toplevel(self.root)
         dialog.title("Define Network Variables")
-        dialog.geometry("500x400")
+        dialog.geometry("620x400")
         dialog.transient(self.root)
         dialog.grab_set()
         
         result = [None]
         var_entries = {}
+        # Per-@-variable type selector StringVars ("Reference" | "Container").
+        var_type_selectors = {}
         
         # Instructions
-        ttk.Label(dialog, text="Define CIDR ranges for network variables (leave blank to skip analysis):").pack(pady=10)
+        ttk.Label(dialog, text="Define values for network variables (leave blank to skip). For @ variables, choose Reference or Container.").pack(pady=10)
         
         # Scrollable frame for variables
         canvas = tk.Canvas(dialog)
@@ -6870,12 +7330,22 @@ class SuricataRuleGenerator:
             entry = ttk.Entry(frame, width=30)
             entry.pack(side=tk.LEFT, padx=(5, 0))
             var_entries[var] = entry
-            
-            # Add common defaults
-            if var in ['$HOME_NET', '$INTERNAL_NET']:
-                entry.insert(0, "192.168.0.0/16")
-            elif var in ['$EXTERNAL_NET', '$INTERNET']:
-                entry.insert(0, "!192.168.0.0/16")
+
+            if var.startswith('@'):
+                # Type selector for @ variables only ($ vars unchanged).
+                type_var = tk.StringVar(value=default_at_type)
+                type_combo = ttk.Combobox(
+                    frame, textvariable=type_var, width=10, state="readonly",
+                    values=("Reference", "Container"),
+                )
+                type_combo.pack(side=tk.LEFT, padx=(5, 0))
+                var_type_selectors[var] = type_var
+            else:
+                # Add common defaults for the well-known $ network variables.
+                if var in ['$HOME_NET', '$INTERNAL_NET']:
+                    entry.insert(0, "192.168.0.0/16")
+                elif var in ['$EXTERNAL_NET', '$INTERNET']:
+                    entry.insert(0, "!192.168.0.0/16")
         
         canvas.pack(side="left", fill="both", expand=True, padx=(10, 0), pady=10)
         scrollbar.pack(side="right", fill="y", pady=10)
@@ -6888,8 +7358,33 @@ class SuricataRuleGenerator:
             var_defs = {}
             for var, entry in var_entries.items():
                 value = entry.get().strip()
-                if value:
+                if not value:
+                    continue
+                if var.startswith('@'):
+                    # Determine chosen type, then auto-reclassify to container
+                    # when the entered value clearly is a container ARN (R12.6).
+                    chosen = var_type_selectors[var].get()
+                    var_type = "container" if chosen == "Container" else "reference"
+                    if classify_reference_arn(value) == "container":
+                        var_type = "container"
+                    var_defs[var] = {
+                        "definition": value,
+                        "description": "",
+                        "type": var_type,
+                    }
+                else:
                     var_defs[var] = value
+
+            # Exclusivity gate (R12.7): the file's existing @ variables merged
+            # with the newly typed @ entries must not mix container and
+            # reference types. Do not silently create a mixed set.
+            merged = dict(self.variables)
+            merged.update({k: v for k, v in var_defs.items() if k.startswith('@')})
+            ok, message = self.file_manager._check_reference_exclusivity(merged)
+            if not ok:
+                messagebox.showwarning("Reference Type Conflict", message, parent=dialog)
+                return  # Keep dialog open so the user can correct their choices.
+
             result[0] = var_defs
             dialog.destroy()
         

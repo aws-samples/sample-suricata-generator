@@ -1,5 +1,37 @@
 # Release Notes
 
+## Version 2.7.0 - August 29, 2026
+
+### Container Associations: A New First-Class Variable Type
+
+This release adds support for **AWS Network Firewall container associations** as a first-class rule variable type. A container association resolves the live IP addresses of your running Amazon ECS tasks and Amazon EKS pods into a dynamic IP set, referenced in rules through the same `@` notation as a Reference Set (for example, `@PROD_CONTAINERS`). This release covers *referencing* container associations that already exist in AWS.
+
+### New Features
+
+- **New "Container" variable type**: Container associations are tracked as their own type, shown as "Container" in the Rule Variables tab's Type column, distinct from the existing "Reference" type. Both use the `@` prefix, but a Container points at a `container-association/...` ARN while a Reference points at a managed prefix list or static IP set.
+
+- **"Add Container Association (@)" button**: A dedicated button on the Rule Variables tab (next to "Add Reference (@)") opens a dialog for entering a container association name and ARN. You can also classify an `@` variable as a Container when defining an auto-detected variable, and any value matching the container-association ARN pattern is auto-detected as a Container.
+
+- **Type-aware 5/30 limit**: The per-rule-group reference limit now reflects the correct AWS quota for the active type — **5** for Reference Sets and **30** for Container Associations. The status bar shows `Container Associations: X/30` when containers are present and `IP Set References: X/5` otherwise (never both).
+
+- **Exclusivity rule enforced**: AWS requires a rule group's `@` references to be all References or all Container Associations. The tool greys out the button for the opposite type while one is in use, warns on paste/Advanced Editor edits that would mix types, and blocks mixed-type export/deploy with an explanatory error — so an invalid rule group never reaches AWS.
+
+- **Export and import support**: Container associations are emitted correctly through AWS Direct Deploy, CloudFormation, and Terraform (each as a reference-set entry). Imported rule groups classify each `IPSetReferences` entry as a Container or Reference by its ARN, so round-tripping preserves meaning. Export/deploy warns when more than 30 container references are present.
+
+- **`.var` format version 2.1**: The companion `.var` file format is bumped to 2.1, storing an explicit `reference`/`container` type on each `@` variable so its classification persists across save/reopen. `$` variables are unchanged. The format is backward compatible: v1.0/v2.0 files load with `@` variables treated as References and upgrade to 2.1 on save.
+
+- **Custom rule group name for Terraform and CloudFormation exports**: The Terraform and CloudFormation export options now open a "Rule Group Name" dialog before saving, instead of hard-coding the name as `suricata-generator-rg`. As with Direct Deploy, the dialog suggests an AWS-compliant name derived from the open filename (with a `-test` suffix in test mode), validates it against the AWS naming rules in real time, and uses the chosen name to seed the default export filename. The name is written to the Terraform resource `name`/CloudFormation `RuleGroupName` and the `Name` tag. The dialog intentionally omits the Region selector and Help button, which apply only to a live deploy (region is resolved by your IaC tooling at apply time, and generating a template needs no AWS credentials).
+
+- **2 MB rules-string limit enforced on all export paths**: Terraform, CloudFormation, and AWS Direct Deploy now check the rule group’s combined rules string against the AWS Network Firewall limit of 2,000,000 bytes (2 MB) before writing or deploying. If the limit is exceeded, an error explains the size and the limit and the export/deploy is cancelled, rather than surfacing an opaque AWS API rejection later. This is measured against the exact rules string AWS receives (including any test-mode header). The existing CloudFormation *template* size checks (51.2 KB direct-API and 1 MB S3 limits) are unchanged and still apply on top of this.
+
+- **Undefined-variable check added to Terraform and CloudFormation exports**: Both IaC export options now block the export when a rule references a `$`/`@` variable that has no definition (or an empty one), listing the offending variables — matching the check Direct Deploy already performed. `$EXTERNAL_NET` is exempt because AWS defines it implicitly.
+
+### Bug Fixes
+
+- **Fixed all three export paths for `@` IP set references**: AWS Direct Deploy, CloudFormation, and Terraform all emitted reference sets in a shape AWS rejected, so exporting or deploying any rule group that used an `@` variable failed. Direct Deploy and CloudFormation placed `ReferenceSets` at the wrong level and omitted the required `IPSetReferences` wrapper (Direct Deploy failed with "Unknown parameter in input: 'ReferenceSets'"; CloudFormation would have been rejected on the correct nesting), and Terraform emitted a flat `reference_sets { key; reference_arn }` block instead of the provider's required `reference_sets { ip_set_references { key; ip_set_reference { reference_arn } } }` structure. All three now produce the correct schema. This affected **every `@` IP set reference** (both traditional Reference Sets and the new Container Associations), not only container associations.
+
+---
+
 ## Version 2.6.6 - August 26, 2026
 
 ### Load AWS Best Practices Template: Broken Link Fix

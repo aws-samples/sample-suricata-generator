@@ -1169,7 +1169,19 @@ class DomainImporter:
             self.parent.ui_manager.show_rule_editor()
             self.parent.set_default_editor_values()
             
-            messagebox.showinfo("Success", f"Successfully loaded {len(self.parent.rules)} rules from AWS best practices template.")
+            messagebox.showinfo(
+                "Success",
+                f"Successfully loaded {len(self.parent.rules)} rules from AWS best practices template.\n\n"
+                "The following template combines the most common rules from the Best "
+                "Practices page into a single, ready-to-deploy ruleset. It uses the "
+                "recommended \"Application drop established (server-directed only)\" and "
+                "\"Application alert established (server-directed only)\" default actions "
+                "from Firewall policy configuration, so no custom default block rules are "
+                "needed.  Be sure to enable those settings on the firewall policy, OR add "
+                "the default deny rules to this template.  Do not do both.\n\n"
+                "Place your environment-specific domain allowlist rules in the designated "
+                "section near the bottom."
+            )
             
         except urllib.error.HTTPError as e:
             if 'loading_dialog' in locals():

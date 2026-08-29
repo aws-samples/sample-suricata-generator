@@ -5,6 +5,9 @@ This module contains all application constants to avoid magic numbers
 and strings scattered throughout the codebase.
 """
 
+import re
+
+
 class SuricataConstants:
     """Core Suricata rule constants"""
     
@@ -174,3 +177,78 @@ BEDROCK_REGIONS = [
     "ap-northeast-1",
     "ap-southeast-1",
 ]
+
+
+# ---------------------------------------------------------------------------
+# Reference-ARN classification (shared)
+#
+# Container associations use the same @ variable notation and the same
+# AWS ReferenceSets.IPSetReferences block as traditional IP set references,
+# so the only way to tell them apart from an ARN value is its shape. These
+# patterns and helpers are the single source of truth used by import
+# classification (R8), auto-detection reclassification (R12.6), and the
+# non-blocking reference-value validation (R3, R15).
+#
+# All checks are shape-based and non-authoritative: malformed or non-ARN
+# values classify as "reference" and drive soft warnings; AWS remains the
+# authoritative validator at deploy time.
+# ---------------------------------------------------------------------------
+
+# Matches an AWS Network Firewall container-association ARN, e.g.
+#   arn:aws:network-firewall:us-east-2:123456789012:container-association/ECSAZ1
+# Case-insensitive and tolerant of surrounding whitespace (callers strip()).
+# The partition segment is matched as arn:aws* (aws, aws-us-gov, aws-cn, ...).
+CONTAINER_ASSOCIATION_ARN_RE = re.compile(
+    r'^arn:aws[\w-]*:network-firewall:[^:]*:[^:]*:container-association/.+$',
+    re.IGNORECASE,
+)
+
+# Matches any AWS ARN shape (arn:aws...:...). Used to recognize whether a
+# traditional reference value at least looks like an ARN. Anything that is
+# not a container association but matches this is treated as a reference.
+REFERENCE_ARN_RE = re.compile(
+    r'^arn:aws[\w-]*:.+$',
+    re.IGNORECASE,
+)
+
+
+def classify_reference_arn(arn):
+    """Classify an @ variable's ARN value as a container association or a reference.
+
+    Returns "container" when the value matches the container-association ARN
+    pattern, otherwise "reference". Malformed, empty, or non-ARN values
+    classify as "reference" (they never raise); these drive the soft warnings
+    in R3/R15 rather than hard-blocking. Used by import (R8), auto-detection
+    reclassification (R12.6), and value validation (R3.3, R15).
+
+    Args:
+        arn: The ARN string to classify (may be None or non-string).
+
+    Returns:
+        "container" or "reference".
+    """
+    if not isinstance(arn, str):
+        return "reference"
+    if CONTAINER_ASSOCIATION_ARN_RE.match(arn.strip()):
+        return "container"
+    return "reference"
+
+
+def looks_like_valid_reference_arn(arn):
+    """Return True when a value looks like a plausible AWS reference ARN.
+
+    Used by the non-blocking R15 traditional-reference value validation to
+    decide whether to soft-warn. Recognizes both container-association ARNs
+    and other arn:aws... shapes; returns False for empty, non-string, or
+    garbage values. This is a shape check only and is never authoritative;
+    AWS validates the ARN at deploy time.
+
+    Args:
+        arn: The value to check (may be None or non-string).
+
+    Returns:
+        True if the value resembles an AWS ARN, False otherwise.
+    """
+    if not isinstance(arn, str):
+        return False
+    return bool(REFERENCE_ARN_RE.match(arn.strip()))

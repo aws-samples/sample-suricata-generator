@@ -17,13 +17,18 @@ from typing import List, Optional
 from tkinter import ttk, messagebox
 import tkinter as tk
 from src.core.suricata_rule import SuricataRule
-from src.core.constants import SuricataConstants, SecurityConstants, ValidationMessages
+from src.core.constants import SuricataConstants, SecurityConstants, ValidationMessages, classify_reference_arn
 from src.core.security_validator import validate_file_operation, security_validator
 from src.core.version import get_main_version
 
 
 class FileManager:
     """Manages all file operations for the Suricata Rule Generator"""
+    
+    # AWS Network Firewall limits the RulesString of a stateful rule group to
+    # 2 MB (2,000,000 bytes, UTF-8). Exceeding it makes AWS reject the deploy /
+    # apply, so the export paths check this before proceeding.
+    RULES_STRING_MAX_BYTES = 2_000_000
     
     def __init__(self):
         self.version = get_main_version()
@@ -183,9 +188,13 @@ class FileManager:
             var_data: Parsed JSON from .var file
             
         Returns:
-            str: '1.0' (legacy) or '2.0' (new format with tags)
+            str: '1.0' (legacy), '2.0' (variables + tags), or '2.1'
+                 (adds a stored 'type' marker on @ variables)
         """
-        # Check for format_version key (explicit versioning)
+        # Check for format_version key (explicit versioning).
+        # Recognizes '2.1' (container-association type markers) as well as
+        # any other explicitly stated version; 2.0 and 2.1 are structurally
+        # identical on load, differing only in whether @ vars carry 'type'.
         if 'format_version' in var_data:
             return var_data['format_version']
         
@@ -199,9 +208,12 @@ class FileManager:
     def load_variables_file(self, suricata_filename: str) -> tuple[dict, dict]:
         """Load companion .var file if it exists
         
-        Supports both v1.0 (legacy) and v2.0 (new with tags) formats.
+        Supports v1.0 (legacy), v2.0, and v2.1 formats.
         Legacy format: {"$VAR": "value"} or {"$VAR": {"definition": "value", "description": "text"}}
         New format v2.0: {"format_version": "2.0", "variables": {...}, "tags": {...}}
+        New format v2.1: same as v2.0, but @ variables may carry a stored
+            "type" ("reference" | "container"). v1.0/v2.0 @ variables have no
+            "type" and default to Reference via resolve_reference_type.
         
         Returns:
             tuple: (variables_dict, tags_dict)
@@ -218,8 +230,10 @@ class FileManager:
                 # Detect format version
                 format_version = self.detect_var_format(raw_data)
                 
-                if format_version == '2.0':
-                    # New format (v2.0) - has format_version, variables, and tags keys
+                # v2.0 and v2.1 share the same structure (format_version,
+                # variables, tags); only v1.0 stores variables at the root.
+                if format_version in ('2.0', '2.1'):
+                    # New format - has format_version, variables, and tags keys
                     variables_data = raw_data.get('variables', {})
                     tags = raw_data.get('tags', {})
                 else:
@@ -238,10 +252,18 @@ class FileManager:
                         }
                     elif isinstance(value, dict):
                         # New dict format
-                        variables[name] = {
+                        entry = {
                             "definition": value.get("definition", ""),
                             "description": value.get("description", "")
                         }
+                        # Preserve the stored type marker (v2.1) so container
+                        # associations round-trip. Only @ variables carry a
+                        # type; @ variables without one (v1.0/v2.0) are left
+                        # untyped so resolve_reference_type defaults them to
+                        # Reference. $ variables never store a type.
+                        if name.startswith('@') and 'type' in value:
+                            entry['type'] = value['type']
+                        variables[name] = entry
                     else:
                         # Unknown format, treat as empty
                         variables[name] = {
@@ -264,12 +286,19 @@ class FileManager:
     def save_variables_file(self, suricata_filename: str, variables: dict, tags: dict = None):
         """Save companion .var file with variable definitions and tags
         
-        Always saves in v2.0 format with format_version, variables, and tags sections.
-        Maintains backward compatibility by supporting reading of old format.
+        Always saves in v2.1 format with format_version, variables, and tags
+        sections. Any opened v1.0/v2.0 file is therefore upgraded to v2.1 on
+        the next save. Backward compatibility is maintained by supporting
+        reading of the older formats.
+        
+        The stored "type" field on @ variables (Reference vs Container) is
+        persisted as-is so container associations round-trip. $ variables are
+        written without a "type" field, since their type is inferred from
+        usage rather than stored.
         
         Args:
             suricata_filename: Path to .suricata file
-            variables: Dict with structure {name: {"definition": str, "description": str}}
+            variables: Dict with structure {name: {"definition": str, "description": str, ["type": str]}}
             tags: Tags dict with key-value pairs (optional, defaults to empty dict)
         """
         if not variables and not tags:
@@ -283,11 +312,28 @@ class FileManager:
         if not var_filename.endswith('.var'):
             var_filename += '.var'
         
+        # Build the variables dict for serialization. @ variables keep their
+        # stored "type" so it persists; $ variables are written without a
+        # "type" field even if one somehow leaked into the in-memory entry.
+        serialized_variables = {}
+        for name, value in variables.items():
+            if isinstance(value, dict):
+                entry = {
+                    "definition": value.get("definition", ""),
+                    "description": value.get("description", "")
+                }
+                if name.startswith('@') and 'type' in value:
+                    entry['type'] = value['type']
+                serialized_variables[name] = entry
+            else:
+                # Preserve any non-dict values as-is (defensive; not expected)
+                serialized_variables[name] = value
+        
         try:
-            # Always save in v2.0 format with format_version, variables, and tags
+            # Always save in v2.1 format with format_version, variables, and tags
             var_data = {
-                'format_version': '2.0',
-                'variables': variables,
+                'format_version': '2.1',
+                'variables': serialized_variables,
                 'tags': tags
             }
             
@@ -471,8 +517,80 @@ class FileManager:
         
         return export_rules
     
+    def build_rules_string(self, rules: List, test_mode: bool = False) -> str:
+        """Build the exact ``RulesString`` that goes into the rule group.
+
+        Single source of truth for the rules-string content shared by the
+        Terraform, CloudFormation, and Direct Deploy paths: rules are prepared
+        for export (test-mode conversion), normalized to Unix (LF) line
+        endings, joined, and prefixed with the test-mode warning when
+        applicable. Measuring size against this return value guarantees the
+        2 MB check sees the same bytes AWS will.
+
+        Args:
+            rules: List of SuricataRule objects.
+            test_mode: If True, convert actions to alert and prepend the
+                test-mode warning comment.
+
+        Returns:
+            The rules string (UTF-8 text, LF line endings).
+        """
+        export_rules = self._prepare_rules_for_export(rules, test_mode)
+
+        rules_lines = []
+        for rule in export_rules:
+            if getattr(rule, 'is_blank', False):
+                rules_lines.append('')
+            elif getattr(rule, 'is_comment', False):
+                clean_comment = rule.comment_text.replace('\r\n', '\n').replace('\r', '')
+                rules_lines.append(clean_comment)
+            else:
+                clean_rule = rule.to_string().replace('\r\n', '\n').replace('\r', '')
+                rules_lines.append(clean_rule)
+
+        rules_string = '\n'.join(rules_lines)
+
+        if test_mode:
+            warning_comment = (
+                "# \u26a0\ufe0f  WARNING: This rule group was exported in TEST MODE\n"
+                "# All rule actions have been converted to 'alert' for safe testing\n"
+                "# Message prefixes show original action: [TEST-DROP], [TEST-PASS], etc.\n"
+                "#\n"
+                "# IMPORTANT PREREQUISITE:\n"
+                "# For test mode to work, your AWS Network Firewall POLICY must be\n"
+                "# configured with NO default drop action.\n"
+                "# Do NOT use: 'Drop all', 'Drop established', or 'Application Layer drop established'\n"
+                "#\n"
+                "# OPTIONAL (Recommended): Add 'Alert all' or 'Alert established' for enhanced visibility\n"
+                "#\n"
+                "# If your policy has ANY default drop action, traffic will be blocked\n"
+                "# regardless of these alert rules. See AWS documentation:\n"
+                "# https://docs.aws.amazon.com/network-firewall/latest/developerguide/suricata-rule-evaluation-order.html\n"
+                "#\n"
+                "# Rules will NOT block or drop traffic (assuming prerequisite met)\n"
+                "# Export again without test mode checkbox for production deployment\n\n"
+            )
+            rules_string = warning_comment + rules_string
+
+        return rules_string
+    
+    def check_rules_string_size(self, rules: List, test_mode: bool = False):
+        """Check the rules string against the AWS 2 MB limit.
+
+        Pure (no UI) so it can be unit-tested and reused by every export path.
+
+        Returns:
+            Tuple ``(within_limit, size_bytes, max_bytes)``. ``within_limit`` is
+            True when ``size_bytes <= max_bytes``.
+        """
+        rules_string = self.build_rules_string(rules, test_mode)
+        size_bytes = len(rules_string.encode('utf-8'))
+        return (size_bytes <= self.RULES_STRING_MAX_BYTES, size_bytes,
+                self.RULES_STRING_MAX_BYTES)
+    
     def generate_terraform_template(self, rules: List[SuricataRule], variables: dict,
-                                   tags: dict = None, test_mode: bool = False) -> str:
+                                   tags: dict = None, test_mode: bool = False,
+                                   rule_group_name: str = "suricata-generator-rg") -> str:
         """Generate Terraform template for AWS Network Firewall rule group with optional test mode
         
         Args:
@@ -480,8 +598,22 @@ class FileManager:
             variables: Variable definitions dictionary
             tags: Tags dictionary (optional, defaults to empty dict)
             test_mode: If True, convert all actions to 'alert'
+            rule_group_name: AWS rule group name to embed in the template
+                (resource name/RuleGroupName and the Name tag). Defaults to
+                "suricata-generator-rg" for backward compatibility.
+
+        Raises:
+            ValueError: If the variables mix container association and
+                traditional reference @ variables (Reference_Exclusivity_Rule).
+                This is a pure generator, so it surfaces the violation as an
+                exception; the caller (export_file) presents it to the user.
         """
-        
+        # STEP 0: Enforce reference-type exclusivity (R7.4). This is a pure
+        # generator (no UI); raise so the caller can surface the message.
+        is_valid, exclusivity_message = self._check_reference_exclusivity(variables)
+        if not is_valid:
+            raise ValueError(exclusivity_message)
+
         # STEP 1: Prepare rules for export (convert to alert-only if test mode)
         export_rules = self._prepare_rules_for_export(rules, test_mode)
         
@@ -552,7 +684,7 @@ class FileManager:
                 
                 if var_definition.strip():
                     clean_name = var_name.lstrip('$@')
-                    var_type = self.get_variable_type_from_usage(var_name, variable_usage)
+                    var_type = self.get_variable_type_from_usage(var_name, variable_usage, variables)
                     
                     if var_type == "IP Set":
                         if not has_rule_vars:
@@ -582,14 +714,23 @@ class FileManager:
                         rule_variables += f"        key = \"{clean_name}\"\n"
                         rule_variables += f"        port_set {{ definition = {port_array} }}\n"
                         rule_variables += f"      }}\n"
-                    elif var_type == "Reference":
-                        reference_sets += f"    reference_sets {{\n"
-                        reference_sets += f"      key = \"{clean_name}\"\n"
-                        reference_sets += f"      reference_arn = \"{var_definition}\"\n"
-                        reference_sets += f"    }}\n"
+                    elif var_type in ("Reference", "Container"):
+                        # Terraform AWS provider schema: a single reference_sets
+                        # block contains one ip_set_references block per variable,
+                        # each with a key and a nested ip_set_reference { reference_arn }.
+                        reference_sets += f"      ip_set_references {{\n"
+                        reference_sets += f"        key = \"{clean_name}\"\n"
+                        reference_sets += f"        ip_set_reference {{\n"
+                        reference_sets += f"          reference_arn = \"{var_definition}\"\n"
+                        reference_sets += f"        }}\n"
+                        reference_sets += f"      }}\n"
             
             if has_rule_vars:
                 rule_variables += "    }\n"
+
+            # Wrap the per-variable ip_set_references blocks in one reference_sets block.
+            if reference_sets:
+                reference_sets = "    reference_sets {\n" + reference_sets + "    }\n"
         
         # Default to empty dict if tags not provided
         if tags is None:
@@ -597,7 +738,7 @@ class FileManager:
         
         # Generate tags section (always include at minimum the Name tag)
         tags_section = '  tags = {\n'
-        tags_section += '    Name = "suricata-generator-rg"\n'
+        tags_section += f'    Name = "{rule_group_name}"\n'
         
         # Add user-defined tags automatically (no prompts)
         for key, value in sorted(tags.items()):
@@ -611,7 +752,7 @@ class FileManager:
         template = f'''resource "aws_networkfirewall_rule_group" "suricata_rule_group" {{
   capacity    = {capacity}
   description = "This rule group was created by the Suricata Generator version {self.version}"
-  name        = "suricata-generator-rg"
+  name        = "{rule_group_name}"
   type        = "STATEFUL"
   
   rule_group {{
@@ -630,7 +771,8 @@ EOF
         return template
     
     def generate_cloudformation_template(self, rules: List[SuricataRule], variables: dict,
-                                        tags: dict = None, test_mode: bool = False) -> str:
+                                        tags: dict = None, test_mode: bool = False,
+                                        rule_group_name: str = "suricata-generator-rg") -> str:
         """Generate CloudFormation JSON template for AWS Network Firewall rule group with optional test mode
         
         Args:
@@ -638,8 +780,22 @@ EOF
             variables: Variable definitions dictionary
             tags: Tags dictionary (optional, defaults to empty dict)
             test_mode: If True, convert all actions to 'alert'
+            rule_group_name: AWS rule group name to embed in the template
+                (resource name/RuleGroupName and the Name tag). Defaults to
+                "suricata-generator-rg" for backward compatibility.
+
+        Raises:
+            ValueError: If the variables mix container association and
+                traditional reference @ variables (Reference_Exclusivity_Rule).
+                This is a pure generator, so it surfaces the violation as an
+                exception; the caller (export_file) presents it to the user.
         """
-        
+        # STEP 0: Enforce reference-type exclusivity (R7.4). This is a pure
+        # generator (no UI); raise so the caller can surface the message.
+        is_valid, exclusivity_message = self._check_reference_exclusivity(variables)
+        if not is_valid:
+            raise ValueError(exclusivity_message)
+
         # STEP 1: Prepare rules for export (convert to alert-only if test mode)
         export_rules = self._prepare_rules_for_export(rules, test_mode)
         
@@ -708,7 +864,7 @@ EOF
                     "Type": "AWS::NetworkFirewall::RuleGroup",
                     "Properties": {
                         "Capacity": capacity,
-                        "RuleGroupName": "suricata-generator-rg",
+                        "RuleGroupName": rule_group_name,
                         "Type": "STATEFUL",
                         "Description": description,
                         "RuleGroup": {
@@ -722,7 +878,7 @@ EOF
                         "Tags": [
                             {
                                 "Key": "Name",
-                                "Value": "suricata-generator-rg"
+                                "Value": rule_group_name
                             }
                         ]
                     }
@@ -744,7 +900,7 @@ EOF
                 
                 if var_definition.strip():
                     clean_name = var_name.lstrip('$@')
-                    var_type = self.get_variable_type_from_usage(var_name, variable_usage)
+                    var_type = self.get_variable_type_from_usage(var_name, variable_usage, variables)
                     
                     if var_type == "IP Set":
                         # Strip brackets if present before splitting
@@ -764,14 +920,17 @@ EOF
                         if "PortSets" not in rule_variables:
                             rule_variables["PortSets"] = {}
                         rule_variables["PortSets"][clean_name] = {"Definition": ports}
-                    elif var_type == "Reference":
+                    elif var_type in ("Reference", "Container"):
                         reference_sets[clean_name] = {"ReferenceArn": var_definition}
             
             if rule_variables:
                 template["Resources"]["SuricataRuleGroup"]["Properties"]["RuleGroup"]["RuleVariables"] = rule_variables
             
+            # ReferenceSets is a member of the RuleGroup object (not Properties) and
+            # its map must be wrapped in an IPSetReferences key, per the Network
+            # Firewall CloudFormation schema.
             if reference_sets:
-                template["Resources"]["SuricataRuleGroup"]["Properties"]["ReferenceSets"] = reference_sets
+                template["Resources"]["SuricataRuleGroup"]["Properties"]["RuleGroup"]["ReferenceSets"] = {"IPSetReferences": reference_sets}
         
         # Default to empty dict if tags not provided
         if tags is None:
@@ -781,7 +940,7 @@ EOF
         tags_array = [
             {
                 "Key": "Name",
-                "Value": "suricata-generator-rg"
+                "Value": rule_group_name
             }
         ]
         
@@ -957,19 +1116,47 @@ EOF
         
         return usage
     
-    def get_variable_type_from_usage(self, var_name: str, variable_usage: dict) -> str:
+    def resolve_reference_type(self, var_name: str, variables: dict) -> str:
+        """Resolve the type of an @ variable from its stored type marker.
+
+        For an @ variable, return "Container" when its stored ``type`` is
+        ``"container"`` and "Reference" otherwise. The "Reference" default
+        covers untyped @ variables (v1.0/v2.0 files and any entry lacking a
+        stored type), preserving backward-compatible behavior.
+
+        Args:
+            var_name: The @ variable name (e.g., '@ECS_CONTAINERS').
+            variables: The in-memory variables dict.
+
+        Returns:
+            str: "Container" or "Reference".
+        """
+        entry = variables.get(var_name) if variables else None
+        if isinstance(entry, dict) and entry.get("type") == "container":
+            return "Container"
+        return "Reference"
+
+    def get_variable_type_from_usage(self, var_name: str, variable_usage: dict, variables: dict = None) -> str:
         """Determine variable type based on actual usage in rules
         
         Args:
             var_name: The variable name (e.g., '$src', '@HOME_REF')
             variable_usage: Usage analysis from analyze_variable_usage()
+            variables: Optional in-memory variables dict. When provided, @
+                variables resolve to "Container" or "Reference" via their
+                stored type (resolve_reference_type). When omitted, @
+                variables preserve the legacy "Reference" behavior.
             
         Returns:
-            str: "IP Set", "Port Set", or "Reference"
+            str: "IP Set", "Port Set", "Reference", or "Container"
         """
-        # For @ prefix, ALWAYS treat as Reference Set (AWS Network Firewall requirement)
-        # @ variables should only be used in network fields, never in port fields
+        # For @ prefix, resolve the stored type when variables are supplied;
+        # otherwise preserve the legacy "Reference" default (AWS Network
+        # Firewall requirement). @ variables are only used in network fields,
+        # never in port fields.
         if var_name.startswith('@'):
+            if variables is not None:
+                return self.resolve_reference_type(var_name, variables)
             return "Reference"
         
         # For non-$ variables, treat as Reference
@@ -1004,6 +1191,89 @@ EOF
             return "Port Set"
         else:
             return "Reference"
+
+    def active_reference_mode(self, variables: dict) -> str:
+        """Determine the active reference mode for a file's @ variables.
+
+        Returns "container" when any @ variable is a stored container
+        association; otherwise "reference" when at least one @ variable is
+        present (stored-reference or untyped); otherwise "none" when the file
+        has no @ variables at all.
+
+        Because the Reference_Exclusivity_Rule prevents both stored types from
+        coexisting in a valid file, this yields exactly one active mode. The
+        container check takes precedence so a mixed (invalid) file still
+        surfaces as container mode until the export/deploy gate rejects it.
+
+        Args:
+            variables: The in-memory variables dict.
+
+        Returns:
+            str: "container", "reference", or "none".
+        """
+        if not variables:
+            return "none"
+
+        has_container = False
+        has_reference = False
+        for var_name, entry in variables.items():
+            if not var_name.startswith('@'):
+                continue
+            if isinstance(entry, dict) and entry.get("type") == "container":
+                has_container = True
+            else:
+                # Untyped @ variables default to reference (backward compat)
+                has_reference = True
+
+        if has_container:
+            return "container"
+        if has_reference:
+            return "reference"
+        return "none"
+
+    def _check_reference_exclusivity(self, variables: dict) -> tuple[bool, str]:
+        """Check that @ variables do not mix container and reference types.
+
+        AWS requires a rule group's IPSet references to be either all
+        traditional references or all container associations; mixing them
+        causes an InvalidRequestException at deploy time. This is the shared
+        gate used before export/deploy.
+
+        Args:
+            variables: The in-memory variables dict.
+
+        Returns:
+            tuple[bool, str]: (True, "") when the file is valid (no mix);
+                (False, message) when both a stored-container @ variable and a
+                stored-reference/untyped @ variable are present.
+        """
+        if not variables:
+            return True, ""
+
+        container_vars = []
+        reference_vars = []
+        for var_name, entry in variables.items():
+            if not var_name.startswith('@'):
+                continue
+            if isinstance(entry, dict) and entry.get("type") == "container":
+                container_vars.append(var_name)
+            else:
+                # Untyped @ variables default to reference (backward compat)
+                reference_vars.append(var_name)
+
+        if container_vars and reference_vars:
+            message = (
+                "Reference-type exclusivity violation: this file mixes container "
+                "association and traditional reference variables. AWS Network "
+                "Firewall requires a rule group's references to be either all "
+                "container associations or all traditional references, not both.\n\n"
+                f"Container associations: {', '.join(sorted(container_vars))}\n"
+                f"Traditional references: {', '.join(sorted(reference_vars))}\n\n"
+                "Remove all variables of one type before proceeding."
+            )
+            return False, message
+
+        return True, ""
     
     def detect_header(self, rules: List[SuricataRule]) -> tuple[bool, Optional[str]]:
         """Detect if file has our header format and extract creation timestamp"""
@@ -1245,7 +1515,50 @@ EOF
             from botocore.exceptions import ClientError, NoCredentialsError
         except ImportError:
             raise ImportError("boto3 is required for AWS deployment")
-        
+
+        # STEP 0a: Enforce reference-type exclusivity (R7.4) BEFORE any dialog
+        # or AWS call. On a mixed file, show the error and abort.
+        is_valid, exclusivity_message = self._check_reference_exclusivity(variables)
+        if not is_valid:
+            messagebox.showerror("Reference-Type Exclusivity Violation", exclusivity_message)
+            return False
+
+        # STEP 0b: Warn when container references exceed the AWS limit of 30
+        # (R7.5). Non-blocking: allow the user to proceed (AWS is authoritative).
+        if variables and self.active_reference_mode(variables) == "container":
+            container_count = sum(
+                1 for name, entry in variables.items()
+                if name.startswith('@') and isinstance(entry, dict)
+                and entry.get("type") == "container"
+            )
+            if container_count > 30:
+                proceed = messagebox.askyesno(
+                    "Container Association Limit Exceeded",
+                    f"This rule group has {container_count} container association "
+                    f"references, but AWS Network Firewall allows at most 30 per "
+                    f"rule group.\n\nAWS will reject the deployment if it exceeds "
+                    f"the limit.\n\nDo you want to continue anyway?"
+                )
+                if not proceed:
+                    return False
+
+        # STEP 0c: Enforce the AWS 2 MB rules-string limit before deploying.
+        # AWS rejects a rule group whose RulesString exceeds 2,000,000 bytes,
+        # so fail fast with a clear message rather than surfacing an opaque
+        # API error.
+        within_limit, size_bytes, max_bytes = self.check_rules_string_size(rules, test_mode)
+        if not within_limit:
+            messagebox.showerror(
+                "Rules Too Large",
+                f"The rules string is {size_bytes:,} bytes, which exceeds the AWS "
+                f"Network Firewall limit of {max_bytes:,} bytes (2 MB).\n\n"
+                f"The deployment has been cancelled. To reduce the size:\n"
+                f"• Remove or consolidate rules\n"
+                f"• Shorten rule messages and content\n"
+                f"• Split the rules across multiple rule groups"
+            )
+            return False
+
         # Create progress dialog
         progress_dialog = tk.Toplevel(parent_app.root)
         progress_dialog.title("Deploying to AWS")
@@ -1312,7 +1625,13 @@ EOF
                 rule_group['RuleVariables'] = rule_variables
             
             # STEP 6: Build ReferenceSets
+            # ReferenceSets is a member of the RuleGroup object (alongside RulesSource,
+            # RuleVariables, StatefulRuleOptions) and its map must be wrapped in an
+            # IPSetReferences key per the Network Firewall API. It is NOT a top-level
+            # create_rule_group/update_rule_group parameter.
             reference_sets = self._build_reference_sets(variables, export_rules)
+            if reference_sets:
+                rule_group['ReferenceSets'] = {'IPSetReferences': reference_sets}
             
             # STEP 7: Create boto3 client with specified region (via aws_session manager)
             client = parent_app.aws_session.get_client('network-firewall', region_name=region)
@@ -1375,10 +1694,8 @@ EOF
                     'Type': 'STATEFUL'
                 }
                 
-                # Only add ReferenceSets if there are actual references (AWS requirement)
-                if reference_sets:
-                    api_params['ReferenceSets'] = reference_sets
-                
+                # ReferenceSets is nested inside RuleGroup (see STEP 6); it is not a
+                # top-level update_rule_group parameter.
                 response = client.update_rule_group(**api_params)
             else:
                 # Create new rule group with tags
@@ -1391,10 +1708,8 @@ EOF
                     'Tags': aws_tags
                 }
                 
-                # Only add ReferenceSets if there are actual references (AWS requirement)
-                if reference_sets:
-                    api_params['ReferenceSets'] = reference_sets
-                
+                # ReferenceSets is nested inside RuleGroup (see STEP 6); it is not a
+                # top-level create_rule_group parameter.
                 response = client.create_rule_group(**api_params)
             
             # Close progress dialog
@@ -1571,9 +1886,9 @@ EOF
                 continue
             
             clean_name = var_name.lstrip('$@')
-            var_type = self.get_variable_type_from_usage(var_name, variable_usage)
+            var_type = self.get_variable_type_from_usage(var_name, variable_usage, variables)
             
-            if var_type == "Reference":
+            if var_type in ("Reference", "Container"):
                 reference_sets[clean_name] = {"ReferenceArn": definition}
         
         return reference_sets

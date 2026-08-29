@@ -60,6 +60,27 @@ except ImportError:
     HAS_RULE_ANALYZER = False
 
 
+# Import the shared ARN classifier in its OWN block so a failure here can never
+# strand the essential imports above. Container association @ variables carry a
+# stored type == "container"; this classifier is only a fallback used if a var
+# somehow lacks a stored type (the editor prefers the stored type). Falls back
+# to a conservative local matcher mirroring src/core/constants.py.
+try:
+    from src.core.constants import classify_reference_arn as _classify_reference_arn
+except ImportError:
+    _CONTAINER_ASSOCIATION_ARN_RE = re.compile(
+        r'^arn:aws[\w-]*:network-firewall:[^:]*:[^:]*:container-association/.+$',
+        re.IGNORECASE,
+    )
+
+    def _classify_reference_arn(arn):
+        if not isinstance(arn, str):
+            return "reference"
+        if _CONTAINER_ASSOCIATION_ARN_RE.match(arn.strip()):
+            return "container"
+        return "reference"
+
+
 # Import the shared SID generator in its OWN block so a failure here can never
 # strand the essential imports above. Falls back to a local implementation that
 # mirrors src/core/sid_generator.py's date-based scheme (YYMMDDNNNN).
@@ -3719,10 +3740,25 @@ Code Folding:
                     # open (no EndModal) — this is the one valid non-exit path.
                     return
             
-            # Auto-create undefined variables
+            # Auto-create undefined variables. For @ variables, assign the dict
+            # form with the file's active type so the stored type round-trips on
+            # sync-back (R10.4): container if the file is in container mode, else
+            # reference (default, preserves existing behavior). $ variables keep
+            # the existing bare-string/empty behavior. Existing @ dict entries in
+            # self.variables are never downgraded here — they are written to the
+            # output verbatim, preserving their stored type.
+            active_mode = self._active_reference_mode(self.variables)
+            new_at_type = "container" if active_mode == "container" else "reference"
             for var in undefined_vars:
                 if var not in self.variables:
-                    self.variables[var] = ""
+                    if var.startswith('@'):
+                        self.variables[var] = {
+                            "definition": "",
+                            "description": "",
+                            "type": new_at_type,
+                        }
+                    else:
+                        self.variables[var] = ""
             
             # Get result data with validated rules
             result_data = {
@@ -3768,6 +3804,145 @@ Code Folding:
         
         self.EndModal(wx.ID_CANCEL)
     
+    def _active_reference_mode(self, variables):
+        """Determine the active reference mode for the given @ variables.
+
+        Mirrors FileManager.active_reference_mode but is local to this
+        subprocess to avoid pulling in FileManager (which imports tkinter).
+        The stored type is the source of truth for @ variables.
+
+        Returns:
+            str: "container" if any @ var is a dict with type == "container";
+                 "reference" if any @ var exists (stored-reference/untyped);
+                 "none" if there are no @ variables at all.
+        """
+        if not variables:
+            return "none"
+
+        has_container = False
+        has_reference = False
+        for var_name, entry in variables.items():
+            if not var_name.startswith('@'):
+                continue
+            if isinstance(entry, dict) and entry.get("type") == "container":
+                has_container = True
+            else:
+                # Untyped @ variables default to reference (backward compat)
+                has_reference = True
+
+        if has_container:
+            return "container"
+        if has_reference:
+            return "reference"
+        return "none"
+
+    def _check_reference_exclusivity(self, variables):
+        """Check that @ variables do not mix container and reference types.
+
+        Mirrors FileManager._check_reference_exclusivity but is local to this
+        subprocess to avoid a tkinter dependency. AWS requires a rule group's
+        IPSet references to be either all traditional references or all
+        container associations; mixing them is rejected at deploy time.
+
+        Returns:
+            tuple[bool, str]: (True, "") when valid (no mix); (False, message)
+                when both a stored-container @ var and a stored-reference/
+                untyped @ var are present.
+        """
+        if not variables:
+            return True, ""
+
+        container_vars = []
+        reference_vars = []
+        for var_name, entry in variables.items():
+            if not var_name.startswith('@'):
+                continue
+            if isinstance(entry, dict) and entry.get("type") == "container":
+                container_vars.append(var_name)
+            else:
+                reference_vars.append(var_name)
+
+        if container_vars and reference_vars:
+            message = (
+                "Reference-type exclusivity: this file mixes container "
+                "association and traditional reference @ variables. AWS Network "
+                "Firewall requires a rule group's references to be all container "
+                "associations or all traditional references, not both. "
+                f"Containers: {', '.join(sorted(container_vars))}; "
+                f"References: {', '.join(sorted(reference_vars))}."
+            )
+            return False, message
+
+        return True, ""
+
+    def _check_reference_limits_and_exclusivity(self, parsed_rules, undefined_vars):
+        """Type-aware @ reference-count limit (R10.2) and exclusivity (R10.3).
+
+        Mirrors the main editor's validate_ip_set_references counting: counts
+        DISTINCT @ variables used in the KEPT rules' src_net/dst_net fields.
+        The active mode (container -> 30, else reference/none -> 5) is derived
+        from self.variables, augmented with any undefined @ variables that will
+        be auto-created (they inherit the file's active type per on_ok).
+
+        Returns:
+            list[tuple[int, str]]: (line_num, message) warning tuples to append
+                to the validation report, consistent with the existing
+                (line_num, msg) convention. Empty when nothing to report.
+        """
+        report = []
+
+        # Build the effective variable set: existing vars plus the undefined @
+        # vars that on_ok will auto-create with the file's active type. Undefined
+        # $ vars do not affect reference-type mode/exclusivity.
+        effective_vars = dict(self.variables)
+        active_mode = self._active_reference_mode(self.variables)
+        new_at_type = "container" if active_mode == "container" else "reference"
+        for var in undefined_vars:
+            if var.startswith('@') and var not in effective_vars:
+                effective_vars[var] = {
+                    "definition": "",
+                    "description": "",
+                    "type": new_at_type,
+                }
+
+        # Count DISTINCT @ variables used across KEPT rules' network fields.
+        reference_sets = set()
+        for rule in parsed_rules:
+            if getattr(rule, 'is_comment', False) or getattr(rule, 'is_blank', False):
+                continue
+            src_net = getattr(rule, 'src_net', '') or ''
+            dst_net = getattr(rule, 'dst_net', '') or ''
+            if src_net.startswith('@'):
+                reference_sets.add(src_net)
+            if dst_net.startswith('@'):
+                reference_sets.add(dst_net)
+
+        # Determine the applicable limit from the effective variable set (which
+        # includes any @ vars used only in rules and about to be auto-created).
+        mode = self._active_reference_mode(effective_vars)
+        if mode == "container":
+            limit = 30
+            type_name = "Container Associations"
+        else:
+            limit = 5
+            type_name = "IP Set References"
+
+        total = len(reference_sets)
+        if total > limit:
+            report.append((
+                0,
+                f"{type_name} exceed AWS Network Firewall limit: {total} used, "
+                f"maximum {limit} per rule group. Remove or consolidate @ "
+                f"references before deploying."
+            ))
+
+        # Exclusivity check over the effective variable set (R10.3).
+        ok, msg = self._check_reference_exclusivity(effective_vars)
+        if not ok:
+            report.append((0, msg))
+
+        return report
+
     def validate_and_parse_rules(self):
         """Validate rules and parse text back to rule objects (mimics tkinter version)
         
@@ -3872,6 +4047,20 @@ Code Folding:
                 comment_rule.is_comment = True
                 comment_rule.comment_text = f"# [SYNTAX ERROR] {line}"
                 edited_rules.append(comment_rule)
+        
+        # Type-aware @ reference-count limit (5/30) and reference-type
+        # exclusivity, consistent with the main editor (R10.2, R10.3). Surface
+        # these as warnings in the validation report (the report is shown in
+        # on_ok) rather than hard-blocking, matching this editor's convention.
+        # Undefined @ vars are treated like @ references here (R10.1); they will
+        # be auto-created with the file's active type in on_ok.
+        try:
+            warnings.extend(
+                self._check_reference_limits_and_exclusivity(edited_rules, undefined_vars)
+            )
+        except Exception:
+            # Never let the advisory check break parsing/apply.
+            pass
         
         return edited_rules, errors, warnings, undefined_vars
     

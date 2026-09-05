@@ -7,6 +7,92 @@ from src.core.constants import SuricataConstants, classify_reference_arn, looks_
 from src.core.suricata_rule import SuricataRule
 from datetime import datetime, timedelta
 
+
+# ---------------------------------------------------------------------------
+# AWS Setup guide — IAM policy (single source of truth)
+#
+# The Help > AWS Setup guide's "IAM Permissions" tab displays this policy and
+# offers a "Copy to Clipboard" button. Both MUST use the same string so the
+# copied policy always matches what is shown; keeping one constant means a
+# permission change is made in exactly one place. Covers every AWS feature in
+# the application, including the Container Association Manager.
+# ---------------------------------------------------------------------------
+AWS_SETUP_IAM_POLICY_JSON = '''{
+  "Version": "2012-10-17",
+  "Statement": [{
+    "Sid": "SuricataGeneratorAWSPermissions",
+    "Effect": "Allow",
+    "Action": [
+      "logs:DescribeLogGroups",
+      "logs:StartQuery",
+      "logs:GetQueryResults",
+      "logs:StopQuery",
+      "network-firewall:ListRuleGroups",
+      "network-firewall:DescribeRuleGroup",
+      "network-firewall:CreateRuleGroup",
+      "network-firewall:UpdateRuleGroup",
+      "network-firewall:ListContainerAssociations",
+      "network-firewall:DescribeContainerAssociation",
+      "network-firewall:CreateContainerAssociation",
+      "network-firewall:UpdateContainerAssociation",
+      "network-firewall:DeleteContainerAssociation",
+      "network-firewall:TagResource",
+      "network-firewall:UntagResource",
+      "network-firewall:ListTagsForResource",
+      "ecs:ListClusters",
+      "ecs:DescribeClusters",
+      "ecs:ListContainerInstances",
+      "ecs:DescribeContainerInstances",
+      "eks:ListClusters",
+      "eks:DescribeCluster",
+      "iam:CreateServiceLinkedRole",
+      "ram:CreateResourceShare",
+      "ram:AssociateResourceShare",
+      "ram:DisassociateResourceShare",
+      "ram:GetResourceShareAssociations",
+      "ram:ListResources",
+      "bedrock:InvokeModel",
+      "bedrock:ListFoundationModels",
+      "bedrock:ListInferenceProfiles"
+    ],
+    "Resource": "*"
+  }]
+}'''
+
+# Human-readable breakdown for the same tab, grouped by feature. Sourced from
+# one constant alongside the policy JSON.
+AWS_SETUP_PERMISSION_BREAKDOWN = (
+    "CloudWatch Logs (Rule Usage Analyzer & Traffic Analysis):\n"
+    "• logs:DescribeLogGroups - List available log groups\n"
+    "• logs:StartQuery - Initiates CloudWatch Logs Insights queries\n"
+    "• logs:GetQueryResults - Retrieves query results\n"
+    "• logs:StopQuery - Cancels running queries\n\n"
+    "Network Firewall (Rule Group Import & Managed Rule Analysis):\n"
+    "• network-firewall:ListRuleGroups - Browse account and managed rule groups\n"
+    "• network-firewall:DescribeRuleGroup - View rule group details and rules\n\n"
+    "Network Firewall (Rule Group Export):\n"
+    "• network-firewall:CreateRuleGroup - Deploy new rule groups\n"
+    "• network-firewall:UpdateRuleGroup - Overwrite existing rule groups\n\n"
+    "Network Firewall (Container Association Manager):\n"
+    "• network-firewall:List/Describe ContainerAssociation - list & inspect\n"
+    "• network-firewall:Create/Update/Delete ContainerAssociation - manage\n"
+    "• network-firewall:TagResource/UntagResource/ListTagsForResource - tags\n\n"
+    "Cluster & attribute discovery (Container Association Manager):\n"
+    "• ecs:ListClusters/DescribeClusters/ListContainerInstances/DescribeContainerInstances\n"
+    "• eks:ListClusters/DescribeCluster\n\n"
+    "Service-linked role (first use):\n"
+    "• iam:CreateServiceLinkedRole - created automatically on first CreateContainerAssociation\n\n"
+    "Cross-account sharing via AWS RAM (Container Association Manager):\n"
+    "• ram:CreateResourceShare/AssociateResourceShare/DisassociateResourceShare - share/unshare\n"
+    "• ram:GetResourceShareAssociations/ListResources - show \u201cShared with\u201d\n\n"
+    "Amazon Bedrock (AI Rule Assistant):\n"
+    "• bedrock:InvokeModel - Send prompts to Claude for rule generation\n"
+    "• bedrock:ListFoundationModels - Discover available models\n"
+    "• bedrock:ListInferenceProfiles - List inference profiles for model selection\n"
+    "• Note: Model access must also be enabled in the Bedrock console"
+)
+
+
 class UIManager:
     """Manages all UI components and setup for the Suricata Rule Generator"""
     
@@ -123,6 +209,17 @@ class UIManager:
                                   command=lambda: None, state='disabled')
         tools_menu.add_command(label="Test Rules with PCAP",
                               command=self.parent.show_pcap_tester)
+
+        # Container Association Manager (requires boto3)
+        tools_menu.add_separator()
+        from src.aws.container_association_manager import HAS_BOTO3 as HAS_BOTO3_CAM
+        if HAS_BOTO3_CAM:
+            tools_menu.add_command(label="Manage Container Associations\u2026",
+                                  command=self.parent.show_container_association_manager)
+        else:
+            tools_menu.add_command(label="Manage Container Associations\u2026 (requires boto3)",
+                                  command=self.parent.show_container_association_manager,
+                                  state='disabled')
         
         # Managed Rules menu - MRG integration (positioned after Tools, before Help)
         # Use try/except to detect MRG availability without circular imports
@@ -168,11 +265,13 @@ class UIManager:
         help_menu.add_command(label="About SIG Types", command=self.show_sigtype_help)
         help_menu.add_separator()
         
-        # Phase 11: Add AWS Setup guide (covers both Rule Usage Analyzer AND Rule Group Import)
-        from src.analysis.rule_usage_analyzer import HAS_BOTO3
-        if HAS_BOTO3:
-            help_menu.add_command(label="AWS Setup", command=self.show_aws_setup_help)
-            help_menu.add_separator()
+        # Phase 11: Add AWS Setup guide (covers both Rule Usage Analyzer AND Rule Group Import).
+        # Always available, even without boto3: the guide's first tab is what tells
+        # the user how to install boto3, so gating it on HAS_BOTO3 hid the very
+        # instructions needed to satisfy the prerequisite. The dialog is pure
+        # tkinter and does not import or call boto3.
+        help_menu.add_command(label="AWS Setup", command=self.show_aws_setup_help)
+        help_menu.add_separator()
         
         help_menu.add_command(label="About", command=self.parent.show_about)
         
@@ -13850,7 +13949,6 @@ Would you like to run a complete analysis?"""
         help_dialog = tk.Toplevel(self.parent.root)
         help_dialog.title("AWS Setup - Help Guide")
         help_dialog.geometry("750x650")
-        help_dialog.transient(self.parent.root)
         help_dialog.grab_set()
         
         # Center dialog
@@ -14033,31 +14131,10 @@ Would you like to run a complete analysis?"""
         ttk.Label(iam_content, text="Required IAM Policy:",
                  font=("TkDefaultFont", 11, "bold")).pack(anchor=tk.W, padx=15, pady=(15, 10))
         
-        # Copy button
+        # Copy button (uses the single-source policy constant)
         def copy_iam_policy():
-            policy = '''{
-  "Version": "2012-10-17",
-  "Statement": [{
-    "Sid": "SuricataGeneratorAWSPermissions",
-    "Effect": "Allow",
-    "Action": [
-      "logs:DescribeLogGroups",
-      "logs:StartQuery",
-      "logs:GetQueryResults",
-      "logs:StopQuery",
-      "network-firewall:ListRuleGroups",
-      "network-firewall:DescribeRuleGroup",
-      "network-firewall:CreateRuleGroup",
-      "network-firewall:UpdateRuleGroup",
-      "bedrock:InvokeModel",
-      "bedrock:ListFoundationModels",
-      "bedrock:ListInferenceProfiles"
-    ],
-    "Resource": "*"
-  }]
-}'''
             self.parent.root.clipboard_clear()
-            self.parent.root.clipboard_append(policy)
+            self.parent.root.clipboard_append(AWS_SETUP_IAM_POLICY_JSON)
             messagebox.showinfo("Copied", "IAM policy copied to clipboard!")
         
         ttk.Button(iam_content, text="Copy Policy to Clipboard", 
@@ -14067,57 +14144,19 @@ Would you like to run a complete analysis?"""
         policy_frame = ttk.Frame(iam_content)
         policy_frame.pack(fill=tk.X, padx=15, pady=10)
         
-        policy_text = tk.Text(policy_frame, height=14, wrap=tk.WORD, font=("Consolas", 9),
+        policy_text = tk.Text(policy_frame, height=18, wrap=tk.WORD, font=("Consolas", 9),
                              bg="#F5F5F5", relief=tk.SOLID, borderwidth=1)
         policy_text.pack(fill=tk.X)
         
-        policy_json = '''{
-  "Version": "2012-10-17",
-  "Statement": [{
-    "Sid": "SuricataGeneratorAWSPermissions",
-    "Effect": "Allow",
-    "Action": [
-      "logs:DescribeLogGroups",
-      "logs:StartQuery",
-      "logs:GetQueryResults",
-      "logs:StopQuery",
-      "network-firewall:ListRuleGroups",
-      "network-firewall:DescribeRuleGroup",
-      "network-firewall:CreateRuleGroup",
-      "network-firewall:UpdateRuleGroup",
-      "bedrock:InvokeModel",
-      "bedrock:ListFoundationModels",
-      "bedrock:ListInferenceProfiles"
-    ],
-    "Resource": "*"
-  }]
-}'''
-        policy_text.insert("1.0", policy_json)
+        # Displayed policy uses the same single-source constant as the copy button.
+        policy_text.insert("1.0", AWS_SETUP_IAM_POLICY_JSON)
         policy_text.config(state=tk.DISABLED)
         
         # Permission breakdown
         breakdown_frame = ttk.LabelFrame(iam_content, text="Permission Breakdown")
         breakdown_frame.pack(fill=tk.X, padx=15, pady=10)
         
-        breakdown_text = (
-            "CloudWatch Logs (Rule Usage Analyzer & Traffic Analysis):\n"
-            "• logs:DescribeLogGroups - List available log groups\n"
-            "• logs:StartQuery - Initiates CloudWatch Logs Insights queries\n"
-            "• logs:GetQueryResults - Retrieves query results\n"
-            "• logs:StopQuery - Cancels running queries\n\n"
-            "Network Firewall (Rule Group Import & Managed Rule Analysis):\n"
-            "• network-firewall:ListRuleGroups - Browse account and managed rule groups\n"
-            "• network-firewall:DescribeRuleGroup - View rule group details and rules\n\n"
-            "Network Firewall (Rule Group Export):\n"
-            "• network-firewall:CreateRuleGroup - Deploy new rule groups\n"
-            "• network-firewall:UpdateRuleGroup - Overwrite existing rule groups\n\n"
-            "Amazon Bedrock (AI Rule Assistant):\n"
-            "• bedrock:InvokeModel - Send prompts to Claude for rule generation\n"
-            "• bedrock:ListFoundationModels - Discover available models\n"
-            "• bedrock:ListInferenceProfiles - List inference profiles for model selection\n"
-            "• Note: Model access must also be enabled in the Bedrock console"
-        )
-        ttk.Label(breakdown_frame, text=breakdown_text, font=("TkDefaultFont", 9),
+        ttk.Label(breakdown_frame, text=AWS_SETUP_PERMISSION_BREAKDOWN, font=("TkDefaultFont", 9),
                  justify=tk.LEFT).pack(anchor=tk.W, padx=10, pady=10)
         
         # Security notes
@@ -14490,6 +14529,38 @@ Would you like to run a complete analysis?"""
         # Note about UpdateRuleGroup
         results.append(("ℹ️", "network-firewall:UpdateRuleGroup - Same permissions as Create"))
         
+        # Test: Container Associations (Container Association Manager)
+        results.append(("", ""))
+        results.append(("", "Network Firewall - Container Associations:"))
+        try:
+            ca_client = self.parent.aws_session.get_client('network-firewall')
+            ca_response = ca_client.list_container_associations(MaxResults=5)
+            ca_count = len(ca_response.get('ContainerAssociations', []))
+            results.append(("✓", "network-firewall:ListContainerAssociations - Verified"))
+            results.append(("✓", f"Found {ca_count} container association(s) in this Region"))
+        except Exception as e:
+            error_str = str(e)
+            if "AccessDenied" in error_str:
+                results.append(("✗", "network-firewall:ListContainerAssociations - Permission missing"))
+            else:
+                results.append(("✗", f"Container association test failed: {error_str[:50]}"))
+        # RAM read (for the "Shared with" column) is optional; report informational only.
+        try:
+            ram_client = self.parent.aws_session.get_client('ram')
+            # get_resource_share_associations does NOT accept resourceOwner
+            # (that parameter belongs to get_resource_shares); passing it raises
+            # a ParamValidationError that was masked as an informational line,
+            # so the check never reported success even with the permission.
+            ram_client.get_resource_share_associations(
+                associationType='RESOURCE', maxResults=1)
+            results.append(("✓", "ram:GetResourceShareAssociations - Verified (sharing visibility)"))
+        except Exception as e:
+            error_str = str(e)
+            if "AccessDenied" in error_str:
+                results.append(("ℹ️", "RAM read not available - the \"Shared with\" column will be hidden"))
+            else:
+                results.append(("ℹ️", f"RAM check skipped: {error_str[:50]}"))
+        
         # Test 6: Amazon Bedrock access (AI Rule Assistant)
         results.append(("", ""))
         results.append(("", "Amazon Bedrock (AI Rule Assistant):"))
@@ -14569,6 +14640,7 @@ Would you like to run a complete analysis?"""
         results.append(("", "• Tools > Analyze Rule Usage"))
         results.append(("", "• Tools > Analyze Rule Usage > Managed Rule Groups"))
         results.append(("", "• Tools > AI Rule Assistant"))
+        results.append(("", "• Tools > Manage Container Associations"))
         results.append(("", "• File > Import Rule Group"))
         results.append(("", "• File > Export Rule Group"))
         

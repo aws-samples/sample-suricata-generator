@@ -1,5 +1,39 @@
 # Release Notes
 
+## Version 2.8.0 - September 05, 2026
+
+### Container Association Manager: Full Lifecycle Management from the Tools Menu
+
+Version 2.7.0 added the ability to *reference* an existing container association as an `@` rule variable. This release adds a **Container Association Manager** (Tools > Manage Container Associations…) for managing the underlying AWS Network Firewall container-association resources themselves — listing, creating, editing, deleting, and cross-account sharing — without leaving the tool for the AWS console. Because there is limited infrastructure-as-code support for this resource type, the Manager aims to make the full lifecycle convenient and easy to follow.
+
+### New Features
+
+- **Tools menu entry with a session-only welcome**: "Manage Container Associations…" opens the feature (disabled with a "(requires boto3)" label when boto3 is absent). A Welcome screen explaining the feature is shown once per program session (never written to disk), with a "?" button to reopen it on demand.
+
+- **Account/Region-scoped listing**: The Manager uses the main window's selected AWS profile and offers all commercial Regions in a Region selector that refreshes the list on change. The table shows each association's **Type** (ECS/EKS), **Name**, **Status**, and **Shared with** (the account/OU/organization principals it is shared to via AWS RAM). The list refreshes automatically after any create, edit, delete, or sharing change.
+
+- **RAM-aware "Shared with" column**: Sharing state is read from AWS RAM. When RAM read permission is unavailable, the entire column is greyed for every row (never populated for only some), and sharing controls are disabled — mirroring how other AWS-dependent features degrade.
+
+- **Ownership awareness**: Associations shared *with* your account (owned elsewhere) appear greyed out and open a read-only detail view where you can inspect them and copy the ARN, but cannot edit, delete, or share them.
+
+- **Create (ECS or EKS)**: Dedicated "Add ECS association" / "Add EKS association" buttons fix the (immutable) type up front. A single scrollable form collects the name, up to 5 monitoring configurations, optional description/tags, and optional sharing. Clusters are chosen from a live dropdown or a searchable picker, and the cluster ARN is resolved automatically (including for EKS, whose API returns names only).
+
+- **Attribute filters — discovered (ECS) and free-form (EKS)**: For ECS, the tool auto-discovers the selected cluster's container-instance attributes to tick, plus optional custom filters marked with a warning that they are not verified against the cluster. For EKS, filters are free-form key/value pairs (namespace, labels) with the same not-verified hint, since those values live in the Kubernetes API. The form explains the AND-within-configuration / OR-across-configurations matching semantics and the ECS Fargate caveat.
+
+- **Review and Deploy**: A Review screen summarizes a create (resulting state) or shows a **diff** for an edit; Deploy is the only action that calls AWS. Creates show the new ARN (with Copy), status, an AWS console link, and a reminder that a rule group can reference the association only if it exists in — or is shared with — the deploy account.
+
+- **Edit / delete / share**: Editing reuses the create form pre-populated from AWS (type and name read-only), with optimistic-concurrency handling that reloads rather than clobbering if the association changed underneath you. Deleting requires a named confirmation and surfaces AWS's "still in use" error when a rule group references the association. Sharing/unsharing to a firewall account is managed from the Edit form via AWS RAM.
+
+- **Help > AWS Setup updated**: The **IAM Permissions** tab now lists the container-association, ECS/EKS discovery, service-linked-role, and AWS RAM actions this feature uses (the policy JSON is now sourced from a single constant so the copied and displayed policies always match), and the **Testing** tab validates `ListContainerAssociations` connectivity with graceful handling when permissions are missing.
+
+### Notes
+
+- **Requires an up-to-date AWS SDK**: the Container Association Manager needs **boto3 1.40.62 / botocore 1.43.62 or newer**, since the AWS Network Firewall container-association APIs were introduced in that release (`requirements.txt` minimum bumped accordingly). On an older-but-installed boto3, the Manager now shows an "update boto3" message instead of a raw error, and the tool's other AWS features continue to work.
+
+- Scope for this release: the Manager creates, edits, deletes, and shares associations. It does not provision the ECS/EKS clusters, configure EKS SNAT or ECS `awsvpc` network mode, discover EKS namespaces/labels from the cluster, or create shares to an OU/organization (single target account only). Association status is reported but not polled to completion.
+
+---
+
 ## Version 2.7.0 - August 29, 2026
 
 ### Container Associations: A New First-Class Variable Type

@@ -252,3 +252,101 @@ def looks_like_valid_reference_arn(arn):
     if not isinstance(arn, str):
         return False
     return bool(REFERENCE_ARN_RE.match(arn.strip()))
+
+
+# ---------------------------------------------------------------------------
+# Cluster-ARN classification (Container Association Manager)
+#
+# When a user selects or manually enters an ECS/EKS cluster for a container
+# association's monitoring configuration, the tool sanity-checks the ARN's
+# shape so it can warn (never hard-block) before AWS rejects a bad value.
+# These helpers also extract the Region and account segments so the create
+# flow can warn when a manually entered cluster ARN is in a different Region
+# or account than the association being created (R7a.3).
+#
+# All checks are shape-based and non-authoritative: malformed values simply
+# fail the shape test and drive soft warnings; AWS remains the authoritative
+# validator at create/update time.
+# ---------------------------------------------------------------------------
+
+# Matches an ECS cluster ARN, e.g.
+#   arn:aws:ecs:us-east-2:123456789012:cluster/my-cluster
+# Case-insensitive; partition matched as arn:aws* (aws, aws-us-gov, aws-cn).
+ECS_CLUSTER_ARN_RE = re.compile(
+    r'^arn:aws[\w-]*:ecs:[^:]*:[^:]*:cluster/.+$',
+    re.IGNORECASE,
+)
+
+# Matches an EKS cluster ARN, e.g.
+#   arn:aws:eks:us-east-2:123456789012:cluster/my-cluster
+EKS_CLUSTER_ARN_RE = re.compile(
+    r'^arn:aws[\w-]*:eks:[^:]*:[^:]*:cluster/.+$',
+    re.IGNORECASE,
+)
+
+
+def looks_like_cluster_arn(arn, container_type):
+    """Return True when arn matches the cluster ARN shape for the given type.
+
+    Shape-only, non-authoritative check used to soft-warn when a manually
+    entered cluster ARN does not look like a cluster ARN of the association's
+    fixed type (R7a.4). Never raises: empty/non-string/garbage returns False.
+
+    Args:
+        arn: The ARN string to check (may be None or non-string).
+        container_type: "ECS" or "EKS" (case-insensitive).
+
+    Returns:
+        True if arn matches the expected cluster ARN shape for container_type.
+    """
+    if not isinstance(arn, str) or not isinstance(container_type, str):
+        return False
+    arn = arn.strip()
+    ctype = container_type.strip().upper()
+    if ctype == "ECS":
+        return bool(ECS_CLUSTER_ARN_RE.match(arn))
+    if ctype == "EKS":
+        return bool(EKS_CLUSTER_ARN_RE.match(arn))
+    return False
+
+
+def arn_region(arn):
+    """Extract the Region segment from an ARN, or None.
+
+    ARNs are of the form arn:partition:service:region:account:resource.
+    Returns the region field (index 3) when present and non-empty, else None.
+    Used for the same-Region warning on manually entered cluster ARNs (R7a.3).
+
+    Args:
+        arn: The ARN string (may be None or non-string).
+
+    Returns:
+        The Region string, or None if not extractable.
+    """
+    if not isinstance(arn, str):
+        return None
+    parts = arn.strip().split(':')
+    if len(parts) >= 4 and parts[0] == 'arn' and parts[3]:
+        return parts[3]
+    return None
+
+
+def arn_account(arn):
+    """Extract the account-id segment from an ARN, or None.
+
+    Returns the account field (index 4) when present and non-empty, else None.
+    Used for the same-account warning on manually entered cluster ARNs (R7a.3)
+    and for ownership detection of listed associations.
+
+    Args:
+        arn: The ARN string (may be None or non-string).
+
+    Returns:
+        The account-id string, or None if not extractable.
+    """
+    if not isinstance(arn, str):
+        return None
+    parts = arn.strip().split(':')
+    if len(parts) >= 5 and parts[0] == 'arn' and parts[4]:
+        return parts[4]
+    return None

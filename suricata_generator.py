@@ -100,6 +100,15 @@ class SuricataRuleGenerator:
         except ImportError:
             self.traffic_analyzer_ui = None  # Dependencies not installed
         
+        # Container Association Manager (optional - requires boto3)
+        try:
+            from src.aws.container_association_manager import (
+                ContainerAssociationManager, HAS_BOTO3 as _HAS_CAM_BOTO3)
+            self.container_association_manager = (
+                ContainerAssociationManager(self) if _HAS_CAM_BOTO3 else None)
+        except ImportError:
+            self.container_association_manager = None
+        
         # AI Rule Assistant panel (optional - requires boto3)
         self.ai_panel = None
         
@@ -9471,6 +9480,17 @@ class SuricataRuleGenerator:
                 "re-opened in the MRG window and re-saved or re-deployed.".format(region),
                 parent=self.root)
     
+    def show_container_association_manager(self):
+        """Open the Container Association Manager (Tools menu)."""
+        if not self.container_association_manager:
+            messagebox.showinfo(
+                "boto3 Required",
+                "Managing container associations requires boto3.\n\n"
+                "Install with: pip install boto3\n\n"
+                "See Help > AWS Setup for details.")
+            return
+        self.container_association_manager.start()
+
     def show_pcap_tester(self):
         """Open a file dialog to select rules and a PCAP file, then test."""
         from src.agent.pcap_tester import PcapTester

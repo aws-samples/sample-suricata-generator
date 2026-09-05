@@ -28,7 +28,15 @@ wxPython>=4.2.0
 # - File > Export Rule Group (to AWS Network Firewall)
 # - Tools > Traffic Analysis & VPC Endpoints
 # - Tools > AI Rule Assistant (Amazon Bedrock-powered rule generation)
-boto3>=1.26.0
+# - Tools > Manage Container Associations (AWS Network Firewall container associations)
+#
+# Minimum bumped to 1.40.62 for the Container Association Manager: the AWS
+# Network Firewall container-association APIs (list/create/update/delete/
+# describe_container_association) were added in botocore 1.43.62, which pairs
+# with boto3 1.40.62. Older boto3 can still run the other AWS features, and the
+# Container Association Manager shows an "update boto3" message rather than
+# failing, but the manager needs this minimum to function.
+boto3>=1.40.62
 
 # Traffic Analysis & VPC Endpoints (optional)
 # Required for Tools > Traffic Analysis & VPC Endpoints feature

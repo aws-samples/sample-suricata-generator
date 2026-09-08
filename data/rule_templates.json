@@ -1,6 +1,6 @@
 {
-  "version": "1.1.1",
-  "last_updated": "2026-08-19",
+  "version": "1.2.0",
+  "last_updated": "2026-09-07",
   "description": "Rule Templates Library for Suricata Rule Generator",
   "templates": [
     {
@@ -743,7 +743,11 @@
             {
               "value": "AF",
               "label": "Afghanistan",
-              "region": "Asia"
+              "region": "Asia",
+              "regions": [
+                "Asia",
+                "ITAR Countries"
+              ]
             },
             {
               "value": "AM",
@@ -778,12 +782,20 @@
             {
               "value": "KH",
               "label": "Cambodia",
-              "region": "Asia"
+              "region": "Asia",
+              "regions": [
+                "Asia",
+                "ITAR Countries"
+              ]
             },
             {
               "value": "CN",
               "label": "China",
-              "region": "Asia"
+              "region": "Asia",
+              "regions": [
+                "Asia",
+                "ITAR Countries"
+              ]
             },
             {
               "value": "GE",
@@ -793,7 +805,11 @@
             {
               "value": "HK",
               "label": "Hong Kong",
-              "region": "Asia"
+              "region": "Asia",
+              "regions": [
+                "Asia",
+                "ITAR Countries"
+              ]
             },
             {
               "value": "IN",
@@ -823,7 +839,11 @@
             {
               "value": "KG",
               "label": "Kyrgyzstan",
-              "region": "Asia"
+              "region": "Asia",
+              "regions": [
+                "Asia",
+                "ITAR Countries"
+              ]
             },
             {
               "value": "LA",
@@ -853,7 +873,11 @@
             {
               "value": "MM",
               "label": "Myanmar",
-              "region": "Asia"
+              "region": "Asia",
+              "regions": [
+                "Asia",
+                "ITAR Countries"
+              ]
             },
             {
               "value": "NP",
@@ -863,7 +887,11 @@
             {
               "value": "KP",
               "label": "North Korea",
-              "region": "Asia"
+              "region": "Asia",
+              "regions": [
+                "Asia",
+                "ITAR Countries"
+              ]
             },
             {
               "value": "OM",
@@ -1028,7 +1056,11 @@
             {
               "value": "CU",
               "label": "Cuba",
-              "region": "Americas"
+              "region": "Americas",
+              "regions": [
+                "Americas",
+                "ITAR Countries"
+              ]
             },
             {
               "value": "CW",
@@ -1093,7 +1125,11 @@
             {
               "value": "HT",
               "label": "Haiti",
-              "region": "Americas"
+              "region": "Americas",
+              "regions": [
+                "Americas",
+                "ITAR Countries"
+              ]
             },
             {
               "value": "HN",
@@ -1123,7 +1159,11 @@
             {
               "value": "NI",
               "label": "Nicaragua",
-              "region": "Americas"
+              "region": "Americas",
+              "regions": [
+                "Americas",
+                "ITAR Countries"
+              ]
             },
             {
               "value": "PA",
@@ -1203,7 +1243,11 @@
             {
               "value": "VE",
               "label": "Venezuela",
-              "region": "Americas"
+              "region": "Americas",
+              "regions": [
+                "Americas",
+                "ITAR Countries"
+              ]
             },
             {
               "value": "VI",
@@ -1253,7 +1297,11 @@
             {
               "value": "CF",
               "label": "Central African Republic",
-              "region": "Africa"
+              "region": "Africa",
+              "regions": [
+                "Africa",
+                "ITAR Countries"
+              ]
             },
             {
               "value": "TD",
@@ -1273,7 +1321,11 @@
             {
               "value": "CD",
               "label": "Congo (DRC)",
-              "region": "Africa"
+              "region": "Africa",
+              "regions": [
+                "Africa",
+                "ITAR Countries"
+              ]
             },
             {
               "value": "CI",
@@ -1298,12 +1350,20 @@
             {
               "value": "ER",
               "label": "Eritrea",
-              "region": "Africa"
+              "region": "Africa",
+              "regions": [
+                "Africa",
+                "ITAR Countries"
+              ]
             },
             {
               "value": "ET",
               "label": "Ethiopia",
-              "region": "Africa"
+              "region": "Africa",
+              "regions": [
+                "Africa",
+                "ITAR Countries"
+              ]
             },
             {
               "value": "GA",
@@ -1348,7 +1408,11 @@
             {
               "value": "LY",
               "label": "Libya",
-              "region": "Africa"
+              "region": "Africa",
+              "regions": [
+                "Africa",
+                "ITAR Countries"
+              ]
             },
             {
               "value": "MG",
@@ -1443,7 +1507,11 @@
             {
               "value": "SO",
               "label": "Somalia",
-              "region": "Africa"
+              "region": "Africa",
+              "regions": [
+                "Africa",
+                "ITAR Countries"
+              ]
             },
             {
               "value": "ZA",
@@ -1453,12 +1521,20 @@
             {
               "value": "SS",
               "label": "South Sudan",
-              "region": "Africa"
+              "region": "Africa",
+              "regions": [
+                "Africa",
+                "ITAR Countries"
+              ]
             },
             {
               "value": "SD",
               "label": "Sudan",
-              "region": "Africa"
+              "region": "Africa",
+              "regions": [
+                "Africa",
+                "ITAR Countries"
+              ]
             },
             {
               "value": "SZ",
@@ -1498,22 +1574,38 @@
             {
               "value": "ZW",
               "label": "Zimbabwe",
-              "region": "Africa"
+              "region": "Africa",
+              "regions": [
+                "Africa",
+                "ITAR Countries"
+              ]
             },
             {
               "value": "CY",
               "label": "Cyprus",
-              "region": "Middle East"
+              "region": "Middle East",
+              "regions": [
+                "Middle East",
+                "ITAR Countries"
+              ]
             },
             {
               "value": "IR",
               "label": "Iran",
-              "region": "Middle East"
+              "region": "Middle East",
+              "regions": [
+                "Middle East",
+                "ITAR Countries"
+              ]
             },
             {
               "value": "IQ",
               "label": "Iraq",
-              "region": "Middle East"
+              "region": "Middle East",
+              "regions": [
+                "Middle East",
+                "ITAR Countries"
+              ]
             },
             {
               "value": "IL",
@@ -1528,7 +1620,11 @@
             {
               "value": "LB",
               "label": "Lebanon",
-              "region": "Middle East"
+              "region": "Middle East",
+              "regions": [
+                "Middle East",
+                "ITAR Countries"
+              ]
             },
             {
               "value": "SA",
@@ -1538,7 +1634,11 @@
             {
               "value": "SY",
               "label": "Syria",
-              "region": "Middle East"
+              "region": "Middle East",
+              "regions": [
+                "Middle East",
+                "ITAR Countries"
+              ]
             },
             {
               "value": "TR",
@@ -1573,7 +1673,11 @@
             {
               "value": "BY",
               "label": "Belarus",
-              "region": "Europe"
+              "region": "Europe",
+              "regions": [
+                "Europe",
+                "ITAR Countries"
+              ]
             },
             {
               "value": "BE",
@@ -1753,7 +1857,11 @@
             {
               "value": "RU",
               "label": "Russia",
-              "region": "Europe"
+              "region": "Europe",
+              "regions": [
+                "Europe",
+                "ITAR Countries"
+              ]
             },
             {
               "value": "SM",

@@ -1,5 +1,31 @@
 # Release Notes
 
+## Version 2.8.2 - September 07, 2026
+
+### Bug Fixes
+
+- **Container Association Manager: add missing IAM permissions for ECS associations**: Creating (and updating/deleting) an ECS container association also requires Amazon EventBridge permissions, because Network Firewall creates and removes a managed EventBridge rule (`NetworkFirewallManagedRule-*`) in your account on your behalf to receive ECS task state-change events. The **Help > AWS Setup** IAM policy now includes `events:PutRule`, `events:PutTargets`, `events:DescribeRule`, `events:DeleteRule`, and `events:RemoveTargets`, along with `sts:GetCallerIdentity` (used to detect owned vs. shared-in associations) and `ram:GetResourceShares` (used by the sharing flow). Without these, creating an association failed with an `events:PutRule` authorization error. This permission set was verified end-to-end (create, modify, share/unshare, delete) against a least-privilege role; note that the EventBridge permissions are not listed in AWS's own container-association documentation.
+
+- **Load AWS Best Practices Template: fix TLS certificate verification failure**: On some systems the template fetch failed with `CERTIFICATE_VERIFY_FAILED: unable to get local issuer certificate`, even with internet access, because the fetch used Python's default SSL context — which does not use the `certifi` CA bundle and can lack a usable certificate authority source (notably on python.org Windows builds). The fetch now verifies the HTTPS certificate against `certifi`'s bundle (falling back to the system default when `certifi` is unavailable), and `certifi` is now a declared dependency in `requirements.txt`. Certificate verification is still enforced.
+
+### New Features
+
+- **Geographic Country Control: add an "ITAR Countries" group**: The Region selector in the Geographic Country Control template (File > Insert Rules From Template) now includes an **ITAR Countries** option listing the 27 ITAR-restricted destinations. Country selection is shared across groups — selecting a country under ITAR also shows it selected under its geographic region, and vice versa. Country grouping is now data-driven: a country can belong to multiple groups via an optional `regions` list in `data/rule_templates.json`, and new groups can be added by tagging countries in that file, with no code change (the Region dropdown is built from the groups present in the template). Rule templates library bumped to `1.2.0`.
+
+- **Geographic Country Control: "Select All" / "Clear All" buttons**: The country picker now has **Select All** and **Clear All** buttons next to the Region dropdown. They act on the countries displayed for the currently selected region — Select All selects them all, Clear All deselects them — making it quick to select a whole region without ticking each country by hand.
+
+- **Documentation: `docs/rule_templates_json.md` accuracy pass**: Documented the multi-group country/category membership (`regions` list) and data-driven Region dropdown, added the previously undocumented parameter types (`multi_select_category`, `multi_select_extension`, `multi_select_method`) and the "HTTP Security" category, and corrected stale file paths (`data/rule_templates.json`, `src/managers/template_manager.py`) and version-field examples.
+
+---
+
+## Version 2.8.1 - September 06, 2026
+
+### Bug Fixes
+
+- **Preserve capitalization in exported rule group names**: When exporting a rule group directly to AWS (or as a Terraform/CloudFormation template), the suggested Rule Group Name now keeps the open file's original capitalization instead of forcing it to lowercase (for example, `StatefulRuleGroup` is no longer changed to `statefulrulegroup`). AWS Network Firewall rule group names are case-sensitive, so the previous lowercasing could produce a different name than intended.
+
+---
+
 ## Version 2.8.0 - September 05, 2026
 
 ### Container Association Manager: Full Lifecycle Management from the Tools Menu

@@ -44,6 +44,15 @@ boto3>=1.40.62
 intervaltree>=3.1.0
 requests>=2.28.0
 
+# TLS certificate authority bundle
+# Used by File > Load AWS Best Practices Template to verify the HTTPS
+# certificate when fetching the template. The Python standard library's default
+# SSL context does not always have a usable CA source (notably python.org
+# Windows builds), so the app points urllib at certifi's bundle explicitly.
+# Declared directly (not just relied on transitively via requests) because the
+# template fetch needs it even in environments where requests is not installed.
+certifi>=2023.7.22
+
 # Property-Based Testing (development)
 # Required for running property-based tests with Hypothesis
 hypothesis>=6.82.0

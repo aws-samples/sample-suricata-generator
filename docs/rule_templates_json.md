@@ -6,7 +6,7 @@ The `rule_templates.json` file contains a library of pre-configured rule templat
 
 ## File Location
 
-`rule_templates.json` (in the root directory of the application)
+`data/rule_templates.json`
 
 ## Purpose
 
@@ -22,7 +22,8 @@ The JSON file contains metadata and a templates array:
 
 ```json
 {
-  "version": "1.0",
+  "version": "1.2.0",
+  "last_updated": "2026-09-07",
   "description": "Rule Templates Library for Suricata Rule Generator",
   "templates": [
     {
@@ -295,7 +296,12 @@ Checkbox selection of multiple protocols.
 
 ### 5. Multi-Select Country (`type: "multi_select_country"`)
 
-Checkbox selection of countries with regional grouping.
+Checkbox selection of countries with grouped browsing. Countries are shown in a
+two-panel picker: a **Region** dropdown selects a group, the left panel lists that
+group's countries as checkboxes, and the right panel shows all currently selected
+countries. **Selection state is shared by country code across every group** — if a
+country belongs to more than one group, checking it under one group shows it checked
+under the others, and unchecking anywhere clears it everywhere.
 
 ```json
 {
@@ -308,24 +314,54 @@ Checkbox selection of countries with regional grouping.
     {
       "value": "CN",
       "label": "China",
-      "region": "Asia"
+      "region": "Asia",
+      "regions": ["Asia", "ITAR Countries"]
     },
     {
       "value": "RU",
       "label": "Russia",
-      "region": "Europe"
+      "region": "Europe",
+      "regions": ["Europe", "ITAR Countries"]
+    },
+    {
+      "value": "JP",
+      "label": "Japan",
+      "region": "Asia"
     }
   ]
 }
 ```
 
-**Regions:**
+**Group membership — `region` vs. `regions`:**
+
+- `region` (String): the country's single group. Used when a country belongs to
+  exactly one group (the common case). Every country should have this field.
+- `regions` (Array of String, optional): the full list of groups the country
+  belongs to, for countries that appear in **more than one** group. When present,
+  `regions` takes precedence over `region` for grouping. Keep the original `region`
+  value in the list (and on the option) so behavior is unchanged if `regions` is
+  ever removed. Example: China is `"region": "Asia"` with
+  `"regions": ["Asia", "ITAR Countries"]`, so it appears under both **Asia** and
+  **ITAR Countries**.
+
+**The Region dropdown is data-driven.** The dropdown is built from the groups found
+across all country options: the six known geographic regions appear first (in the
+order below), and any other groups (for example `ITAR Countries`) are appended
+afterward, sorted alphabetically. **A new group can therefore be added entirely from
+this JSON file** — tag the relevant countries with the new group name in their
+`regions` list, and it appears in the dropdown automatically, with no code change.
+
+**Known geographic regions (preferred display order):**
 - Asia
 - Americas
 - Africa
 - Middle East
 - Europe
 - Oceania
+
+**Overlay groups** (appended after the geographic regions, alphabetically):
+- `ITAR Countries` — the set of ITAR-restricted destinations. Each member country
+  is also listed under its geographic region via the `regions` field.
 
 ### 6. Checkbox (`type: "checkbox"`)
 
@@ -340,6 +376,101 @@ Boolean on/off selection.
   "default": false
 }
 ```
+
+### 7. Multi-Select Category (`type: "multi_select_category"`)
+
+Checkbox selection of URL/domain categories, browsed by a **Category Group** dropdown
+(the same two-panel picker pattern as Multi-Select Country, with selection shared across
+groups). Selected categories are combined into a single comma-separated rule value.
+
+```json
+{
+  "name": "CATEGORIES",
+  "type": "multi_select_category",
+  "description": "Select URL categories to block",
+  "required": true,
+  "min_selections": 1,
+  "options": [
+    {
+      "value": "Abortion",
+      "label": "Abortion",
+      "category": "Abortion",
+      "category_display": "Abortion",
+      "category_metadata": "abortion",
+      "category_group": "Restricted Content"
+    }
+  ]
+}
+```
+
+**Fields (per option):**
+- `value` / `label`: selection value and display text
+- `category`: the category value used in the generated rule
+- `category_display`: human-readable name used in the rule message
+- `category_metadata`: metadata token for the rule's `metadata:` field
+- `category_group`: the group this category is browsed under in the dropdown
+
+**Category groups** are data-driven from the options, shown in this preferred order and
+then any others alphabetically: `Security Threats`, `Restricted Content`, `Productivity`,
+`Financial`, `Business/Professional`, `Lifestyle`.
+
+### 8. Multi-Select Extension (`type: "multi_select_extension"`)
+
+Checkbox selection of file extensions to block.
+
+```json
+{
+  "name": "EXTENSIONS",
+  "type": "multi_select_extension",
+  "description": "Select file extensions to block",
+  "required": true,
+  "min_selections": 1,
+  "options": [
+    {
+      "value": "exe",
+      "label": "Executable (.exe)",
+      "extension": "exe",
+      "extension_type": "executable",
+      "default_checked": false
+    }
+  ]
+}
+```
+
+**Fields (per option):**
+- `value` / `label`: selection value and display text
+- `extension`: the file extension matched in the generated rule
+- `extension_type`: grouping/classification (e.g. `executable`, `script`, `archive`)
+- `default_checked`: whether the option starts checked
+
+### 9. Multi-Select Method (`type: "multi_select_method"`)
+
+Checkbox selection of HTTP methods to control.
+
+```json
+{
+  "name": "METHODS",
+  "type": "multi_select_method",
+  "description": "Select HTTP methods to block",
+  "required": true,
+  "min_selections": 1,
+  "options": [
+    {
+      "value": "PUT",
+      "label": "PUT",
+      "method": "PUT",
+      "description": "Upload/modify resources",
+      "default_checked": false
+    }
+  ]
+}
+```
+
+**Fields (per option):**
+- `value` / `label`: selection value and display text
+- `method`: the HTTP method matched in the generated rule
+- `description`: help text shown with the option
+- `default_checked`: whether the option starts checked
 
 ## Template Categories
 
@@ -381,7 +512,14 @@ Examples:
 - JA3 Fingerprint Control
 - Block File Sharing Protocols
 
-### 6. Default Deny
+### 6. HTTP Security
+HTTP-layer controls (methods, URL categories, and related web protections).
+
+Examples:
+- HTTP Method Control
+- Block URL Categories
+
+### 7. Default Deny
 Comprehensive default deny rulesets.
 
 Examples:
@@ -720,31 +858,36 @@ Before modifying `rule_templates.json`, verify:
 
 ## Related Files
 
-- **template_manager.py**: Code that processes templates
-- **content_keywords.json**: Keywords used in template rules
-- **common_ports.json**: Port variables referenced in templates
+- **src/managers/template_manager.py**: Code that processes templates
+- **data/content_keywords.json**: Keywords used in template rules
+- **data/common_ports.json**: Port variables referenced in templates
 - **suricata_generator.py**: Main application that uses templates
 
 ## Version Control
 
-Update version when making changes:
+Update both the `version` and `last_updated` fields when making changes:
 
 ```json
 {
-  "version": "1.1",
+  "version": "1.2.0",
+  "last_updated": "2026-09-07",
   "description": "Rule Templates Library for Suricata Rule Generator"
 }
 ```
 
 Version increment guidelines:
-- **Minor (1.X)**: New templates added
-- **Major (X.0)**: Structural changes to template format
+- **Patch (1.1.X)**: Content tweaks to existing templates (e.g. adding a group tag,
+  editing a label or note)
+- **Minor (1.X.0)**: New templates or new parameter/grouping capabilities added
+- **Major (X.0.0)**: Structural changes to the template format
+
+Always update `last_updated` (ISO `YYYY-MM-DD`) alongside any change.
 
 ## Additional Resources
 
 - [Suricata Rule Format](https://docs.suricata.io/en/latest/rules/intro.html)
 - [AWS Network Firewall Examples](https://docs.aws.amazon.com/network-firewall/latest/developerguide/suricata-examples.html)
-- [Template Manager Code](../template_manager.py)
+- [Template Manager Code](../src/managers/template_manager.py)
 
 ## Template Design Guidelines
 

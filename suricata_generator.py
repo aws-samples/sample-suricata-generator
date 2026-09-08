@@ -3878,9 +3878,10 @@ class SuricataRuleGenerator:
             # Re-check trailing hyphen after truncation
             sanitized = sanitized.rstrip('-')
         
-        # Step 7: Convert to lowercase (AWS best practice)
-        sanitized = sanitized.lower()
-        
+        # Preserve the filename's original capitalization. AWS rule group names
+        # are case-sensitive and allow A-Z (see validate_rule_group_name's
+        # ^[a-zA-Z0-9-]+$), so forcing lowercase here silently altered the name
+        # the user intended (e.g. "StatefulRuleGroup" -> "statefulrulegroup").
         return sanitized
     
     def validate_rule_group_name(self, name: str) -> Tuple[bool, str]:
@@ -8092,17 +8093,29 @@ class SuricataRuleGenerator:
                 # Region dropdown
                 region_var = tk.StringVar()
                 
-                # Group countries by region
+                # Group countries by region. A country may belong to MULTIPLE
+                # groups: if it declares a "regions" list, it is placed under each
+                # (e.g. China under "Asia" AND "ITAR Countries"); otherwise it
+                # falls back to its single "region" field. Selection state is
+                # shared by country code across all groups (see selected_countries
+                # below), so ticking a country under one group shows it ticked
+                # under every group it belongs to.
                 regions = {}
                 for option in param['options']:
-                    region = option.get('region', 'Other')
-                    if region not in regions:
-                        regions[region] = []
-                    regions[region].append(option)
+                    memberships = option.get('regions') or [option.get('region', 'Other')]
+                    for region in memberships:
+                        if region not in regions:
+                            regions[region] = []
+                        regions[region].append(option)
                 
-                region_list = ['Asia', 'Americas', 'Africa', 'Middle East', 'Europe', 'Oceania']
-                # Only include regions that have countries
-                region_list = [r for r in region_list if r in regions]
+                # Dropdown groups are DATA-DRIVEN: the known geographic regions come
+                # first in a preferred order, then any other groups found in the
+                # template (e.g. "ITAR Countries") are appended alphabetically. This
+                # means new groups can be added purely by tagging countries in the
+                # template JSON, with no code change here.
+                _preferred_order = ['Asia', 'Americas', 'Africa', 'Middle East', 'Europe', 'Oceania']
+                region_list = [r for r in _preferred_order if r in regions]
+                region_list += sorted(r for r in regions if r not in _preferred_order)
                 region_var.set(region_list[0] if region_list else "")
                 
                 region_combo = ttk.Combobox(selector_frame, textvariable=region_var,
@@ -8112,6 +8125,14 @@ class SuricataRuleGenerator:
                 # Country count label
                 count_label = ttk.Label(selector_frame, text="", font=("TkDefaultFont", 8), foreground="#666666")
                 count_label.pack(side=tk.LEFT, padx=(10, 0))
+                
+                # Select All / Clear All buttons for the currently displayed region.
+                # Commands are wired after populate_region/update_selected_panel are
+                # defined below (they operate on the current region's checkboxes).
+                select_all_btn = ttk.Button(selector_frame, text="Select All")
+                select_all_btn.pack(side=tk.LEFT, padx=(15, 0))
+                clear_all_btn = ttk.Button(selector_frame, text="Clear All")
+                clear_all_btn.pack(side=tk.LEFT, padx=(5, 0))
                 
                 # Two-panel layout
                 panels_frame = ttk.Frame(param_container)
@@ -8279,6 +8300,36 @@ class SuricataRuleGenerator:
                         cb = ttk.Checkbutton(left_content, text=label_text, variable=var,
                                             command=make_checkbox_handler(code, label, region_name))
                         cb.pack(anchor=tk.W, padx=10, pady=1)
+                
+                # Wire Select All / Clear All to act on the CURRENTLY displayed region.
+                # Select All ticks and selects every country shown for the current
+                # region; Clear All unticks and removes them. Selection state is
+                # shared by code, so a country selected under another region is not
+                # affected by clearing the displayed region (and vice versa).
+                def select_all_displayed():
+                    region_countries = regions.get(region_var.get(), [])
+                    for country in region_countries:
+                        code = country['value']
+                        selected_countries[code] = {
+                            'label': country['label'],
+                            'region': region_var.get(),
+                        }
+                        if code in current_checkboxes:
+                            current_checkboxes[code].set(True)
+                    update_selected_panel()
+                
+                def clear_all_displayed():
+                    region_countries = regions.get(region_var.get(), [])
+                    for country in region_countries:
+                        code = country['value']
+                        if code in selected_countries:
+                            del selected_countries[code]
+                        if code in current_checkboxes:
+                            current_checkboxes[code].set(False)
+                    update_selected_panel()
+                
+                select_all_btn.config(command=select_all_displayed)
+                clear_all_btn.config(command=clear_all_displayed)
                 
                 # Populate initial region
                 if region_list:

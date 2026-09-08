@@ -1118,13 +1118,19 @@ class ContainerAssociationManager:
         if code == 'AccessDeniedException':
             perms = {
                 'deploy': "network-firewall:CreateContainerAssociation / "
-                          "UpdateContainerAssociation (and ecs/eks describe, "
-                          "iam:CreateServiceLinkedRole, ram:* for sharing)",
+                          "UpdateContainerAssociation, plus ecs:/eks: describe for "
+                          "the cluster and iam:CreateServiceLinkedRole on first use "
+                          "(RAM permissions are only needed if you enable sharing)",
                 'delete': "network-firewall:DeleteContainerAssociation",
             }.get(op, "the required network-firewall permission")
+            # Surface the ACTUAL AWS denial message: it usually names the exact
+            # action/resource that was denied, which the generic hint above
+            # cannot. This is essential when the policy looks complete but a
+            # resource condition, SCP, or permission boundary is the real cause.
             messagebox.showerror(
                 "Insufficient AWS Permissions",
                 f"Your AWS credentials lack permission for this operation.\n\n"
+                f"AWS said:\n{message}\n\n"
                 f"Likely required: {perms}\n\n"
                 f"See Help > AWS Setup for the complete IAM policy." + partial_note)
         elif code in ('InvalidRequestException', 'ValidationException'):

@@ -11,6 +11,7 @@ Handles all file I/O operations including:
 import os
 import json
 import re
+import ssl
 import urllib.request
 import urllib.error
 from typing import List, Optional
@@ -962,7 +963,18 @@ EOF
             # Validate URL scheme for security
             if not url.startswith(('http://', 'https://')):
                 raise ValueError("Only HTTP/HTTPS URLs are allowed")
-            with urllib.request.urlopen(url, timeout=10) as response:
+            # Build an SSL context backed by certifi's CA bundle when available.
+            # The stdlib default context does not use certifi and may have no
+            # usable CA source on some Python installs (e.g. python.org Windows
+            # builds), producing CERTIFICATE_VERIFY_FAILED even though certifi is
+            # installed. Explicitly pointing at certifi makes the fetch portable;
+            # fall back to the system default if certifi isn't importable.
+            try:
+                import certifi
+                ssl_context = ssl.create_default_context(cafile=certifi.where())
+            except Exception:
+                ssl_context = ssl.create_default_context()
+            with urllib.request.urlopen(url, timeout=10, context=ssl_context) as response:
                 html_content = response.read().decode('utf-8')
             
             rules_text = self.extract_rules_from_html(html_content)

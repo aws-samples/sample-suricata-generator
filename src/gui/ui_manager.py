@@ -39,6 +39,11 @@ AWS_SETUP_IAM_POLICY_JSON = '''{
       "network-firewall:TagResource",
       "network-firewall:UntagResource",
       "network-firewall:ListTagsForResource",
+      "events:PutRule",
+      "events:PutTargets",
+      "events:DescribeRule",
+      "events:DeleteRule",
+      "events:RemoveTargets",
       "ecs:ListClusters",
       "ecs:DescribeClusters",
       "ecs:ListContainerInstances",
@@ -49,8 +54,10 @@ AWS_SETUP_IAM_POLICY_JSON = '''{
       "ram:CreateResourceShare",
       "ram:AssociateResourceShare",
       "ram:DisassociateResourceShare",
+      "ram:GetResourceShares",
       "ram:GetResourceShareAssociations",
       "ram:ListResources",
+      "sts:GetCallerIdentity",
       "bedrock:InvokeModel",
       "bedrock:ListFoundationModels",
       "bedrock:ListInferenceProfiles"
@@ -76,7 +83,11 @@ AWS_SETUP_PERMISSION_BREAKDOWN = (
     "Network Firewall (Container Association Manager):\n"
     "• network-firewall:List/Describe ContainerAssociation - list & inspect\n"
     "• network-firewall:Create/Update/Delete ContainerAssociation - manage\n"
-    "• network-firewall:TagResource/UntagResource/ListTagsForResource - tags\n\n"
+    "• network-firewall:TagResource/UntagResource/ListTagsForResource - tags\n"
+    "• events:PutRule/PutTargets/DescribeRule/DeleteRule/RemoveTargets - for ECS,\n"
+    "  Network Firewall creates/removes a managed EventBridge rule (NetworkFirewallManagedRule-*)\n"
+    "  on your behalf to receive ECS task state-change events; your identity must allow these\n"
+    "• sts:GetCallerIdentity - determine your account to flag owned vs. shared-in associations\n\n"
     "Cluster & attribute discovery (Container Association Manager):\n"
     "• ecs:ListClusters/DescribeClusters/ListContainerInstances/DescribeContainerInstances\n"
     "• eks:ListClusters/DescribeCluster\n\n"
@@ -84,6 +95,7 @@ AWS_SETUP_PERMISSION_BREAKDOWN = (
     "• iam:CreateServiceLinkedRole - created automatically on first CreateContainerAssociation\n\n"
     "Cross-account sharing via AWS RAM (Container Association Manager):\n"
     "• ram:CreateResourceShare/AssociateResourceShare/DisassociateResourceShare - share/unshare\n"
+    "• ram:GetResourceShares - find the tool-managed resource share to reuse before sharing\n"
     "• ram:GetResourceShareAssociations/ListResources - show \u201cShared with\u201d\n\n"
     "Amazon Bedrock (AI Rule Assistant):\n"
     "• bedrock:InvokeModel - Send prompts to Claude for rule generation\n"
@@ -14377,8 +14389,18 @@ Would you like to run a complete analysis?"""
                 results.append(("✓", "AWS credentials configured"))
                 profile = session.profile_name or 'default'
                 results.append(("✓", f"Using profile: {profile}"))
-                region = session.region_name or 'Not set'
-                results.append(("✓", f"Region: {region}"))
+                region = session.region_name
+                if region:
+                    results.append(("✓", f"Region: {region}"))
+                else:
+                    # No region resolved (common on an EC2 instance role with no
+                    # configured default region). Flag it clearly; per-service
+                    # calls below will fail with NoRegionError until a region is
+                    # set, but each probe reports its own result and the run
+                    # continues rather than aborting.
+                    results.append(("⚠️", "Region: not set — set a default region "
+                                          "(AWS_DEFAULT_REGION / AWS_REGION env var, "
+                                          "or the status-bar Region selector)"))
             else:
                 results.append(("✗", "No AWS credentials found"))
                 self._display_test_results(results, results_display)
@@ -14449,10 +14471,14 @@ Would you like to run a complete analysis?"""
             error_str = str(e)
             if "AccessDenied" in error_str:
                 results.append(("✗", "Access denied to CloudWatch Logs"))
+            elif "must specify a region" in error_str.lower() or "NoRegionError" in error_str:
+                results.append(("✗", "CloudWatch: no region set (set a default region and retry)"))
             else:
                 results.append(("✗", f"CloudWatch test failed: {error_str[:50]}"))
-            self._display_test_results(results, results_display)
-            return
+            # Do NOT abort the whole run: other services are independent of
+            # CloudWatch, so continue testing them and let each report its own
+            # result (an EC2 instance role with no region should still see the
+            # Network Firewall / Container Association results).
         
         # Test 5: Network Firewall access (NEW)
         results.append(("", ""))

@@ -24,6 +24,7 @@ from src.agent.best_practice_checker import BestPracticeChecker
 from src.agent.models import AnalysisFinding, StructuredAnalysisResponse
 from src.analysis.rule_analyzer import RuleAnalyzer
 from src.core.constants import BEDROCK_REGIONS
+from src.core.suricata_rule import SuricataRule
 
 if TYPE_CHECKING:
     from suricata_generator import SuricataRuleGenerator
@@ -294,10 +295,27 @@ class AIAnalysisTab:
         parent_notebook: ttk.Notebook,
         parent_app: "SuricataRuleGenerator",
         static_findings: dict,
+        rules=None,
+        variables=None,
+        group_markers=None,
     ):
         self._notebook = parent_notebook
         self._app = parent_app
         self._static_findings = static_findings
+
+        # Optional injected inputs (multi-group review path). When provided,
+        # these take precedence over pulling rules/variables off ``self._app``
+        # in ``_trigger_analysis``. When None (the single-group / default 3-arg
+        # construction), behavior is unchanged and inputs come from the app.
+        #   rules          : list[SuricataRule] — the combined display rules
+        #   variables      : dict — a best-effort variables view for AI use
+        #   group_markers  : optional list of group descriptors used to insert
+        #                    "# === Group ... ===" comment marker rows into the
+        #                    rule stream so the AI analyzer sees group membership
+        #                    (Req 8.6). See _build_analysis_rules for the shape.
+        self._injected_rules = rules
+        self._injected_variables = variables
+        self._group_markers = group_markers
 
         # AI analyzer instance (created lazily on first analysis trigger)
         self._ai_analyzer = None  # AIRuleAnalyzer | None
@@ -327,6 +345,7 @@ class AIAnalysisTab:
 
         # Key widget references (populated by _build_ui)
         self._tab_frame: ttk.Frame | None = None
+        self._btn_frame: tk.Frame | None = None
         self._content_area: tk.Text | None = None
         self._analyze_btn: ttk.Button | None = None
         self._cancel_btn: ttk.Button | None = None
@@ -336,6 +355,7 @@ class AIAnalysisTab:
         self._close_btn: ttk.Button | None = None
         self._select_all_var: tk.BooleanVar | None = None
         self._status_label: ttk.Label | None = None
+        self._ai_info_frame: tk.Frame | None = None
         self._sort_var: tk.StringVar | None = None
         self._filter_var: tk.StringVar | None = None
         self._progress_label: ttk.Label | None = None
@@ -359,53 +379,77 @@ class AIAnalysisTab:
         self._notebook.add(self._tab_frame, text="AI Analysis")
 
         # ============================================================== #
-        #  BOTTOM buttons — packed FIRST per cross-platform rules        #
-        #  (ui-conventions.md rule 5: pack buttons before content)       #
+        #  BOTTOM status bar — info (left) + action buttons (right),     #
+        #  one line — packed side=tk.BOTTOM FIRST per cross-platform     #
+        #  rules (ui-conventions.md rule 5).                             #
+        #                                                                #
+        #  A single bordered bottom bar (like the Static Analysis tab's  #
+        #  status bar) packed side=tk.BOTTOM FIRST so its fixed-height   #
+        #  strip is reserved before the content area expands into the    #
+        #  remaining space. This lets the results area stretch           #
+        #  (content_frame packs expand=True below) while GUARANTEEING     #
+        #  the action buttons never get pushed off-screen on macOS.      #
         # ============================================================== #
-        btn_frame = ttk.Frame(self._tab_frame)
-        btn_frame.pack(side=tk.BOTTOM, fill=tk.X, padx=10, pady=(5, 10))
+        btn_frame = tk.Frame(self._tab_frame, relief=tk.SUNKEN, bd=1)
+        btn_frame.pack(side=tk.BOTTOM, fill=tk.X)
+        # Keep a reference so deferred Cancel pack/pack_forget targets this bar.
+        self._btn_frame = btn_frame
 
         # Close button (always enabled)
         self._close_btn = ttk.Button(
             btn_frame, text="Close",
             command=self._on_close,
         )
-        self._close_btn.pack(side=tk.RIGHT, padx=(4, 0))
+        self._close_btn.pack(side=tk.RIGHT, padx=(4, 6), pady=3)
 
         # Save as PDF (disabled until results)
         self._pdf_btn = ttk.Button(
             btn_frame, text="Save as PDF",
             command=self._save_pdf, state=tk.DISABLED,
         )
-        self._pdf_btn.pack(side=tk.RIGHT, padx=4)
+        self._pdf_btn.pack(side=tk.RIGHT, padx=4, pady=3)
 
         # Save as HTML (disabled until results)
         self._html_btn = ttk.Button(
             btn_frame, text="Save as HTML",
             command=self._save_html, state=tk.DISABLED,
         )
-        self._html_btn.pack(side=tk.RIGHT, padx=4)
+        self._html_btn.pack(side=tk.RIGHT, padx=4, pady=3)
 
         # Send to AI Rule Assistant (disabled until findings selected)
         self._send_btn = ttk.Button(
             btn_frame, text="Send to AI Rule Assistant",
             command=self._send_to_assistant, state=tk.DISABLED,
         )
-        self._send_btn.pack(side=tk.RIGHT, padx=4)
+        self._send_btn.pack(side=tk.RIGHT, padx=4, pady=3)
 
-        # Cancel button (hidden initially, shown during analysis)
+        # AI Deep Analysis button (primary action, left side)
+        self._analyze_btn = ttk.Button(
+            btn_frame, text="\U0001f50d AI Deep Analysis",
+            command=self._trigger_analysis,
+        )
+        self._analyze_btn.pack(side=tk.LEFT, padx=(6, 4), pady=3)
+
+        # Cancel button (hidden initially, shown during analysis on the LEFT
+        # next to the analyze button). Parented to this same status bar.
         self._cancel_btn = ttk.Button(
             btn_frame, text="Cancel",
             command=self._cancel_analysis,
         )
         # Not packed yet — shown only during analysis
 
-        # AI Deep Analysis button
-        self._analyze_btn = ttk.Button(
-            btn_frame, text="\U0001f50d AI Deep Analysis",
-            command=self._trigger_analysis,
-        )
-        self._analyze_btn.pack(side=tk.LEFT, padx=(0, 4))
+        # Left-aligned info segment (AI-tab analog of the Static tab's info
+        # segment). Separate from self._status_label (transient progress /
+        # fresh-cached status); this shows finding counts by severity.
+        #
+        # A single Label cannot carry per-icon tooltips, so the info area is a
+        # container frame holding SEPARATE segment labels (one per icon), each
+        # with its own hover tooltip (see _build_ai_info_segments). Plain
+        # tk.Frame with no extra relief so it blends into the SUNKEN status bar.
+        self._ai_info_frame = tk.Frame(btn_frame)
+        self._ai_info_frame.pack(side=tk.LEFT, padx=(8, 0), pady=3)
+        # Build initial "No analysis yet." content via the shared code path.
+        self._reset_ai_status_info()
 
         # ============================================================== #
         #  TOP content — packed AFTER buttons                            #
@@ -483,9 +527,13 @@ class AIAnalysisTab:
         self._status_label.pack(fill=tk.X, padx=10, pady=(0, 2))
 
         # --- Content area (scrollable text widget) ---
-        # Use expand=False per cross-platform rule (ui-conventions.md rule 1)
+        # expand=True so the results area stretches to fill the window on
+        # resize. This is safe here (despite ui-conventions.md rule 1) because
+        # the button-bearing status bar is packed side=tk.BOTTOM FIRST above,
+        # so its fixed-height strip is reserved and the action buttons cannot
+        # be pushed off-screen on macOS.
         content_frame = ttk.Frame(self._tab_frame)
-        content_frame.pack(fill=tk.BOTH, expand=False, padx=10, pady=(0, 5))
+        content_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=(0, 5))
 
         scrollbar = ttk.Scrollbar(content_frame)
         scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
@@ -521,6 +569,10 @@ class AIAnalysisTab:
             self._send_btn.config(state=tk.DISABLED)
             self._html_btn.config(state=tk.DISABLED)
             self._pdf_btn.config(state=tk.DISABLED)
+            if self._ai_info_frame is not None:
+                self._build_ai_info_segments(
+                    [{"text": "AI analysis unavailable"}]
+                )
 
             self._content_area.config(state=tk.NORMAL)
             self._content_area.delete("1.0", tk.END)
@@ -652,6 +704,91 @@ class AIAnalysisTab:
     #  Analysis Trigger / Background Execution                            #
     # ------------------------------------------------------------------ #
 
+    def _gather_analysis_inputs(self) -> tuple:
+        """Resolve the (rules, variables) to hand to the AI analyzer.
+
+        Pure helper (no Tk access) so it can be unit-tested headlessly. It
+        applies the injected-vs-fallback resolution exactly as ``_trigger_analysis``
+        did inline:
+
+          * rules     — injected ``self._injected_rules`` when not None,
+                        else ``self._app.rules`` when present, else ``[]``.
+          * variables — injected ``self._injected_variables`` when not None,
+                        else ``self._app.variables`` when present, else ``{}``.
+                        The fallback reads ``self._app.variables`` — NOT
+                        ``self._app.rule_variables`` (which does not exist);
+                        the old code silently supplied no variables to
+                        single-group AI analysis (Req 8.8).
+
+        Returns fresh copies (``list``/``dict``) so callers cannot mutate the
+        source collections. Group marker insertion is handled separately by
+        ``_build_analysis_rules``; this helper does not touch markers.
+        """
+        if self._injected_rules is not None:
+            rules = list(self._injected_rules)
+        elif hasattr(self._app, "rules"):
+            rules = list(self._app.rules)
+        else:
+            rules = []
+
+        if self._injected_variables is not None:
+            variables = dict(self._injected_variables)
+        elif hasattr(self._app, "variables"):
+            variables = dict(self._app.variables)
+        else:
+            variables = {}
+
+        return rules, variables
+
+    def _build_analysis_rules(self, rules: list) -> list:
+        """Return the rule list to hand to the AI analyzer, with per-group
+        comment marker rows inserted when multi-group context is present.
+
+        ``self._group_markers`` (when provided by the multi-group caller) is an
+        ordered list of group descriptors, each a mapping with:
+            {"name": str, "order": int, "rule_count": int}
+        The descriptors appear in Group_Order (top group first) and their
+        ``rule_count`` values partition ``rules`` sequentially: the first
+        ``rule_count`` rules belong to the first group, the next batch to the
+        second, and so on. Before each group's slice we insert a comment
+        ``SuricataRule`` whose ``to_string()`` yields:
+            # === Group "<name>" (evaluation order <order>) ===
+        so ``AIRuleAnalyzer`` sees the boundary verbatim (no change to
+        ai_rule_analyzer.py required — it treats it as an ordinary comment row).
+
+        When ``self._group_markers`` is None or empty (single-group review or
+        the default 3-arg construction), the input list is returned unchanged.
+        """
+        markers = self._group_markers
+        if not markers:
+            return rules
+
+        result: list = []
+        idx = 0
+        for group in markers:
+            try:
+                name = group.get("name", "")
+                order = group.get("order", 0)
+                count = int(group.get("rule_count", 0))
+            except AttributeError:
+                # Malformed descriptor — skip marker insertion defensively.
+                continue
+
+            marker = SuricataRule()
+            marker.is_comment = True
+            marker.comment_text = f'# === Group "{name}" (evaluation order {order}) ==='
+            result.append(marker)
+
+            result.extend(rules[idx:idx + count])
+            idx += count
+
+        # Append any trailing rules not covered by the descriptors (defensive:
+        # keeps every original rule in the stream even if counts under-total).
+        if idx < len(rules):
+            result.extend(rules[idx:])
+
+        return result
+
     def _trigger_analysis(self) -> None:
         """Handle AI Deep Analysis button click. Runs in background thread."""
         # Reset cancellation flag
@@ -675,7 +812,7 @@ class AIAnalysisTab:
         if self._analyze_btn is not None:
             self._analyze_btn.config(state=tk.DISABLED)
         if self._cancel_btn is not None:
-            self._cancel_btn.pack(side=tk.LEFT, padx=(4, 0))
+            self._cancel_btn.pack(side=tk.LEFT, padx=(4, 0), pady=3)
         if self._status_label is not None:
             self._status_label.config(text="Preparing analysis\u2026")
 
@@ -780,8 +917,16 @@ class AIAnalysisTab:
         self._elapsed_timer_id = root.after(1000, _tick_elapsed)
 
         # --- Gather inputs for the background thread ---
-        rules = list(self._app.rules) if hasattr(self._app, "rules") else []
-        variables = dict(self._app.rule_variables) if hasattr(self._app, "rule_variables") else {}
+        # Injected-vs-fallback resolution lives in the pure helper
+        # ``_gather_analysis_inputs`` so it can be unit-tested headlessly.
+        rules, variables = self._gather_analysis_inputs()
+
+        # Insert per-group comment marker rows so the AI analyzer (which
+        # re-serializes each rule via SuricataRule.to_string()) can see which
+        # rules belong to which group (Req 8.6). No-op unless group_markers was
+        # provided alongside injected rules (i.e. the multi-group path).
+        rules = self._build_analysis_rules(rules)
+
         static_findings = dict(self._static_findings) if self._static_findings else {}
 
         def _on_progress(message: str) -> None:
@@ -981,6 +1126,8 @@ class AIAnalysisTab:
             # Restore cached results
             self._display_results(self._results)
         else:
+            # No results — reset the status-bar info segment
+            self._reset_ai_status_info()
             # Restore initial state message
             try:
                 if self._content_area is not None:
@@ -1020,6 +1167,160 @@ class AIAnalysisTab:
 
     # Severity sort order (lower = more severe)
     _SEVERITY_ORDER = {"critical": 0, "warning": 1, "info": 2}
+
+    @staticmethod
+    def _attach_status_tooltip(widget, text):
+        """Attach a lightweight hover tooltip to a status-bar Label.
+
+        Uses the project's simple tkinter tooltip pattern (a borderless
+        Toplevel shown on <Enter>, destroyed on <Leave>/<Destroy>). Positioned
+        from the widget's root coordinates so it is safe on ``tk.Label``
+        (unlike bbox('insert'), which only works on text/entry widgets).
+        Guarded so a destroyed widget or missing display never raises.
+
+        Replicated here (rather than imported from suricata_generator) so the
+        AI tab remains self-contained.
+        """
+        state = {"window": None}
+
+        def show(_event=None):
+            if state["window"] is not None or not text:
+                return
+            try:
+                if not widget.winfo_exists():
+                    return
+                x = widget.winfo_rootx() + 12
+                y = widget.winfo_rooty() + widget.winfo_height() + 4
+                tw = tk.Toplevel(widget)
+                tw.wm_overrideredirect(True)
+                tw.wm_geometry(f"+{x}+{y}")
+                tk.Label(
+                    tw, text=text, justify=tk.LEFT,
+                    background="#ffffe0", relief=tk.SOLID, borderwidth=1,
+                    font=("TkDefaultFont", 8),
+                ).pack()
+                state["window"] = tw
+            except tk.TclError:
+                state["window"] = None
+
+        def hide(_event=None):
+            tw = state["window"]
+            if tw is not None:
+                try:
+                    tw.destroy()
+                except tk.TclError:
+                    pass
+                state["window"] = None
+
+        widget.bind("<Enter>", show, add="+")
+        widget.bind("<Leave>", hide, add="+")
+        # Hide if the widget itself is destroyed (window closed).
+        widget.bind("<Destroy>", hide, add="+")
+
+    def _build_ai_info_segments(self, segments: list[dict]) -> None:
+        """Rebuild the row of status-bar info segment labels.
+
+        Clears ``self._ai_info_frame`` (destroying existing children) then
+        packs one ``tk.Label`` per entry in ``segments``, each optionally
+        color-coded and each optionally given a hover tooltip.
+
+        Each ``segment`` is a dict with keys:
+            "text"    : str        — required label text
+            "fg"      : Optional[str] — foreground color (default: theme)
+            "tooltip" : Optional[str] — hover tooltip text (default: none)
+            "padx"    : tuple      — pack padx (default: (6, 0))
+
+        Guarded against a missing/destroyed frame so it is safe on any code
+        path (initial build, boto3-absent branch, reset, update).
+        """
+        frame = self._ai_info_frame
+        if frame is None:
+            return
+        try:
+            if not frame.winfo_exists():
+                return
+            # Clear any existing segment labels.
+            for child in frame.winfo_children():
+                child.destroy()
+
+            for seg in segments:
+                lbl = tk.Label(frame, text=seg.get("text", ""), anchor=tk.W)
+                fg = seg.get("fg")
+                if fg is not None:
+                    lbl.config(fg=fg)
+                lbl.pack(side=tk.LEFT, padx=seg.get("padx", (6, 0)))
+                tooltip = seg.get("tooltip")
+                if tooltip:
+                    self._attach_status_tooltip(lbl, tooltip)
+        except tk.TclError:
+            pass
+
+    def _update_ai_status_info(self, response: StructuredAnalysisResponse) -> None:
+        """Rebuild the left-aligned status-bar info segments to finding counts.
+
+        Counts findings by severity ('critical'/'warning'/'info') across ALL
+        AI sections (_SECTIONS). Uses ``response.finding_count`` for the total
+        when available, else the sum of the sections. Each severity icon is its
+        own color-coded segment with a hover tooltip naming the severity.
+        """
+        if self._ai_info_frame is None:
+            return
+
+        crit = warn = info = 0
+        computed_total = 0
+        for section_key, _title, _prefix in self._SECTIONS:
+            for finding in getattr(response, section_key, []):
+                computed_total += 1
+                sev = (finding.severity or "").lower()
+                if sev == "critical":
+                    crit += 1
+                elif sev == "warning":
+                    warn += 1
+                else:
+                    info += 1
+
+        total = getattr(response, "finding_count", None)
+        if not isinstance(total, int):
+            total = computed_total
+
+        # Severity palette — dark/light aware, consistent with the Static tab.
+        if self._is_dark:
+            c_crit, c_warn, c_info = ("#FF5252", "#FFB74D", "#64B5F6")
+        else:
+            c_crit, c_warn, c_info = ("#D32F2F", "#E65100", "#1565C0")
+
+        segments = [
+            {
+                "text": f"Findings: {total}",
+                "padx": (0, 0),
+                "tooltip": "Total AI findings across all sections",
+            },
+            {
+                "text": f"\U0001f6a8 {crit}",
+                "fg": c_crit,
+                "padx": (10, 0),
+                "tooltip": "Critical",
+            },
+            {
+                "text": f"\u26a0\ufe0f {warn}",
+                "fg": c_warn,
+                "padx": (10, 0),
+                "tooltip": "Warning",
+            },
+            {
+                "text": f"\u2139\ufe0f {info}",
+                "fg": c_info,
+                "padx": (10, 0),
+                "tooltip": "Informational",
+            },
+        ]
+        self._build_ai_info_segments(segments)
+
+    def _reset_ai_status_info(self) -> None:
+        """Reset the status-bar info segments to the muted no-results state."""
+        if self._ai_info_frame is None:
+            return
+        self._build_ai_info_segments([{"text": "No analysis yet.", "padx": (0, 0)}])
 
     def _display_results(self, response: StructuredAnalysisResponse) -> None:
         """Render analysis results in the tab.
@@ -1107,6 +1408,9 @@ class AIAnalysisTab:
 
         if self._status_label is not None:
             self._status_label.config(text=status_text, foreground=status_fg)
+
+        # ── Update status-bar info segment (finding counts by severity) ─
+        self._update_ai_status_info(response)
 
         # ── Update analyze button label ───────────────────────────────
         if self._analyze_btn is not None:

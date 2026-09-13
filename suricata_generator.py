@@ -7184,8 +7184,23 @@ class SuricataRuleGenerator:
             # Fallback if file can't be read
             return "Release Notes:\n\nUnable to load release notes from RELEASE_NOTES.md file."
     
-    def review_rules(self):
-        """Analyze rules for conflicts and shadowing issues"""
+    def review_rules(self, allow_multi_group=False):
+        """Analyze rules for conflicts and shadowing issues.
+
+        Args:
+            allow_multi_group: When ``False`` (the default, used by every
+                existing programmatic caller — post-import "run analyzer",
+                pre-export analysis, etc.), this runs today's exact
+                single-group review over ``self.rules`` with no configuration
+                splash screen (Req 1.8, 1.9). It is passed ``True`` ONLY from
+                the Tools > Review Rules menu item, which opts into the
+                multi-rule-group configuration flow (Req 1.2).
+        """
+        if allow_multi_group:
+            self._review_rules_multi_group()
+            return
+
+        # ── Single-group path (verbatim today's behavior) ───────────────
         if not self.rules:
             messagebox.showinfo("Analysis", "No rules to analyze.")
             return
@@ -7213,45 +7228,10 @@ class SuricataRuleGenerator:
         # Filter actual rules for progress calculation
         actual_rules = [r for r in self.rules if not getattr(r, 'is_comment', False) and not getattr(r, 'is_blank', False)]
         
-        # Create progress dialog
-        progress_dialog = tk.Toplevel(self.root)
-        progress_dialog.title("Analyzing Rules")
-        progress_dialog.geometry("400x170")
-        progress_dialog.transient(self.root)
-        progress_dialog.grab_set()
-        progress_dialog.resizable(False, False)
-        
-        # Center the progress dialog
-        progress_dialog.geometry("+%d+%d" % (self.root.winfo_rootx() + 200, self.root.winfo_rooty() + 200))
-        
-        # Progress frame
-        progress_frame = ttk.Frame(progress_dialog)
-        progress_frame.pack(fill=tk.BOTH, expand=True, padx=20, pady=20)
-        
-        # Status label
-        status_label = ttk.Label(progress_frame, text=f"Analyzing {len(actual_rules)} rules for conflicts...")
-        status_label.pack(pady=(0, 10))
-        
-        # Progress bar
-        progress_bar = ttk.Progressbar(progress_frame, mode='determinate', length=350)
-        progress_bar.pack(pady=(0, 10))
-        
-        # Progress text label
-        progress_text = ttk.Label(progress_frame, text="0%")
-        progress_text.pack(pady=(0, 10))
-        
-        # Cancel button
-        cancel_requested = [False]  # Use list to allow modification in nested function
-        
-        def on_cancel():
-            cancel_requested[0] = True
-            progress_dialog.destroy()
-        
-        cancel_button = ttk.Button(progress_frame, text="Cancel", command=on_cancel)
-        cancel_button.pack()
-        
-        # Force dialog to display
-        progress_dialog.update()
+        # Create the cancellable progress dialog (shared with the multi-group
+        # path via a small helper so cancel/progress behavior stays identical).
+        progress_dialog, progress_bar, progress_text, cancel_requested = \
+            self._build_analysis_progress_dialog(len(actual_rules))
         
         # Perform analysis using the rule analyzer with progress updates
         conflicts = self.rule_analyzer.analyze_rule_conflicts(self.rules, variables, progress_bar, progress_text, progress_dialog, cancel_requested)
@@ -7267,6 +7247,234 @@ class SuricataRuleGenerator:
             self.show_analysis_report(conflicts)
         else:
             messagebox.showinfo("Analysis Cancelled", "Rule analysis was cancelled by user.")
+
+    def _build_analysis_progress_dialog(self, actual_rule_count):
+        """Build the cancellable "Analyzing Rules" progress dialog.
+
+        Extracted verbatim from the single-group path so the multi-group path
+        reuses the exact same progress/cancel dialog (Req 6.5, 11.6). The
+        pre-existing ``transient()`` / ``grab_set()`` usage is preserved as-is.
+
+        Args:
+            actual_rule_count: Number of analyzable rules (for the status label).
+
+        Returns:
+            ``(progress_dialog, progress_bar, progress_text, cancel_requested)``
+            where ``cancel_requested`` is a single-element list flag matching the
+            analyzer's cancellation convention.
+        """
+        progress_dialog = tk.Toplevel(self.root)
+        progress_dialog.title("Analyzing Rules")
+        progress_dialog.geometry("400x170")
+        progress_dialog.transient(self.root)
+        progress_dialog.grab_set()
+        progress_dialog.resizable(False, False)
+
+        # Center the progress dialog
+        progress_dialog.geometry("+%d+%d" % (self.root.winfo_rootx() + 200, self.root.winfo_rooty() + 200))
+
+        # Progress frame
+        progress_frame = ttk.Frame(progress_dialog)
+        progress_frame.pack(fill=tk.BOTH, expand=True, padx=20, pady=20)
+
+        # Status label
+        status_label = ttk.Label(progress_frame, text=f"Analyzing {actual_rule_count} rules for conflicts...")
+        status_label.pack(pady=(0, 10))
+
+        # Progress bar
+        progress_bar = ttk.Progressbar(progress_frame, mode='determinate', length=350)
+        progress_bar.pack(pady=(0, 10))
+
+        # Progress text label
+        progress_text = ttk.Label(progress_frame, text="0%")
+        progress_text.pack(pady=(0, 10))
+
+        # Cancel button
+        cancel_requested = [False]  # Use list to allow modification in nested function
+
+        def on_cancel():
+            cancel_requested[0] = True
+            progress_dialog.destroy()
+
+        cancel_button = ttk.Button(progress_frame, text="Cancel", command=on_cancel)
+        cancel_button.pack()
+
+        # Force dialog to display
+        progress_dialog.update()
+
+        return progress_dialog, progress_bar, progress_text, cancel_requested
+
+    def _review_rules_multi_group(self):
+        """Multi-rule-group review entry (Tools > Review Rules).
+
+        Opens the Policy_Set configuration splash screen seeded with the
+        Current_Group, then — on Analyze — runs the assembled Policy_Set through
+        ``PolicyReviewService`` and shows the attributed results in the existing
+        Review Results window. Editor state and files on disk are never mutated
+        (Req 6.6, 10.2, 10.3): the service operates on analysis copies.
+        """
+        # Local imports to avoid module-load-time coupling (mirrors how the AI
+        # tab is imported inside show_analysis_report).
+        from src.analysis.policy_review import PolicyReviewService
+        from src.gui.policy_set_dialog import PolicySetDialog
+
+        # Build the Current_Group source and the loading service (no editor
+        # state held by the service).
+        service = PolicyReviewService(self.rule_analyzer, self.file_manager)
+        current_group_source = service.make_current_group(
+            self.rules, self.variables, self.current_file
+        )
+
+        # Open the configuration dialog, restoring any session-retained set.
+        dialog = PolicySetDialog(
+            self.root,
+            service,
+            current_group_source,
+            existing_policy_set=getattr(self, '_policy_set_session', None),
+        )
+        policy_set = dialog.show()
+        if policy_set is None:
+            return  # Cancelled — no window, no analysis.
+
+        # Session retention (Req 3.3): remember the assembled set for next open.
+        self._policy_set_session = policy_set
+
+        # No analyzable rules in the assembled set → today's "no rules" message,
+        # no results window (Req 1.6, 10.5). Note we do NOT early-return on an
+        # empty self.rules before the dialog (Req 1.7): the user may add local
+        # groups in the dialog, so the only empty check that applies is on the
+        # assembled set here.
+        analyzable_count = policy_set.total_analyzable_rules()
+        if analyzable_count == 0:
+            messagebox.showinfo("Analysis", "No rules to analyze.")
+            return
+
+        # Undefined-variable prompt over the assembled set (Req 5.5). Reuse the
+        # existing single-group prompt logic faithfully: gather undefined names
+        # across all groups' variables (the service namespaces per group, so
+        # unresolved names stay conservative regardless). If the user cancels
+        # the prompt, back out without analyzing.
+        undefined_vars = []
+        for group in policy_set.ordered_groups():
+            for var, var_data in (group.variables or {}).items():
+                if isinstance(var_data, dict):
+                    definition = var_data.get("definition", "")
+                else:
+                    definition = var_data
+                if not (definition or "").strip() and var not in undefined_vars:
+                    undefined_vars.append(var)
+        if undefined_vars:
+            additional_vars = self.get_variable_definitions(undefined_vars)
+            if additional_vars is None:
+                return  # User cancelled the variable prompt.
+
+        # Large-analysis guard (Req 11.4, 11.5, 11.6): the pairwise shadowing
+        # cost grows with the square of the analyzable rule count.
+        if analyzable_count > 30000:
+            proceed = messagebox.askyesno(
+                "Large Analysis",
+                f"This policy set has {analyzable_count:,} analyzable rules. "
+                "Conflict analysis compares rules pairwise, so the time grows "
+                "with the square of the rule count and may take a long time.\n\n"
+                "Do you want to proceed?",
+            )
+            if not proceed:
+                return  # Declined — back out, no analysis (Req 11.5).
+        elif analyzable_count > 10000:
+            messagebox.showinfo(
+                "Large Analysis",
+                f"This policy set has {analyzable_count:,} analyzable rules. "
+                "Conflict analysis compares rules pairwise, so this may take a "
+                "while. You can cancel from the progress dialog if needed.",
+            )
+
+        # Build the same cancellable progress dialog the single-group path uses.
+        progress_dialog, progress_bar, progress_text, cancel_requested = \
+            self._build_analysis_progress_dialog(analyzable_count)
+
+        # Run the multi-group review through the service.
+        result = service.run(
+            policy_set,
+            progress_bar=progress_bar,
+            progress_text=progress_text,
+            progress_dialog=progress_dialog,
+            cancel_requested=cancel_requested,
+        )
+
+        # Close the progress dialog if still open.
+        try:
+            progress_dialog.destroy()
+        except Exception:
+            pass  # Dialog may already be closed by the cancel button.
+
+        if result.cancelled:
+            messagebox.showinfo("Analysis Cancelled", "Rule analysis was cancelled by user.")
+            return
+
+        # Attribute findings back to their source groups (annotates in place).
+        service.attribute_findings(result)
+
+        # Build the structured policy_set_header dict for the report generators.
+        current = result.policy_set.current_group()
+        policy_set_header = {
+            "groups": [
+                {
+                    "name": group.name,
+                    "is_current": (group is current),
+                    "analyzable_rule_count": group.analyzable_rule_count(),
+                }
+                for group in result.policy_set.ordered_groups()
+            ],
+            "home_net": result.home_net_chosen,
+            "home_net_differed": result.home_net_differed,
+        }
+
+        # Build combined display rules for the AI tab: map each analysis-copy
+        # rule back to its untouched original (via _original_rule) so the user
+        # sees un-namespaced rule text; fall back to the copy if no original.
+        combined_rules = [
+            getattr(rule, '_original_rule', rule)
+            for rule in result.combined.rules
+        ]
+
+        # Build the per-group markers for the AI tab (Req 8.6). ``combined_rules``
+        # is the concatenation of each ordered group's rows in Group_Order, so
+        # each group contributes exactly ``len(group.rules)`` consecutive rows
+        # (comment/blank rows included). That per-group row count is precisely
+        # what ``AIAnalysisTab._build_analysis_rules`` uses to partition
+        # ``combined_rules`` and place a "# === Group ... ===" marker before
+        # each group's slice. ``order`` is the 1-based Group_Order index.
+        group_markers = [
+            {
+                "name": group.name,
+                "order": idx + 1,
+                "rule_count": len(group.rules),
+            }
+            for idx, group in enumerate(result.policy_set.ordered_groups())
+        ]
+
+        # Best-effort variables view for the AI tab: a merged view across groups
+        # with the current group's values winning on conflict (the AI tab is
+        # semantic, not precise resolution — see design "Modified: ai_analysis_tab").
+        ai_variables = {}
+        for group in result.policy_set.ordered_groups():
+            if group is current:
+                continue
+            for key, value in (group.variables or {}).items():
+                ai_variables.setdefault(key, value)
+        if current is not None:
+            for key, value in (current.variables or {}).items():
+                ai_variables[key] = value
+
+        self.show_analysis_report(
+            result.findings,
+            attribution=True,
+            policy_set=result.policy_set,
+            policy_set_header=policy_set_header,
+            combined_rules=combined_rules,
+            ai_variables=ai_variables,
+            group_markers=group_markers,
+        )
     
     def get_variable_definitions(self, undefined_vars=None):
         """Get definitions for undefined variables.
@@ -7427,7 +7635,184 @@ class SuricataRuleGenerator:
         except Exception:
             pass  # Non-critical — never block the main workflow
 
-    def show_analysis_report(self, conflicts):
+    @staticmethod
+    def _summarize_conflict_counts(conflicts):
+        """Return summary finding counts for the analysis status bar.
+
+        Buckets every finding category in the ``conflicts`` dict into the
+        four headline counts shown in the report status bar, plus the grand
+        total. The bucketing mirrors how the report body groups sections:
+
+          * critical           = len(conflicts['critical'])
+          * protocol_layering  = len(conflicts['protocol_layering'])
+          * warning            = summation of ALL warning-type categories
+                                 (the pairwise 'warning' list plus the
+                                 AWS/compliance and flow categories the
+                                 report renders under warning headers), and
+                                 the warning-severity items inside the mixed
+                                 'protocol_keyword_mismatch' category.
+          * info               = len(conflicts['info']) plus the info-only
+                                 categories and the info-severity items
+                                 inside 'protocol_keyword_mismatch'.
+          * total              = every finding across every category.
+
+        Returns a dict with keys: total, critical, protocol_layering,
+        warning, info. Missing categories are treated as empty, so this is
+        safe for a partial/cancelled conflicts dict too.
+        """
+        def _len(key):
+            value = conflicts.get(key) if hasattr(conflicts, 'get') else None
+            return len(value) if value else 0
+
+        # Categories the report renders under a WARNING-style header.
+        warning_categories = (
+            'warning', 'sticky_buffer_order', 'udp_flow_established',
+            'contradictory_flow', 'packet_drop_flow_pass',
+            'unsupported_keywords', 'pcre_restrictions',
+            'threshold_limited', 'priority_strict_order',
+        )
+        # Categories the report renders under an INFO-style header.
+        info_categories = ('info', 'port_protocol_mismatch')
+
+        warning = sum(_len(k) for k in warning_categories)
+        info = sum(_len(k) for k in info_categories)
+
+        # 'protocol_keyword_mismatch' is mixed-severity: split it per item.
+        pkm = conflicts.get('protocol_keyword_mismatch') if hasattr(conflicts, 'get') else None
+        if pkm:
+            for issue in pkm:
+                if issue.get('severity') == 'warning':
+                    warning += 1
+                else:
+                    info += 1
+
+        critical = _len('critical')
+        protocol_layering = _len('protocol_layering')
+        total = critical + protocol_layering + warning + info
+        return {
+            'total': total,
+            'critical': critical,
+            'protocol_layering': protocol_layering,
+            'warning': warning,
+            'info': info,
+        }
+
+    @staticmethod
+    def _attach_status_tooltip(widget, text):
+        """Attach a lightweight hover tooltip to a status-bar Label.
+
+        Uses the project's simple tkinter tooltip pattern (a borderless
+        Toplevel shown on <Enter>, destroyed on <Leave>). Positioned from
+        the widget's root coordinates so it is safe on ``tk.Label`` (unlike
+        bbox('insert'), which only works on text/entry widgets). Guarded so
+        a destroyed widget or missing display never raises.
+        """
+        state = {'window': None}
+
+        def show(_event=None):
+            if state['window'] is not None or not text:
+                return
+            try:
+                if not widget.winfo_exists():
+                    return
+                x = widget.winfo_rootx() + 12
+                y = widget.winfo_rooty() + widget.winfo_height() + 4
+                tw = tk.Toplevel(widget)
+                tw.wm_overrideredirect(True)
+                tw.wm_geometry(f"+{x}+{y}")
+                tk.Label(tw, text=text, justify=tk.LEFT,
+                         background="#ffffe0", relief=tk.SOLID, borderwidth=1,
+                         font=("TkDefaultFont", 8)).pack()
+                state['window'] = tw
+            except tk.TclError:
+                state['window'] = None
+
+        def hide(_event=None):
+            tw = state['window']
+            if tw is not None:
+                try:
+                    tw.destroy()
+                except tk.TclError:
+                    pass
+                state['window'] = None
+
+        widget.bind('<Enter>', show, add='+')
+        widget.bind('<Leave>', hide, add='+')
+        # Hide if the widget itself is destroyed (window closed).
+        widget.bind('<Destroy>', hide, add='+')
+
+    def _build_static_status_info(self, status_bar, conflicts, policy_set):
+        """Populate the left side of the Static Analysis status bar.
+
+        Lays out, left-aligned on the shared bottom bar:
+            Rules: N  |  Findings: N   🚨 C   🔄 P   ⚠️ W   ℹ️ I  [ |  Policy: G groups ]
+        The severity counts are color-coded (dark-mode aware). The
+        ``Policy: G groups`` segment is shown only for a multi-group review
+        (``policy_set`` provided); it is omitted for a single-group review.
+        """
+        counts = self._summarize_conflict_counts(conflicts)
+        total_rules = len([
+            r for r in self.rules
+            if not getattr(r, 'is_comment', False)
+            and not getattr(r, 'is_blank', False)
+        ])
+
+        # Dark-mode aware palette (ui-conventions.md pattern).
+        import platform as _plat
+        import subprocess as _sp
+        is_dark = False
+        if _plat.system() == 'Darwin':
+            try:
+                _r = _sp.run(['defaults', 'read', '-g', 'AppleInterfaceStyle'],
+                             capture_output=True, text=True)
+                is_dark = 'Dark' in _r.stdout
+            except Exception:
+                pass
+        if is_dark:
+            c_crit, c_warn, c_info, c_proto, c_muted = (
+                '#FF5252', '#FFB74D', '#64B5F6', '#B0BEC5', '#9E9E9E')
+        else:
+            c_crit, c_warn, c_info, c_proto, c_muted = (
+                '#D32F2F', '#E65100', '#1565C0', '#37474F', '#555555')
+
+        pady = 3
+        def _seg(text, fg=None, padx=(6, 0), tooltip=None):
+            lbl = tk.Label(status_bar, text=text, anchor=tk.W)
+            if fg is not None:
+                lbl.config(fg=fg)
+            lbl.pack(side=tk.LEFT, padx=padx, pady=pady)
+            if tooltip:
+                self._attach_status_tooltip(lbl, tooltip)
+            return lbl
+
+        _seg(f"Rules: {total_rules}", padx=(8, 0),
+             tooltip="Total rules analyzed (excludes comment and blank rows)")
+        _seg("|", fg=c_muted)
+        _seg(f"Findings: {counts['total']}",
+             tooltip="Total findings across all categories")
+        _seg(f"🚨 {counts['critical']}", fg=c_crit, padx=(10, 0),
+             tooltip="Critical")
+        _seg(f"🔄 {counts['protocol_layering']}", fg=c_proto,
+             tooltip="Protocol Layering")
+        _seg(f"⚠️ {counts['warning']}", fg=c_warn,
+             tooltip="Warning")
+        _seg(f"ℹ️ {counts['info']}", fg=c_info,
+             tooltip="Informational")
+
+        # Multi-group only: show the policy group count.
+        if policy_set is not None:
+            try:
+                group_count = policy_set.total_group_count()
+            except Exception:
+                group_count = None
+            if group_count:
+                _seg("|", fg=c_muted, padx=(10, 0))
+                _seg(f"Policy: {group_count} groups")
+
+    def show_analysis_report(self, conflicts, *, attribution=None,
+                             policy_set=None, policy_set_header=None,
+                             combined_rules=None, ai_variables=None,
+                             group_markers=None):
         """Show analysis results in a tabbed notebook window.
 
         Creates a Toplevel with a ttk.Notebook containing:
@@ -7439,6 +7824,26 @@ class SuricataRuleGenerator:
           - minsize() set (Req 20.2)
           - Buttons packed BOTTOM before content
           - Window is resizable by default
+
+        Args (all keyword-only, all default ``None`` → today's exact behavior):
+            attribution: On/off flag forwarded to the report generators; when
+                truthy the Static tab renders per-finding group attribution
+                (findings carry their own ``_attribution`` annotation). When
+                ``None`` the report is byte-for-byte identical to today (Req 8.1).
+            policy_set: The assembled Policy_Set (multi-group only). Reserved for
+                callers/tests; the report header is driven by
+                ``policy_set_header``.
+            policy_set_header: Structured dict describing the policy-set summary
+                header (groups, home_net, home_net_differed) forwarded to the
+                generators in place of the single ``File:`` line (Req 8.2, 8.3).
+            combined_rules: Combined display rules (originals) for the AI tab so
+                it reasons about the whole policy (Req 8.5).
+            ai_variables: Best-effort merged variables view for the AI tab.
+            group_markers: Ordered list of group descriptors
+                (``{"name", "order", "rule_count"}``) used by the AI tab to
+                insert ``# === Group ... ===`` comment marker rows into the
+                combined stream so the analyzer sees group membership (Req 8.6).
+                ``None`` in the single-group path.
         """
         # Local import to avoid circular dependency (ai_analysis_tab
         # uses TYPE_CHECKING guard for SuricataRuleGenerator)
@@ -7450,15 +7855,34 @@ class SuricataRuleGenerator:
         report_window.minsize(800, 500)
         # NOTE: no transient() call — per Req 20.3 / ui-conventions.md rule 3
 
-        # ── Static Analysis tab: buttons packed BOTTOM first ─────────
-        # Pack buttons at the bottom of the window BEFORE the notebook
-        # so they remain visible regardless of window size (rule 5).
-        buttons_frame = ttk.Frame(report_window)
-        buttons_frame.pack(side=tk.BOTTOM, fill=tk.X, pady=10, padx=10)
+        # ── Status bar: info (left) + action buttons (right), one line ──
+        # A single bordered bottom bar (like the main editor status bar)
+        # packed side=tk.BOTTOM FIRST so its fixed-height strip is reserved
+        # before the report area expands into the remaining space. This lets
+        # the report stretch (rule: expand=True below) while GUARANTEEING the
+        # action buttons never get pushed off-screen on macOS (rule 5 +
+        # ui-conventions history). Buttons live on the right of this same bar.
+        status_bar = tk.Frame(report_window, relief=tk.SUNKEN, bd=1)
+        status_bar.pack(side=tk.BOTTOM, fill=tk.X)
 
-        ttk.Button(buttons_frame, text="Save as HTML", command=lambda: self.save_report_html(conflicts)).pack(side=tk.LEFT, padx=5)
-        ttk.Button(buttons_frame, text="Save as PDF", command=lambda: self.save_report_pdf(conflicts)).pack(side=tk.LEFT, padx=5)
-        ttk.Button(buttons_frame, text="Close", command=report_window.destroy).pack(side=tk.LEFT, padx=5)
+        # Action buttons (right-aligned). The Save buttons forward the
+        # multi-group context so exported HTML/PDF matches the on-screen
+        # report (Req 9.1-9.4); with all kwargs None they are identical to today.
+        ttk.Button(status_bar, text="Close",
+                   command=report_window.destroy).pack(side=tk.RIGHT, padx=(4, 6), pady=3)
+        ttk.Button(status_bar, text="Save as PDF",
+                   command=lambda: self.save_report_pdf(
+                       conflicts, attribution=attribution,
+                       policy_set_header=policy_set_header)).pack(side=tk.RIGHT, padx=4, pady=3)
+        ttk.Button(status_bar, text="Save as HTML",
+                   command=lambda: self.save_report_html(
+                       conflicts, attribution=attribution,
+                       policy_set_header=policy_set_header)).pack(side=tk.RIGHT, padx=4, pady=3)
+
+        # Info segments (left-aligned): Rules | Findings + severity counts
+        # [ | Policy: N groups ]. Populated by the shared helper so counts
+        # stay consistent with the report body.
+        self._build_static_status_info(status_bar, conflicts, policy_set)
 
         # ── Notebook ─────────────────────────────────────────────────
         notebook = ttk.Notebook(report_window)
@@ -7468,9 +7892,14 @@ class SuricataRuleGenerator:
         static_tab = ttk.Frame(notebook)
         notebook.add(static_tab, text="Static Analysis")
 
-        # Create text widget with scrollbar (expand=False per rule 1)
+        # Create text widget with scrollbar. expand=True so the report
+        # stretches to fill the window; safe because the status bar (with
+        # the action buttons) is packed side=tk.BOTTOM FIRST above, so its
+        # strip is reserved and the buttons cannot be pushed off-screen on
+        # macOS (the concern behind ui-conventions rule 1 does not apply
+        # here because the buttons own a reserved bottom bar).
         text_frame = ttk.Frame(static_tab)
-        text_frame.pack(fill=tk.BOTH, expand=False, padx=10, pady=10)
+        text_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
 
         text_widget = tk.Text(text_frame, wrap=tk.WORD, font=("Consolas", 10))
         scrollbar = ttk.Scrollbar(text_frame, orient=tk.VERTICAL, command=text_widget.yview)
@@ -7479,8 +7908,11 @@ class SuricataRuleGenerator:
         text_widget.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
 
-        # Generate report content
-        report = self.generate_analysis_report(conflicts)
+        # Generate report content. Route through generate_analysis_report so
+        # the Static tab and the Save buttons reuse the same values; the kwargs
+        # default to None → today's exact single-group report.
+        report = self.generate_analysis_report(
+            conflicts, attribution=attribution, policy_set_header=policy_set_header)
         text_widget.insert(tk.END, report)
 
         # Make read-only but allow selection and copying
@@ -7535,15 +7967,42 @@ class SuricataRuleGenerator:
         text_widget.bind("<Button-5>", _on_mousewheel)
 
         # ── Tab 2: AI Analysis ───────────────────────────────────────
-        self._ai_analysis_tab = AIAnalysisTab(notebook, self, conflicts)
+        # When multi-group context is provided, feed the AI tab the combined
+        # display rules + merged variables + per-group markers so it reasons
+        # about the whole policy and can see group membership (Req 8.5, 8.6).
+        # Task 8 (8.1/8.2) added the optional constructor args
+        # ``rules=``/``variables=``/``group_markers=``, so no TypeError guard is
+        # needed anymore.
+        if combined_rules is not None:
+            self._ai_analysis_tab = AIAnalysisTab(
+                notebook, self, conflicts,
+                rules=combined_rules, variables=ai_variables,
+                group_markers=group_markers)
+        else:
+            # Single-group / default path: unchanged from today.
+            self._ai_analysis_tab = AIAnalysisTab(notebook, self, conflicts)
     
-    def generate_analysis_report(self, conflicts):
-        """Generate formatted analysis report with timestamp and version info"""
+    def generate_analysis_report(self, conflicts, *, attribution=None,
+                                 policy_set_header=None):
+        """Generate formatted analysis report with timestamp and version info.
+
+        ``attribution`` and ``policy_set_header`` are forwarded to the analyzer's
+        generator; both default ``None`` → today's single-group output unchanged
+        (Req 9.3).
+        """
         total_rules = len([r for r in self.rules if not getattr(r, 'is_comment', False) and not getattr(r, 'is_blank', False)])
-        return self.rule_analyzer.generate_analysis_report(conflicts, total_rules, self.current_file, self.get_version_number())
+        return self.rule_analyzer.generate_analysis_report(
+            conflicts, total_rules, self.current_file, self.get_version_number(),
+            attribution=attribution, policy_set_header=policy_set_header)
     
-    def save_report_html(self, conflicts):
-        """Save analysis report as HTML file"""
+    def save_report_html(self, conflicts, *, attribution=None,
+                         policy_set_header=None):
+        """Save analysis report as HTML file.
+
+        Forwards ``attribution``/``policy_set_header`` into the HTML generator so
+        the exported report carries the policy-level header + attribution
+        (Req 9.1, 9.2, 9.3, 9.4). Defaults ``None`` → today's export unchanged.
+        """
         filename = filedialog.asksaveasfilename(
             title="Save Analysis Report as HTML",
             defaultextension=".html",
@@ -7552,22 +8011,32 @@ class SuricataRuleGenerator:
         
         if filename:
             try:
-                html_content = self.generate_html_report(conflicts)
+                html_content = self.generate_html_report(
+                    conflicts, attribution=attribution,
+                    policy_set_header=policy_set_header)
                 with open(filename, 'w', encoding='utf-8') as f:
                     f.write(html_content)
                 messagebox.showinfo("Success", f"Report saved as {filename}")
             except Exception as e:
                 messagebox.showerror("Error", f"Failed to save HTML report: {str(e)}")
     
-    def save_report_pdf(self, conflicts):
-        """Save analysis report as PDF file"""
+    def save_report_pdf(self, conflicts, *, attribution=None,
+                        policy_set_header=None):
+        """Save analysis report as PDF file.
+
+        Forwards ``attribution``/``policy_set_header`` into the HTML generator so
+        the exported PDF carries the policy-level header + attribution
+        (Req 9.1, 9.2, 9.3, 9.4). Defaults ``None`` → today's export unchanged.
+        """
         try:
             import webbrowser
             import tempfile
             import os
             
             # Generate HTML first
-            html_content = self.generate_html_report(conflicts)
+            html_content = self.generate_html_report(
+                conflicts, attribution=attribution,
+                policy_set_header=policy_set_header)
             
             # Create temporary HTML file
             with tempfile.NamedTemporaryFile(mode='w', suffix='.html', delete=False, encoding='utf-8') as temp_file:
@@ -7582,10 +8051,18 @@ class SuricataRuleGenerator:
         except Exception as e:
             messagebox.showerror("Error", f"Failed to export PDF: {str(e)}")
     
-    def generate_html_report(self, conflicts):
-        """Generate HTML formatted analysis report"""
+    def generate_html_report(self, conflicts, *, attribution=None,
+                             policy_set_header=None):
+        """Generate HTML formatted analysis report.
+
+        ``attribution`` and ``policy_set_header`` are forwarded to the analyzer's
+        HTML generator; both default ``None`` → today's single-group output
+        unchanged (Req 9.3).
+        """
         total_rules = len([r for r in self.rules if not getattr(r, 'is_comment', False) and not getattr(r, 'is_blank', False)])
-        return self.rule_analyzer.generate_html_report(conflicts, total_rules, self.current_file, self.get_version_number())
+        return self.rule_analyzer.generate_html_report(
+            conflicts, total_rules, self.current_file, self.get_version_number(),
+            attribution=attribution, policy_set_header=policy_set_header)
     
     
 

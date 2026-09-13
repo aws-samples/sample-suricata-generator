@@ -3549,10 +3549,172 @@ class RuleAnalyzer:
         
         return issues
     
+    def _format_line_ref(self, line, attribution=None) -> str:
+        """Render a single finding line reference for display.
+
+        This is the one place per-finding line numbering is rendered so the
+        text and HTML reports stay consistent (Req 7.4, 7.5, 7.6).
+
+        Args:
+            line: The 1-based line number as computed by the analyzer (its
+                position in the analyzed list). In multi-group mode this is the
+                Combined_Rule_Stream position; in single-group mode it is the
+                position within the one group.
+            attribution: A ``RuleAttribution`` (from
+                ``src.analysis.policy_models``) for this line, or ``None``.
+                When ``None`` (single-group / no attribution), the today's exact
+                ``Line N`` text is produced. When a ``RuleAttribution`` is
+                supplied, a group-qualified ``group "X" line M`` form is produced
+                using the source group's name and the rule's in-group line
+                number, so the reader can locate the rule in the right file
+                (matches the design mockup phrasing, e.g.
+                ``analysis_rule_group.suricata line 52``).
+
+        Returns:
+            The rendered reference string (no surrounding markup).
+        """
+        if attribution is None:
+            return f"Line {line}"
+        return f'{attribution.group_name} line {attribution.in_group_line}'
+
+    def _line_ref_for_field(self, conflict, field_name, attribution):
+        """Resolve the display line-ref for a finding's line field.
+
+        Looks up the per-finding ``_attribution`` annotation (added in-place by
+        ``PolicyReviewService.attribute_findings``) for ``field_name`` and routes
+        it through ``_format_line_ref``. When attribution is off (``attribution``
+        falsy) or the finding carries no ``_attribution``/ref for this field, the
+        plain ``Line N`` text is reproduced exactly, guaranteeing single-group
+        byte-for-byte parity.
+
+        Args:
+            conflict: The finding dict.
+            field_name: The line field to render (e.g. ``"upper_line"``,
+                ``"lower_line"``, ``"line"``, ``"line1"``, ``"line2"``).
+            attribution: The generator's ``attribution`` argument (on/off flag).
+
+        Returns:
+            The rendered line-ref string for this field.
+        """
+        line_value = conflict.get(field_name)
+        rule_attr = None
+        if attribution:
+            attr_data = conflict.get("_attribution")
+            if isinstance(attr_data, dict):
+                ref = attr_data.get("refs", {}).get(field_name)
+                if isinstance(ref, dict):
+                    rule_attr = ref.get("attribution")
+        return self._format_line_ref(line_value, rule_attr)
+
+    def _suggestion_text(self, conflict, attribution):
+        """Return the suggestion/action text, made group-aware when applicable.
+
+        For a Cross_Group_Finding (the finding's two rules originate from two
+        different Rule_Groups, ``_attribution["cross_group"] is True``), the
+        intra-file "move line X above line Y" guidance does not apply, so a
+        group-aware action is produced instead: reorder the groups (move the
+        group that must win higher in the evaluation list) or move a rule
+        between groups (Req 7.8). For same-group and single-group findings the
+        stored ``suggestion`` is returned verbatim (today's exact text, Req 7.9).
+
+        Args:
+            conflict: The finding dict.
+            attribution: The generator's ``attribution`` argument (on/off flag).
+
+        Returns:
+            The action/suggestion string to display.
+        """
+        if attribution:
+            attr_data = conflict.get("_attribution")
+            if isinstance(attr_data, dict) and attr_data.get("cross_group"):
+                return self._cross_group_suggestion(conflict, attr_data)
+        return conflict.get("suggestion", "")
+
+    def _cross_group_suggestion(self, conflict, attr_data) -> str:
+        """Build group-aware action text for a cross-group finding (Req 7.8).
+
+        Uses the upper (earlier-evaluated) and lower rules' source groups to
+        tell the user to ensure the group that must take effect is evaluated
+        first (move it higher in the list), or to move the rule between groups.
+        """
+        refs = attr_data.get("refs", {}) if isinstance(attr_data, dict) else {}
+        upper_attr = (refs.get("upper_line") or refs.get("line1") or {}).get("attribution")
+        lower_attr = (refs.get("lower_line") or refs.get("line2") or {}).get("attribution")
+        upper_name = upper_attr.group_name if upper_attr is not None else "the earlier group"
+        lower_name = lower_attr.group_name if lower_attr is not None else "the later group"
+        return (
+            f"Ensure {lower_name} is evaluated before {upper_name} "
+            f"(move it higher in the list), or move the affected rule into an "
+            f"earlier group, so the intended rule takes effect."
+        )
+
+    def _format_policy_set_header_text(self, header) -> str:
+        """Render the multi-group Policy_Set summary header (plain text).
+
+        Enumerates every group in Group_Order with its ordinal, name, a
+        current-group flag, and analyzable rule count, and notes the chosen
+        policy-wide $HOME_NET when the groups disagreed (Req 8.2, 8.3, 9.2).
+        See ``generate_analysis_report`` for the ``header`` dict shape.
+        """
+        lines = "Rule groups analyzed (evaluation order, top first):\n"
+        for ordinal, group in enumerate(header.get("groups", []), 1):
+            name = group.get("name", "")
+            current_marker = " (current)" if group.get("is_current") else ""
+            count = group.get("analyzable_rule_count", 0)
+            lines += f"  {ordinal}. {name}{current_marker} \u2014 {count} rules\n"
+        home_net = header.get("home_net")
+        if home_net and header.get("home_net_differed"):
+            lines += f"Policy $HOME_NET: {home_net} (defined in currently open file; other groups defined differently)\n"
+        elif home_net:
+            lines += f"Policy $HOME_NET: {home_net}\n"
+        return lines
+
     def generate_analysis_report(self, conflicts: Dict[str, List[Dict]],
                                total_rules: int, current_file: str = None, 
-                               version: str = None) -> str:
-        """Generate formatted analysis report with timestamp and version info"""
+                               version: str = None, *, attribution=None,
+                               policy_set_header=None) -> str:
+        """Generate formatted analysis report with timestamp and version info
+
+        Args:
+            conflicts: The Findings_Dict from ``analyze_rule_conflicts``.
+            total_rules: Total analyzable rule count for the summary line.
+            current_file: File name for the single-group ``File:`` header line.
+            version: Unused legacy arg (the analyzer's own version is always
+                used); retained for signature stability.
+            attribution: Multi-group attribution switch (keyword-only, additive).
+                When falsy/``None`` (the default), per-finding line rendering and
+                suggestions are byte-for-byte identical to today. When truthy,
+                each finding's own ``_attribution`` annotation (added in place by
+                ``PolicyReviewService.attribute_findings``) is consulted so line
+                references render as ``group "X" line M`` and cross-group findings
+                get group-aware suggestions. The value is used only as an on/off
+                flag; the per-finding data travels on the findings themselves, so
+                passing ``True`` is sufficient.
+            policy_set_header: Multi-group Policy_Set summary header (keyword-only,
+                additive). When ``None`` (the default), today's single ``File:``
+                header line is emitted unchanged. When provided it replaces that
+                line with an enumerated policy-level header. Expected shape (a
+                plain dict, built by Task 7.3 from a ``PolicySet``)::
+
+                    {
+                        "groups": [
+                            {"name": str,          # group name / filename
+                             "is_current": bool,   # True for the Current_Group
+                             "analyzable_rule_count": int},
+                            ...                     # in Group_Order (top first)
+                        ],
+                        "home_net": Optional[str],  # chosen policy-wide $HOME_NET
+                        "home_net_differed": bool,  # True if groups disagreed
+                    }
+
+        Returns:
+            The rendered plain-text report.
+
+        Note:
+            With ``attribution`` and ``policy_set_header`` both absent/``None``
+            the output is byte-for-byte identical to the pre-feature report
+            (single-group parity, Req 1.4, 1.5, 7.7, 8.4, 9.3).
+        """
         import datetime
         
         total_conflicts = sum(len(conflicts[severity]) for severity in conflicts)
@@ -3561,11 +3723,19 @@ class RuleAnalyzer:
         # Always use the analyzer's own version
         analyzer_version = get_analyzer_version()
         
-        report = f"SURICATA RULE ANALYSIS REPORT\n"
-        report += f"=" * 50 + "\n\n"
-        report += f"Generated: {timestamp}\n"
-        report += f"Rule Analyzer Version: {analyzer_version}\n"
-        report += f"File: {current_file or 'Unsaved'}\n\n"
+        if policy_set_header is not None:
+            report = f"SURICATA RULE ANALYSIS REPORT (Multi-Rule-Group / Policy-Level Review)\n"
+            report += f"=" * 50 + "\n\n"
+            report += f"Generated: {timestamp}\n"
+            report += f"Rule Analyzer Version: {analyzer_version}\n"
+            report += self._format_policy_set_header_text(policy_set_header)
+            report += "\n"
+        else:
+            report = f"SURICATA RULE ANALYSIS REPORT\n"
+            report += f"=" * 50 + "\n\n"
+            report += f"Generated: {timestamp}\n"
+            report += f"Rule Analyzer Version: {analyzer_version}\n"
+            report += f"File: {current_file or 'Unsaved'}\n\n"
         
         # Disclaimer
         report += "DISCLAIMER:\n"
@@ -3587,47 +3757,51 @@ class RuleAnalyzer:
             report += f"🔄 PROTOCOL LAYERING CONFLICTS ({len(conflicts['protocol_layering'])})\n"
             report += f"-" * 30 + "\n"
             for i, conflict in enumerate(conflicts['protocol_layering'], 1):
-                report += f"{i}. Line {conflict['upper_line']} vs Line {conflict['lower_line']}\n"
+                report += f"{i}. {self._line_ref_for_field(conflict, 'upper_line', attribution)} vs {self._line_ref_for_field(conflict, 'lower_line', attribution)}\n"
                 report += f"   Issue: {conflict['issue']}\n"
                 report += f"   Upper: {conflict['upper_rule'].to_string()[:80]}...\n"
                 report += f"   Lower: {conflict['lower_rule'].to_string()[:80]}...\n"
-                report += f"   Action: {conflict['suggestion']}\n\n"
+                report += f"   Action: {self._suggestion_text(conflict, attribution)}\n\n"
         
         # Critical issues (displayed second)
         if conflicts['critical']:
             report += f"🚨 CRITICAL ISSUES ({len(conflicts['critical'])})\n"
             report += f"-" * 30 + "\n"
             for i, conflict in enumerate(conflicts['critical'], 1):
-                report += f"{i}. Line {conflict['upper_line']} shadows Line {conflict['lower_line']}\n"
+                report += f"{i}. {self._line_ref_for_field(conflict, 'upper_line', attribution)} shadows {self._line_ref_for_field(conflict, 'lower_line', attribution)}\n"
                 report += f"   Issue: {conflict['issue']}\n"
                 report += f"   Upper: {conflict['upper_rule'].to_string()[:80]}...\n"
                 report += f"   Lower: {conflict['lower_rule'].to_string()[:80]}...\n"
-                report += f"   Action: {conflict['suggestion']}\n\n"
+                report += f"   Action: {self._suggestion_text(conflict, attribution)}\n\n"
         
         # Warning issues
         if conflicts['warning']:
             report += f"⚠️ WARNING ISSUES ({len(conflicts['warning'])})\n"
             report += f"-" * 30 + "\n"
             for i, conflict in enumerate(conflicts['warning'], 1):
-                report += f"{i}. Line {conflict['upper_line']} shadows Line {conflict['lower_line']}\n"
+                report += f"{i}. {self._line_ref_for_field(conflict, 'upper_line', attribution)} shadows {self._line_ref_for_field(conflict, 'lower_line', attribution)}\n"
                 report += f"   Issue: {conflict['issue']}\n"
-                report += f"   Action: {conflict['suggestion']}\n\n"
+                report += f"   Upper: {conflict['upper_rule'].to_string()[:80]}...\n"
+                report += f"   Lower: {conflict['lower_rule'].to_string()[:80]}...\n"
+                report += f"   Action: {self._suggestion_text(conflict, attribution)}\n\n"
         
         # Info issues
         if conflicts['info']:
             report += f"ℹ️ INFORMATIONAL ({len(conflicts['info'])})\n"
             report += f"-" * 30 + "\n"
             for i, conflict in enumerate(conflicts['info'], 1):
-                report += f"{i}. Line {conflict['upper_line']} shadows Line {conflict['lower_line']}\n"
+                report += f"{i}. {self._line_ref_for_field(conflict, 'upper_line', attribution)} shadows {self._line_ref_for_field(conflict, 'lower_line', attribution)}\n"
                 report += f"   Issue: {conflict['issue']}\n"
-                report += f"   Action: {conflict['suggestion']}\n\n"
+                report += f"   Upper: {conflict['upper_rule'].to_string()[:80]}...\n"
+                report += f"   Lower: {conflict['lower_rule'].to_string()[:80]}...\n"
+                report += f"   Action: {self._suggestion_text(conflict, attribution)}\n\n"
         
         # Sticky buffer ordering issues
         if conflicts.get('sticky_buffer_order'):
             report += f"⚠️ STICKY BUFFER ORDERING ISSUES ({len(conflicts['sticky_buffer_order'])})\n"
             report += f"-" * 30 + "\n"
             for i, issue in enumerate(conflicts['sticky_buffer_order'], 1):
-                report += f"{i}. Line {issue['line']}\n"
+                report += f"{i}. {self._line_ref_for_field(issue, 'line', attribution)}\n"
                 report += f"   Issue: {issue['issue']}\n"
                 report += f"   Rule: {issue['rule'].to_string()[:80]}...\n"
                 report += f"   Action: {issue['suggestion']}\n\n"
@@ -3637,7 +3811,7 @@ class RuleAnalyzer:
             report += f"⚠️ UDP FLOW:ESTABLISHED WARNINGS ({len(conflicts['udp_flow_established'])})\n"
             report += f"-" * 30 + "\n"
             for i, issue in enumerate(conflicts['udp_flow_established'], 1):
-                report += f"{i}. Line {issue['line']} - {issue['protocol']} {issue['action']} rule\n"
+                report += f"{i}. {self._line_ref_for_field(issue, 'line', attribution)} - {issue['protocol']} {issue['action']} rule\n"
                 report += f"   Issue: {issue['issue']}\n"
                 report += f"   Rule: {issue['rule'].to_string()[:80]}...\n"
                 report += f"   Action: {issue['suggestion']}\n\n"
@@ -3654,7 +3828,7 @@ class RuleAnalyzer:
             report += f"-" * 30 + "\n"
             for i, issue in enumerate(conflicts['protocol_keyword_mismatch'], 1):
                 severity_icon = "⚠️" if issue['severity'] == 'warning' else "ℹ️"
-                report += f"{i}. {severity_icon} Line {issue['line']}\n"
+                report += f"{i}. {severity_icon} {self._line_ref_for_field(issue, 'line', attribution)}\n"
                 report += f"   Issue: {issue['issue']}\n"
                 report += f"   Rule: {issue['rule'].to_string()[:80]}...\n"
                 report += f"   Suggestion: {issue['suggestion']}\n\n"
@@ -3664,7 +3838,7 @@ class RuleAnalyzer:
             report += f"ℹ️ PORT/PROTOCOL MISMATCH (INFO) ({len(conflicts['port_protocol_mismatch'])})\n"
             report += f"-" * 30 + "\n"
             for i, issue in enumerate(conflicts['port_protocol_mismatch'], 1):
-                report += f"{i}. Line {issue['line']}\n"
+                report += f"{i}. {self._line_ref_for_field(issue, 'line', attribution)}\n"
                 report += f"   Issue: {issue['issue']}\n"
                 report += f"   Rule: {issue['rule'].to_string()[:80]}...\n"
                 report += f"   Suggestion: {issue['suggestion']}\n\n"
@@ -3674,7 +3848,7 @@ class RuleAnalyzer:
             report += f"⚠️ CONTRADICTORY FLOW KEYWORDS ({len(conflicts['contradictory_flow'])})\n"
             report += f"-" * 30 + "\n"
             for i, issue in enumerate(conflicts['contradictory_flow'], 1):
-                report += f"{i}. Line {issue['line']}\n"
+                report += f"{i}. {self._line_ref_for_field(issue, 'line', attribution)}\n"
                 report += f"   Issue: {issue['issue']}\n"
                 report += f"   Rule: {issue['rule'].to_string()[:80]}...\n"
                 report += f"   Suggestion: {issue['suggestion']}\n\n"
@@ -3684,9 +3858,11 @@ class RuleAnalyzer:
             report += f"⚠️ PACKET/FLOW ACTION CONFLICTS (Suricata <8.0 behavior) ({len(conflicts['packet_drop_flow_pass'])})\n"
             report += f"-" * 30 + "\n"
             for i, issue in enumerate(conflicts['packet_drop_flow_pass'], 1):
-                report += f"{i}. Line {issue['line1']} vs Line {issue['line2']}\n"
+                report += f"{i}. {self._line_ref_for_field(issue, 'line1', attribution)} vs {self._line_ref_for_field(issue, 'line2', attribution)}\n"
                 report += f"   Issue: {issue['issue']}\n"
-                report += f"   Suggestion: {issue['suggestion']}\n\n"
+                report += f"   Upper: {issue['rule1'].to_string()[:80]}...\n"
+                report += f"   Lower: {issue['rule2'].to_string()[:80]}...\n"
+                report += f"   Suggestion: {self._suggestion_text(issue, attribution)}\n\n"
         
         # Asymmetric flow policy issues (both CRITICAL and WARNING severities)
         if conflicts.get('asymmetric_flow'):
@@ -3698,30 +3874,30 @@ class RuleAnalyzer:
                 report += f"🚨 ASYMMETRIC FLOW POLICIES - CRITICAL ({critical_count})\n"
                 report += f"-" * 30 + "\n"
                 for i, issue in enumerate([iss for iss in conflicts['asymmetric_flow'] if iss['severity'] == 'critical'], 1):
-                    report += f"{i}. Line {issue['line1']} vs Line {issue['line2']}\n"
+                    report += f"{i}. {self._line_ref_for_field(issue, 'line1', attribution)} vs {self._line_ref_for_field(issue, 'line2', attribution)}\n"
                     report += f"   Issue: {issue['issue']}\n"
                     report += f"   To Server (Line {issue['to_server_line']}): {issue['to_server_action']}\n"
                     report += f"   To Client (Line {issue['to_client_line']}): {issue['to_client_action']}\n"
                     report += f"   Rule Types: {issue['rule_type1']}, {issue['rule_type2']}\n"
-                    report += f"   Action: {issue['suggestion']}\n\n"
+                    report += f"   Action: {self._suggestion_text(issue, attribution)}\n\n"
             
             if warning_count > 0:
                 report += f"⚠️ ASYMMETRIC FLOW POLICIES - WARNING ({warning_count})\n"
                 report += f"-" * 30 + "\n"
                 for i, issue in enumerate([iss for iss in conflicts['asymmetric_flow'] if iss['severity'] == 'warning'], 1):
-                    report += f"{i}. Line {issue['line1']} vs Line {issue['line2']}\n"
+                    report += f"{i}. {self._line_ref_for_field(issue, 'line1', attribution)} vs {self._line_ref_for_field(issue, 'line2', attribution)}\n"
                     report += f"   Issue: {issue['issue']}\n"
                     report += f"   To Server (Line {issue['to_server_line']}): {issue['to_server_action']}\n"
                     report += f"   To Client (Line {issue['to_client_line']}): {issue['to_client_action']}\n"
                     report += f"   Rule Types: {issue['rule_type1']}, {issue['rule_type2']}\n"
-                    report += f"   Action: {issue['suggestion']}\n\n"
+                    report += f"   Action: {self._suggestion_text(issue, attribution)}\n\n"
         
         # Reject on IP protocol issues (AWS Network Firewall restriction)
         if conflicts.get('reject_ip_protocol'):
             report += f"🚨 REJECT ON IP PROTOCOL - CRITICAL ({len(conflicts['reject_ip_protocol'])})\n"
             report += f"-" * 30 + "\n"
             for i, issue in enumerate(conflicts['reject_ip_protocol'], 1):
-                report += f"{i}. Line {issue['line']}\n"
+                report += f"{i}. {self._line_ref_for_field(issue, 'line', attribution)}\n"
                 report += f"   Issue: {issue['issue']}\n"
                 report += f"   Rule: {issue['rule'].to_string()[:80]}...\n"
                 report += f"   Suggestion: {issue['suggestion']}\n\n"
@@ -3731,7 +3907,7 @@ class RuleAnalyzer:
             report += f"🚨 REJECT ON QUIC PROTOCOL - CRITICAL ({len(conflicts['reject_quic_protocol'])})\n"
             report += f"-" * 30 + "\n"
             for i, issue in enumerate(conflicts['reject_quic_protocol'], 1):
-                report += f"{i}. Line {issue['line']}\n"
+                report += f"{i}. {self._line_ref_for_field(issue, 'line', attribution)}\n"
                 report += f"   Issue: {issue['issue']}\n"
                 report += f"   Rule: {issue['rule'].to_string()[:80]}...\n"
                 report += f"   Suggestion: {issue['suggestion']}\n\n"
@@ -3741,7 +3917,7 @@ class RuleAnalyzer:
             report += f"🚨 AWS UNSUPPORTED KEYWORDS - CRITICAL ({len(conflicts['unsupported_keywords'])})\n"
             report += f"-" * 30 + "\n"
             for i, issue in enumerate(conflicts['unsupported_keywords'], 1):
-                report += f"{i}. Line {issue['line']} - Keyword: '{issue['keyword']}'\n"
+                report += f"{i}. {self._line_ref_for_field(issue, 'line', attribution)} - Keyword: '{issue['keyword']}'\n"
                 report += f"   Issue: {issue['issue']}\n"
                 report += f"   Rule: {issue['rule'].to_string()[:80]}...\n"
                 report += f"   Suggestion: {issue['suggestion']}\n\n"
@@ -3751,7 +3927,7 @@ class RuleAnalyzer:
             report += f"🚨 AWS PCRE RESTRICTIONS - CRITICAL ({len(conflicts['pcre_restrictions'])})\n"
             report += f"-" * 30 + "\n"
             for i, issue in enumerate(conflicts['pcre_restrictions'], 1):
-                report += f"{i}. Line {issue['line']}\n"
+                report += f"{i}. {self._line_ref_for_field(issue, 'line', attribution)}\n"
                 report += f"   Issue: {issue['issue']}\n"
                 report += f"   Rule: {issue['rule'].to_string()[:80]}...\n"
                 report += f"   Suggestion: {issue['suggestion']}\n\n"
@@ -3761,7 +3937,7 @@ class RuleAnalyzer:
             report += f"⚠️ AWS THRESHOLD KEYWORD - LIMITED SUPPORT ({len(conflicts['threshold_limited'])})\n"
             report += f"-" * 30 + "\n"
             for i, issue in enumerate(conflicts['threshold_limited'], 1):
-                report += f"{i}. Line {issue['line']}\n"
+                report += f"{i}. {self._line_ref_for_field(issue, 'line', attribution)}\n"
                 report += f"   Issue: {issue['issue']}\n"
                 report += f"   Rule: {issue['rule'].to_string()[:80]}...\n"
                 report += f"   Suggestion: {issue['suggestion']}\n\n"
@@ -3771,7 +3947,7 @@ class RuleAnalyzer:
             report += f"⚠️ AWS PRIORITY KEYWORD - WARNING ({len(conflicts['priority_strict_order'])})\n"
             report += f"-" * 30 + "\n"
             for i, issue in enumerate(conflicts['priority_strict_order'], 1):
-                report += f"{i}. Line {issue['line']}\n"
+                report += f"{i}. {self._line_ref_for_field(issue, 'line', attribution)}\n"
                 report += f"   Issue: {issue['issue']}\n"
                 report += f"   Rule: {issue['rule'].to_string()[:80]}...\n"
                 report += f"   Suggestion: {issue['suggestion']}\n\n"
@@ -3788,10 +3964,39 @@ class RuleAnalyzer:
         
         return report
     
+    def _format_policy_set_header_html(self, header) -> str:
+        """Render the multi-group Policy_Set summary header (HTML meta block).
+
+        Produces the inner HTML that replaces the single ``File:`` meta line,
+        enumerating groups in Group_Order and noting the chosen $HOME_NET when
+        the groups differed. Shares the same ``header`` dict shape and wording
+        intent as the text header (Req 8.2, 8.3, 9.2).
+        """
+        html = "<strong>Rule groups analyzed (evaluation order, top first):</strong><br>"
+        for ordinal, group in enumerate(header.get("groups", []), 1):
+            name = group.get("name", "")
+            current_marker = " (current)" if group.get("is_current") else ""
+            count = group.get("analyzable_rule_count", 0)
+            html += f"&nbsp;&nbsp;{ordinal}. {name}{current_marker} \u2014 {count} rules<br>"
+        home_net = header.get("home_net")
+        if home_net and header.get("home_net_differed"):
+            html += f"<strong>Policy $HOME_NET:</strong> {home_net} (defined in currently open file; other groups defined differently)"
+        elif home_net:
+            html += f"<strong>Policy $HOME_NET:</strong> {home_net}"
+        return html
+
     def generate_html_report(self, conflicts: Dict[str, List[Dict]], 
                            total_rules: int, current_file: str = None, 
-                           version: str = None) -> str:
-        """Generate HTML formatted analysis report"""
+                           version: str = None, *, attribution=None,
+                           policy_set_header=None) -> str:
+        """Generate HTML formatted analysis report
+
+        Keyword-only ``attribution`` and ``policy_set_header`` args behave
+        exactly as documented on ``generate_analysis_report`` (same contracts /
+        same header dict shape). When both are absent/``None`` the HTML output is
+        byte-for-byte identical to today (single-group parity, Req 1.4, 1.5,
+        7.7, 8.4, 9.3).
+        """
         import datetime
         
         total_conflicts = sum(len(conflicts[severity]) for severity in conflicts)
@@ -3799,6 +4004,13 @@ class RuleAnalyzer:
         
         # Always use the analyzer's own version
         analyzer_version = get_analyzer_version()
+        
+        if policy_set_header is not None:
+            report_title = "SURICATA RULE ANALYSIS REPORT (Multi-Rule-Group / Policy-Level Review)"
+            header_detail = self._format_policy_set_header_html(policy_set_header)
+        else:
+            report_title = "SURICATA RULE ANALYSIS REPORT"
+            header_detail = f"<strong>File:</strong> {current_file or 'Unsaved'}"
         
         html = f"""<!DOCTYPE html>
 <html>
@@ -3825,11 +4037,11 @@ class RuleAnalyzer:
 </head>
 <body>
     <div class="header">
-        <div class="title">SURICATA RULE ANALYSIS REPORT</div>
+        <div class="title">{report_title}</div>
         <div class="meta">
             <strong>Generated:</strong> {timestamp}<br>
             <strong>Rule Analyzer Version:</strong> {analyzer_version}<br>
-            <strong>File:</strong> {current_file or 'Unsaved'}
+            {header_detail}
         </div>
     </div>
     
@@ -3857,9 +4069,9 @@ class RuleAnalyzer:
                 html += f'<h2 style="color: #6f42c1; font-weight: bold;">🔄 PROTOCOL LAYERING CONFLICTS ({len(conflicts["protocol_layering"])})</h2>'
                 for i, conflict in enumerate(conflicts['protocol_layering'], 1):
                     html += f'<div class="conflict" style="border-left-color: #6f42c1;">'
-                    html += f'<strong>{i}. Line {conflict["upper_line"]} vs Line {conflict["lower_line"]}</strong><br>'
+                    html += f'<strong>{i}. {self._line_ref_for_field(conflict, "upper_line", attribution)} vs {self._line_ref_for_field(conflict, "lower_line", attribution)}</strong><br>'
                     html += f'<strong>Issue:</strong> {conflict["issue"]}<br>'
-                    html += f'<strong>Action:</strong> {conflict["suggestion"]}<br>'
+                    html += f'<strong>Action:</strong> {self._suggestion_text(conflict, attribution)}<br>'
                     html += f'<div class="rule-text">Upper: {conflict["upper_rule"].to_string()[:100]}...</div>'
                     html += f'<div class="rule-text">Lower: {conflict["lower_rule"].to_string()[:100]}...</div>'
                     html += '</div>'
@@ -3869,9 +4081,9 @@ class RuleAnalyzer:
                 html += f'<h2 class="critical">🚨 CRITICAL ISSUES ({len(conflicts["critical"])})</h2>'
                 for i, conflict in enumerate(conflicts['critical'], 1):
                     html += f'<div class="conflict conflict-critical">'
-                    html += f'<strong>{i}. Line {conflict["upper_line"]} shadows Line {conflict["lower_line"]}</strong><br>'
+                    html += f'<strong>{i}. {self._line_ref_for_field(conflict, "upper_line", attribution)} shadows {self._line_ref_for_field(conflict, "lower_line", attribution)}</strong><br>'
                     html += f'<strong>Issue:</strong> {conflict["issue"]}<br>'
-                    html += f'<strong>Action:</strong> {conflict["suggestion"]}<br>'
+                    html += f'<strong>Action:</strong> {self._suggestion_text(conflict, attribution)}<br>'
                     html += f'<div class="rule-text">Upper: {conflict["upper_rule"].to_string()[:100]}...</div>'
                     html += f'<div class="rule-text">Lower: {conflict["lower_rule"].to_string()[:100]}...</div>'
                     html += '</div>'
@@ -3881,9 +4093,11 @@ class RuleAnalyzer:
                 html += f'<h2 class="warning">⚠️ WARNING ISSUES ({len(conflicts["warning"])})</h2>'
                 for i, conflict in enumerate(conflicts['warning'], 1):
                     html += f'<div class="conflict conflict-warning">'
-                    html += f'<strong>{i}. Line {conflict["upper_line"]} shadows Line {conflict["lower_line"]}</strong><br>'
+                    html += f'<strong>{i}. {self._line_ref_for_field(conflict, "upper_line", attribution)} shadows {self._line_ref_for_field(conflict, "lower_line", attribution)}</strong><br>'
                     html += f'<strong>Issue:</strong> {conflict["issue"]}<br>'
-                    html += f'<strong>Action:</strong> {conflict["suggestion"]}'
+                    html += f'<strong>Action:</strong> {self._suggestion_text(conflict, attribution)}<br>'
+                    html += f'<div class="rule-text">Upper: {conflict["upper_rule"].to_string()[:100]}...</div>'
+                    html += f'<div class="rule-text">Lower: {conflict["lower_rule"].to_string()[:100]}...</div>'
                     html += '</div>'
             
             # Info issues
@@ -3891,9 +4105,11 @@ class RuleAnalyzer:
                 html += f'<h2 class="info">ℹ️ INFORMATIONAL ({len(conflicts["info"])})</h2>'
                 for i, conflict in enumerate(conflicts['info'], 1):
                     html += f'<div class="conflict conflict-info">'
-                    html += f'<strong>{i}. Line {conflict["upper_line"]} shadows Line {conflict["lower_line"]}</strong><br>'
+                    html += f'<strong>{i}. {self._line_ref_for_field(conflict, "upper_line", attribution)} shadows {self._line_ref_for_field(conflict, "lower_line", attribution)}</strong><br>'
                     html += f'<strong>Issue:</strong> {conflict["issue"]}<br>'
-                    html += f'<strong>Action:</strong> {conflict["suggestion"]}'
+                    html += f'<strong>Action:</strong> {self._suggestion_text(conflict, attribution)}<br>'
+                    html += f'<div class="rule-text">Upper: {conflict["upper_rule"].to_string()[:100]}...</div>'
+                    html += f'<div class="rule-text">Lower: {conflict["lower_rule"].to_string()[:100]}...</div>'
                     html += '</div>'
             
             # Sticky buffer ordering issues
@@ -3901,7 +4117,7 @@ class RuleAnalyzer:
                 html += f'<h2 class="warning">⚠️ STICKY BUFFER ORDERING ISSUES ({len(conflicts["sticky_buffer_order"])})</h2>'
                 for i, issue in enumerate(conflicts['sticky_buffer_order'], 1):
                     html += f'<div class="conflict conflict-warning">'
-                    html += f'<strong>{i}. Line {issue["line"]}</strong><br>'
+                    html += f'<strong>{i}. {self._line_ref_for_field(issue, "line", attribution)}</strong><br>'
                     html += f'<strong>Issue:</strong> {issue["issue"]}<br>'
                     html += f'<strong>Action:</strong> {issue["suggestion"]}<br>'
                     html += f'<div class="rule-text">Rule: {issue["rule"].to_string()[:100]}...</div>'
@@ -3912,7 +4128,7 @@ class RuleAnalyzer:
                 html += f'<h2 class="warning">⚠️ UDP FLOW:ESTABLISHED WARNINGS ({len(conflicts["udp_flow_established"])})</h2>'
                 for i, issue in enumerate(conflicts['udp_flow_established'], 1):
                     html += f'<div class="conflict conflict-warning">'
-                    html += f'<strong>{i}. Line {issue["line"]} - {issue["protocol"]} {issue["action"]} rule</strong><br>'
+                    html += f'<strong>{i}. {self._line_ref_for_field(issue, "line", attribution)} - {issue["protocol"]} {issue["action"]} rule</strong><br>'
                     html += f'<strong>Issue:</strong> {issue["issue"]}<br>'
                     html += f'<strong>Action:</strong> {issue["suggestion"]}<br>'
                     html += f'<div class="rule-text">Rule: {issue["rule"].to_string()[:100]}...</div>'
@@ -3934,7 +4150,7 @@ class RuleAnalyzer:
                     severity_icon = '⚠️' if issue['severity'] == 'warning' else 'ℹ️'
                     
                     html += f'<div class="conflict {conflict_class}">'
-                    html += f'<strong>{i}. {severity_icon} Line {issue["line"]}</strong><br>'
+                    html += f'<strong>{i}. {severity_icon} {self._line_ref_for_field(issue, "line", attribution)}</strong><br>'
                     html += f'<strong>Issue:</strong> {issue["issue"]}<br>'
                     html += f'<strong>Suggestion:</strong> {issue["suggestion"]}<br>'
                     html += f'<div class="rule-text">Rule: {issue["rule"].to_string()[:100]}...</div>'
@@ -3945,7 +4161,7 @@ class RuleAnalyzer:
                 html += f'<h2 class="info">ℹ️ PORT/PROTOCOL MISMATCH (INFO) ({len(conflicts["port_protocol_mismatch"])})</h2>'
                 for i, issue in enumerate(conflicts['port_protocol_mismatch'], 1):
                     html += f'<div class="conflict conflict-info">'
-                    html += f'<strong>{i}. Line {issue["line"]}</strong><br>'
+                    html += f'<strong>{i}. {self._line_ref_for_field(issue, "line", attribution)}</strong><br>'
                     html += f'<strong>Issue:</strong> {issue["issue"]}<br>'
                     html += f'<strong>Suggestion:</strong> {issue["suggestion"]}<br>'
                     html += f'<div class="rule-text">Rule: {issue["rule"].to_string()[:100]}...</div>'
@@ -3956,7 +4172,7 @@ class RuleAnalyzer:
                 html += f'<h2 class="warning">⚠️ CONTRADICTORY FLOW KEYWORDS ({len(conflicts["contradictory_flow"])})</h2>'
                 for i, issue in enumerate(conflicts['contradictory_flow'], 1):
                     html += f'<div class="conflict conflict-warning">'
-                    html += f'<strong>{i}. Line {issue["line"]}</strong><br>'
+                    html += f'<strong>{i}. {self._line_ref_for_field(issue, "line", attribution)}</strong><br>'
                     html += f'<strong>Issue:</strong> {issue["issue"]}<br>'
                     html += f'<strong>Suggestion:</strong> {issue["suggestion"]}<br>'
                     html += f'<div class="rule-text">Rule: {issue["rule"].to_string()[:100]}...</div>'
@@ -3967,9 +4183,11 @@ class RuleAnalyzer:
                 html += f'<h2 class="warning">⚠️ PACKET/FLOW ACTION CONFLICTS (Suricata &lt;8.0) ({len(conflicts["packet_drop_flow_pass"])})</h2>'
                 for i, issue in enumerate(conflicts['packet_drop_flow_pass'], 1):
                     html += f'<div class="conflict conflict-warning">'
-                    html += f'<strong>{i}. Line {issue["line1"]} vs Line {issue["line2"]}</strong><br>'
+                    html += f'<strong>{i}. {self._line_ref_for_field(issue, "line1", attribution)} vs {self._line_ref_for_field(issue, "line2", attribution)}</strong><br>'
                     html += f'<strong>Issue:</strong> {issue["issue"]}<br>'
-                    html += f'<strong>Suggestion:</strong> {issue["suggestion"]}<br>'
+                    html += f'<strong>Suggestion:</strong> {self._suggestion_text(issue, attribution)}<br>'
+                    html += f'<div class="rule-text">Upper: {issue["rule1"].to_string()[:100]}...</div>'
+                    html += f'<div class="rule-text">Lower: {issue["rule2"].to_string()[:100]}...</div>'
                     html += '</div>'
             
             # Asymmetric flow policy issues (both CRITICAL and WARNING severities)
@@ -3981,24 +4199,24 @@ class RuleAnalyzer:
                     html += f'<h2 class="critical">🚨 ASYMMETRIC FLOW POLICIES - CRITICAL ({critical_count})</h2>'
                     for i, issue in enumerate([iss for iss in conflicts['asymmetric_flow'] if iss['severity'] == 'critical'], 1):
                         html += f'<div class="conflict conflict-critical">'
-                        html += f'<strong>{i}. Line {issue["line1"]} vs Line {issue["line2"]}</strong><br>'
+                        html += f'<strong>{i}. {self._line_ref_for_field(issue, "line1", attribution)} vs {self._line_ref_for_field(issue, "line2", attribution)}</strong><br>'
                         html += f'<strong>Issue:</strong> {issue["issue"]}<br>'
                         html += f'<strong>To Server (Line {issue["to_server_line"]}):</strong> {issue["to_server_action"]}<br>'
                         html += f'<strong>To Client (Line {issue["to_client_line"]}):</strong> {issue["to_client_action"]}<br>'
                         html += f'<strong>Rule Types:</strong> {issue["rule_type1"]}, {issue["rule_type2"]}<br>'
-                        html += f'<strong>Action:</strong> {issue["suggestion"]}<br>'
+                        html += f'<strong>Action:</strong> {self._suggestion_text(issue, attribution)}<br>'
                         html += '</div>'
                 
                 if warning_count > 0:
                     html += f'<h2 class="warning">⚠️ ASYMMETRIC FLOW POLICIES - WARNING ({warning_count})</h2>'
                     for i, issue in enumerate([iss for iss in conflicts['asymmetric_flow'] if iss['severity'] == 'warning'], 1):
                         html += f'<div class="conflict conflict-warning">'
-                        html += f'<strong>{i}. Line {issue["line1"]} vs Line {issue["line2"]}</strong><br>'
+                        html += f'<strong>{i}. {self._line_ref_for_field(issue, "line1", attribution)} vs {self._line_ref_for_field(issue, "line2", attribution)}</strong><br>'
                         html += f'<strong>Issue:</strong> {issue["issue"]}<br>'
                         html += f'<strong>To Server (Line {issue["to_server_line"]}):</strong> {issue["to_server_action"]}<br>'
                         html += f'<strong>To Client (Line {issue["to_client_line"]}):</strong> {issue["to_client_action"]}<br>'
                         html += f'<strong>Rule Types:</strong> {issue["rule_type1"]}, {issue["rule_type2"]}<br>'
-                        html += f'<strong>Action:</strong> {issue["suggestion"]}<br>'
+                        html += f'<strong>Action:</strong> {self._suggestion_text(issue, attribution)}<br>'
                         html += '</div>'
             
             # Reject on IP protocol issues (AWS Network Firewall restriction)
@@ -4006,7 +4224,7 @@ class RuleAnalyzer:
                 html += f'<h2 class="critical">🚨 REJECT ON IP PROTOCOL - CRITICAL ({len(conflicts["reject_ip_protocol"])})</h2>'
                 for i, issue in enumerate(conflicts['reject_ip_protocol'], 1):
                     html += f'<div class="conflict conflict-critical">'
-                    html += f'<strong>{i}. Line {issue["line"]}</strong><br>'
+                    html += f'<strong>{i}. {self._line_ref_for_field(issue, "line", attribution)}</strong><br>'
                     html += f'<strong>Issue:</strong> {issue["issue"]}<br>'
                     html += f'<strong>Suggestion:</strong> {issue["suggestion"]}<br>'
                     html += f'<div class="rule-text">Rule: {issue["rule"].to_string()[:100]}...</div>'
@@ -4017,7 +4235,7 @@ class RuleAnalyzer:
                 html += f'<h2 class="critical">🚨 REJECT ON QUIC PROTOCOL - CRITICAL ({len(conflicts["reject_quic_protocol"])})</h2>'
                 for i, issue in enumerate(conflicts['reject_quic_protocol'], 1):
                     html += f'<div class="conflict conflict-critical">'
-                    html += f'<strong>{i}. Line {issue["line"]}</strong><br>'
+                    html += f'<strong>{i}. {self._line_ref_for_field(issue, "line", attribution)}</strong><br>'
                     html += f'<strong>Issue:</strong> {issue["issue"]}<br>'
                     html += f'<strong>Suggestion:</strong> {issue["suggestion"]}<br>'
                     html += f'<div class="rule-text">Rule: {issue["rule"].to_string()[:100]}...</div>'
@@ -4028,7 +4246,7 @@ class RuleAnalyzer:
                 html += f'<h2 class="critical">🚨 AWS UNSUPPORTED KEYWORDS - CRITICAL ({len(conflicts["unsupported_keywords"])})</h2>'
                 for i, issue in enumerate(conflicts['unsupported_keywords'], 1):
                     html += f'<div class="conflict conflict-critical">'
-                    html += f'<strong>{i}. Line {issue["line"]} - Keyword: \'{issue["keyword"]}\'</strong><br>'
+                    html += f'<strong>{i}. {self._line_ref_for_field(issue, "line", attribution)} - Keyword: \'{issue["keyword"]}\'</strong><br>'
                     html += f'<strong>Issue:</strong> {issue["issue"]}<br>'
                     html += f'<strong>Suggestion:</strong> {issue["suggestion"]}<br>'
                     html += f'<div class="rule-text">Rule: {issue["rule"].to_string()[:100]}...</div>'
@@ -4039,7 +4257,7 @@ class RuleAnalyzer:
                 html += f'<h2 class="critical">🚨 AWS PCRE RESTRICTIONS - CRITICAL ({len(conflicts["pcre_restrictions"])})</h2>'
                 for i, issue in enumerate(conflicts['pcre_restrictions'], 1):
                     html += f'<div class="conflict conflict-critical">'
-                    html += f'<strong>{i}. Line {issue["line"]}</strong><br>'
+                    html += f'<strong>{i}. {self._line_ref_for_field(issue, "line", attribution)}</strong><br>'
                     html += f'<strong>Issue:</strong> {issue["issue"]}<br>'
                     html += f'<strong>Suggestion:</strong> {issue["suggestion"]}<br>'
                     html += f'<div class="rule-text">Rule: {issue["rule"].to_string()[:100]}...</div>'
@@ -4050,7 +4268,7 @@ class RuleAnalyzer:
                 html += f'<h2 class="warning">⚠️ AWS THRESHOLD KEYWORD - LIMITED SUPPORT ({len(conflicts["threshold_limited"])})</h2>'
                 for i, issue in enumerate(conflicts['threshold_limited'], 1):
                     html += f'<div class="conflict conflict-warning">'
-                    html += f'<strong>{i}. Line {issue["line"]}</strong><br>'
+                    html += f'<strong>{i}. {self._line_ref_for_field(issue, "line", attribution)}</strong><br>'
                     html += f'<strong>Issue:</strong> {issue["issue"]}<br>'
                     html += f'<strong>Suggestion:</strong> {issue["suggestion"]}<br>'
                     html += f'<div class="rule-text">Rule: {issue["rule"].to_string()[:100]}...</div>'
@@ -4061,7 +4279,7 @@ class RuleAnalyzer:
                 html += f'<h2 class="warning">⚠️ AWS PRIORITY KEYWORD - WARNING ({len(conflicts["priority_strict_order"])})</h2>'
                 for i, issue in enumerate(conflicts['priority_strict_order'], 1):
                     html += f'<div class="conflict conflict-warning">'
-                    html += f'<strong>{i}. Line {issue["line"]}</strong><br>'
+                    html += f'<strong>{i}. {self._line_ref_for_field(issue, "line", attribution)}</strong><br>'
                     html += f'<strong>Issue:</strong> {issue["issue"]}<br>'
                     html += f'<strong>Suggestion:</strong> {issue["suggestion"]}<br>'
                     html += f'<div class="rule-text">Rule: {issue["rule"].to_string()[:100]}...</div>'

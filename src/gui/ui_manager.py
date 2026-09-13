@@ -184,7 +184,7 @@ class UIManager:
         menubar.add_cascade(label="Tools", menu=tools_menu)
         tools_menu.add_command(label="Advanced Editor", command=self.parent.show_advanced_editor, accelerator="Ctrl+E")
         tools_menu.add_separator()
-        tools_menu.add_command(label="Review Rules", command=self.parent.review_rules)
+        tools_menu.add_command(label="Review Rules", command=lambda: self.parent.review_rules(allow_multi_group=True))
         tools_menu.add_command(label="SID Management", command=self.show_sid_management)
         tools_menu.add_command(label="Test Flow", command=self.show_test_flow_dialog)
         tools_menu.add_separator()

@@ -1,10 +1,30 @@
 # Release Notes
 
+## Version 2.8.3 - September 12, 2026
+
+### Multi-Rule-Group Analysis: Review Your Whole Firewall Policy at Once
+
+**Tools > Review Rules** can now analyze several AWS Network Firewall stateful rule groups together, not just the one open in the editor. AWS evaluates a policy's stateful rule groups in strict order, so a conflict or shadowing issue that only appears once the groups are combined was previously invisible to a single-group review. This release closes that gap while keeping the existing single-group experience unchanged. The rule analyzer moves to **v3.0.0**.
+
+### New Features
+
+- **Configure a policy set before analyzing**: Review Rules now opens a "Configure Rule Groups" screen, pre-populated with the currently open rule group. You can add other local `.suricata` files (their companion `.var` variables load automatically when present), arrange the evaluation order with **Move Up / Move Down** (top is evaluated first), and remove added groups. The open group is always included and cannot be removed. A running count shows "Groups: N of 20" and the total analyzable rules; the policy set is capped at 20 rule groups to mirror the AWS per-policy limit, and a large-analysis notice (10,000 rules) and confirmation (30,000 rules) guard against very long runs.
+
+- **One combined, evaluation-ordered review**: The groups are stitched into a single ordered rule stream and handed to the same trusted analyzer, so the existing shadowing, protocol-layering, and AWS compliance checks now catch cross-group interactions (for example, a broad PASS rule in one group that overrides a DROP rule in another). Each rule group's `$`/`@` variables are resolved against that group's own definitions, matching how AWS scopes rule-group variables; `$HOME_NET` is treated as policy-wide, and when groups define it differently the value from the currently open file is used and noted in the report.
+
+- **Findings attributed to their source group**: Every finding now identifies which rule group and in-group line each rule came from (for example, `egress.suricata line 52`), and cross-group findings get group-aware guidance (reorder the groups or move a rule between groups) instead of "move line X above line Y." The results window gains a policy-level header enumerating each group in evaluation order, and the same attribution and header flow through the HTML/PDF exports. Single-group reviews are unchanged.
+
+- **AI Analysis across the whole policy**: When a multi-group review is run, the AI Analysis tab reasons over the same combined rule stream, with per-group markers so its findings can refer to the affected groups.
+
+- **Scope**: This feature is entirely local and in-memory — it needs no AWS credentials. AWS-managed rule groups are out of scope; to include a customer-owned group hosted in AWS, import it and save it as a `.suricata` file, then add it here.
+
+---
+
 ## Version 2.8.2 - September 07, 2026
 
 ### Bug Fixes
 
-- **Container Association Manager: add missing IAM permissions for ECS associations**: Creating (and updating/deleting) an ECS container association also requires Amazon EventBridge permissions, because Network Firewall creates and removes a managed EventBridge rule (`NetworkFirewallManagedRule-*`) in your account on your behalf to receive ECS task state-change events. The **Help > AWS Setup** IAM policy now includes `events:PutRule`, `events:PutTargets`, `events:DescribeRule`, `events:DeleteRule`, and `events:RemoveTargets`, along with `sts:GetCallerIdentity` (used to detect owned vs. shared-in associations) and `ram:GetResourceShares` (used by the sharing flow). Without these, creating an association failed with an `events:PutRule` authorization error. This permission set was verified end-to-end (create, modify, share/unshare, delete) against a least-privilege role; note that the EventBridge permissions are not listed in AWS's own container-association documentation.
+- **Container Association Manager: add missing IAM permissions for ECS associations**: Creating (and updating/deleting) an ECS container association also requires Amazon EventBridge permissions, because Network Firewall creates and removes a managed EventBridge rule (`NetworkFirewallManagedRule-*`) in your account on your behalf to receive ECS task state-change events. The **Help > AWS Setup** IAM policy now includes `events:PutRule`, `events:PutTargets`, `events:DescribeRule`, `events:DeleteRule`, and `events:RemoveTargets`, along with `sts:GetCallerIdentity` (used to detect owned vs. shared-in associations) and `ram:GetResourceShares` (used by the sharing flow). Without these, creating an association failed with an `events:PutRule` authorization error. This permission set was verified end-to-end (create, modify, share/unshare, delete) against a least-privilege role.
 
 - **Load AWS Best Practices Template: fix TLS certificate verification failure**: On some systems the template fetch failed with `CERTIFICATE_VERIFY_FAILED: unable to get local issuer certificate`, even with internet access, because the fetch used Python's default SSL context — which does not use the `certifi` CA bundle and can lack a usable certificate authority source (notably on python.org Windows builds). The fetch now verifies the HTTPS certificate against `certifi`'s bundle (falling back to the system default when `certifi` is unavailable), and `certifi` is now a declared dependency in `requirements.txt`. Certificate verification is still enforced.
 

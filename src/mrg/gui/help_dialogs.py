@@ -150,6 +150,18 @@ IAM_DEPLOY_POLICY_JSON = """{
       "Resource": "arn:aws:logs:*:*:log-group:/aws/lambda/ManagedRuleGenerator-*"
     },
     {
+      "Sid": "CloudWatchDashboardAccess",
+      "Effect": "Allow",
+      "Action": [
+        "cloudwatch:PutDashboard",
+        "cloudwatch:GetDashboard",
+        "cloudwatch:ListDashboards",
+        "cloudwatch:DeleteDashboards",
+        "cloudwatch:TagResource"
+      ],
+      "Resource": "*"
+    },
+    {
       "Sid": "STSAccess",
       "Effect": "Allow",
       "Action": [
@@ -314,6 +326,9 @@ class AWSSetupGuideDialog:
             "  lambda:GetFunctionConfiguration) to read deployed configurations\n"
             "\u2022 IAMAccess — Create/manage the Lambda execution role\n"
             "\u2022 SNSAccess — Subscribe to managed rule group updates and notifications\n"
+            "\u2022 CloudWatchDashboardAccess — Create, read, tag, and delete the\n"
+            "  deployment monitoring dashboard\n"
+            "\u2022 CloudWatchLogsAccess — Delete the Lambda's log group on teardown\n"
             "\u2022 STSAccess — Validate credentials (Help > AWS Setup Guide > Testing)\n"
             "\n"
             "The Lambda function also needs its own IAM role (created automatically\n"

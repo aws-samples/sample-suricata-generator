@@ -1,5 +1,13 @@
 # Release Notes
 
+## Version 2.8.4 - September 16, 2026
+
+### Bug Fixes
+
+- **Managed Rule Generator: add missing CloudWatch dashboard IAM permissions**: The MRG's AWS Setup Guide policy (Managed Rules window > Help > AWS Setup Guide) did not include the CloudWatch dashboard permissions the tool actually uses when it creates, reads, tags, and deletes its deployment monitoring dashboard. The displayed policy now includes `cloudwatch:PutDashboard`, `cloudwatch:GetDashboard`, `cloudwatch:ListDashboards`, `cloudwatch:DeleteDashboards`, and `cloudwatch:TagResource`, and the permission breakdown now also documents the existing `CloudWatchLogsAccess` statement. Without these, dashboard operations could fail with an authorization error for users who copied the policy verbatim. (MRG version bumped to 1.1.5.)
+
+---
+
 ## Version 2.8.3 - September 12, 2026
 
 ### Multi-Rule-Group Analysis: Review Your Whole Firewall Policy at Once

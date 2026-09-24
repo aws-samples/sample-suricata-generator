@@ -1,5 +1,19 @@
 # Release Notes
 
+## Version 2.8.5 - September 24, 2026
+
+### Bug Fix: Startup Crash on Python 3.7-3.9 (`unsupported operand type(s) for |`)
+
+- **Fixed `TypeError` on import for older Python versions**: The AI Agent layer used PEP 604 union type syntax on subscripted generics (for example, `list[dict] | None`) in annotations that were evaluated at import time. On Python 3.7-3.9 this raises `TypeError: unsupported operand type(s) for |: 'types.GenericAlias' and 'NoneType'`, crashing the program before the GUI could start.
+  - **Root Cause**: `X | Y` unions on generics like `list[dict]` are only evaluated at runtime on Python 3.10+. Because the affected annotations were evaluated eagerly (at class/function definition time), importing `src/agent/nl_parser.py` — and the modules that import it — failed on Python 3.7-3.9.
+  - **Impact**: MacOS users running the system Python 3.9 (and anyone on 3.7-3.9) hit an immediate traceback ending in `TypeError: unsupported operand type(s) for |` when launching `suricata_generator.py`.
+  - **Solution**: Added `from __future__ import annotations` (PEP 563) to the affected modules so all annotations are stored as strings and never evaluated at runtime. This is a pure compatibility fix — no logic, behavior, or type-checking coverage changes, since no code in the project introspects annotations at runtime.
+  - **Files Fixed**: `src/agent/agent_loop.py`, `src/agent/ai_rule_analyzer.py`, `src/agent/nl_parser.py`, `src/agent/rule_analyzer_wrapper.py`, `src/gui/advanced_editor.py`, `src/gui/ai_analysis_tab.py`, `src/gui/ai_assistant_panel.py`, and the AI analyzer test modules.
+- **Documented Minimum Python Version is now 3.7**: The README previously stated "Python 3.6+". Because the fix relies on `from __future__ import annotations` (available in Python 3.7+), and Python 3.6 is long past end-of-life, the documented minimum is now **Python 3.7**. All "3.6+" references in the README have been updated to "3.7+".
+- **Confirmed Compatibility**: Verified all affected modules and the full `src`/`tests` tree compile cleanly. The program targets Python 3.7 through 3.13.
+
+---
+
 ## Version 2.8.4 - September 16, 2026
 
 ### Bug Fixes

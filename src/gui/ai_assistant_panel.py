@@ -6,6 +6,8 @@ language descriptions via Amazon Bedrock (Claude). Runs as a tk.Toplevel
 window independent of the main application layout.
 """
 
+from __future__ import annotations
+
 import logging
 import random
 import re

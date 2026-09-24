@@ -5,6 +5,8 @@ Invokes Amazon Bedrock (Claude) with grounded prompts built from the KnowledgeBa
 parses structured JSON responses into DetectionIntent objects.
 """
 
+from __future__ import annotations
+
 import json
 import logging
 from typing import Optional

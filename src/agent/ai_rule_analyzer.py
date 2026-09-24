@@ -7,6 +7,8 @@ gaps, policy coherence, optimization opportunities, and AWS Network
 Firewall-specific advice.
 """
 
+from __future__ import annotations
+
 import hashlib
 import json
 from dataclasses import replace

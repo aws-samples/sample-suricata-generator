@@ -5,6 +5,8 @@ Orchestrates: NLParser -> RuleBuilder -> RuleValidator -> RuleAnalyzerWrapper
 with a self-correction loop that feeds errors back to the LLM.
 """
 
+from __future__ import annotations
+
 import re
 import logging
 from typing import Optional

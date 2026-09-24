@@ -7,6 +7,8 @@ view structured findings organized by category, and hand off selected findings
 to the AI Rule Assistant for rule generation.
 """
 
+from __future__ import annotations
+
 import logging
 import os
 import platform as _plat

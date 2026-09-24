@@ -5,6 +5,8 @@ Wraps the existing RuleAnalyzer from src/analysis/rule_analyzer.py and returns
 structured AnalysisResult/AnalysisIssue objects for the agent pipeline.
 """
 
+from __future__ import annotations
+
 from src.agent.models import AnalysisIssue, AnalysisResult
 from src.analysis.rule_analyzer import RuleAnalyzer
 from src.core.suricata_rule import SuricataRule

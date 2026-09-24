@@ -7,6 +7,8 @@ Launched as subprocess from main tkinter application.
 Usage: python advanced_editor.py <input_json> <output_json>
 """
 
+from __future__ import annotations
+
 import sys
 import os
 import json

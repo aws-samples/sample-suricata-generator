@@ -1,5 +1,29 @@
 # Release Notes
 
+## Version 2.9.0 - September 25, 2026
+
+### Interactive IAM Policy Generator & Permission Tester (Help > AWS Setup)
+
+The **Help > AWS Setup** window's IAM tab is now an interactive, feature-selectable IAM policy generator and permission tester. Previously it showed one fixed policy covering every AWS feature and a separate Testing tab that probed every permission — an all-or-nothing experience that over-granted permissions for users of a single feature and produced irrelevant test failures. You now request exactly the access you need and verify exactly those permissions.
+
+### New Features
+
+- **Select the features you use; get a matching least-privilege policy**: The renamed **IAM Permissions & Testing** tab presents a checkbox per tool feature (Rule Usage Analyzer & Traffic Analysis, Rule Group Direct Import, Rule Group Direct Export, Container Association Manager, Cross-account Sharing, AI Rule Assistant). The displayed IAM policy updates live as you tick features — no "Generate" button — and the "Copy Policy to Clipboard" button copies exactly what is shown. With every feature selected (the default), the generated policy is identical to the previous fixed policy, so nothing changes for users who leave it alone.
+
+- **Feature dependencies handled for you**: Cross-account Sharing is shown as a sub-option nested under the Container Association Manager. It is disabled while its parent is unselected and auto-clears if you deselect the parent, so the policy can never include AWS RAM actions without the container-association permissions they depend on. Non-toggleable supporting permissions (for example `iam:CreateServiceLinkedRole` and the ECS/EKS discovery actions) are folded into their owning feature.
+
+- **Test only the features you selected, in a results popup**: The standalone Testing tab has been removed. A **"Test these permissions"** button on the IAM tab runs the connection checks for just the currently selected features and shows them in a separate results window. Each feature's checks run independently, so a failure in one feature no longer aborts the others, and unselected features are neither tested nor shown. When no features are selected, the Copy and Test buttons are disabled.
+
+- **More accurate test diagnostics**: Permission probes now target the application's selected AWS Region (rather than relying only on ambient SDK resolution), report an unresolved Region as a distinct warning without aborting the run, and surface the actual AWS denial message on `AccessDeniedException` instead of a generic guess.
+
+- **Reworked Credentials tab guidance**: The Credentials tab now lists options from most to least recommended, leading with **IAM Identity Center (SSO)** — including the `aws configure sso-session` / `aws configure sso` / `aws sso login` workflow and how to create a uniquely-named profile per account for the status-bar Profile dropdown — followed by IAM role via EC2 instance profile, environment variables (temporary credentials), and long-lived access keys as a last resort. The Security Notes were trimmed to accurate, selection-aware statements.
+
+### Under the Hood
+
+- **Single source of truth for permissions**: A new UI-free module, `src/aws/iam_feature_model.py`, maps each feature to its IAM actions and its test probes. The policy text, the human-readable breakdown, and the permission test are all derived from this one model, so the generated policy and the executed tests can never cover different features. It is fully unit-tested (including a byte-for-byte regression test proving the all-features policy matches the previously shipped one). Existing callers that open the dialog to the legacy `testing` tab continue to work (they now open the combined IAM Permissions & Testing tab).
+
+---
+
 ## Version 2.8.5 - September 24, 2026
 
 ### Bug Fix: Startup Crash on Python 3.7-3.9 (`unsupported operand type(s) for |`)

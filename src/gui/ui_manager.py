@@ -6,103 +6,31 @@ from typing import Optional
 from src.core.constants import SuricataConstants, classify_reference_arn, looks_like_valid_reference_arn, CONTAINER_ASSOCIATION_ARN_RE
 from src.core.suricata_rule import SuricataRule
 from datetime import datetime, timedelta
+from src.aws.iam_feature_model import (
+    build_policy_json as _build_iam_policy_json,
+    build_breakdown as _build_iam_breakdown,
+    ALL_FEATURE_IDS as _ALL_IAM_FEATURE_IDS,
+)
 
 
 # ---------------------------------------------------------------------------
 # AWS Setup guide — IAM policy (single source of truth)
 #
-# The Help > AWS Setup guide's "IAM Permissions" tab displays this policy and
-# offers a "Copy to Clipboard" button. Both MUST use the same string so the
-# copied policy always matches what is shown; keeping one constant means a
-# permission change is made in exactly one place. Covers every AWS feature in
-# the application, including the Container Association Manager.
+# The Help > AWS Setup guide's "IAM Permissions & Testing" tab displays a
+# feature-selectable policy derived from the shared Feature Model in
+# src/aws/iam_feature_model.py. These two module-level constants are the
+# all-features-selected (Full_Selection) rendering of that model, kept as names
+# because existing importers/tests reference them. Because they are derived from
+# the model rather than hand-authored, the model is the single source of truth
+# and the copied/displayed policy can never drift from the tested permissions.
 # ---------------------------------------------------------------------------
-AWS_SETUP_IAM_POLICY_JSON = '''{
-  "Version": "2012-10-17",
-  "Statement": [{
-    "Sid": "SuricataGeneratorAWSPermissions",
-    "Effect": "Allow",
-    "Action": [
-      "logs:DescribeLogGroups",
-      "logs:StartQuery",
-      "logs:GetQueryResults",
-      "logs:StopQuery",
-      "network-firewall:ListRuleGroups",
-      "network-firewall:DescribeRuleGroup",
-      "network-firewall:CreateRuleGroup",
-      "network-firewall:UpdateRuleGroup",
-      "network-firewall:ListContainerAssociations",
-      "network-firewall:DescribeContainerAssociation",
-      "network-firewall:CreateContainerAssociation",
-      "network-firewall:UpdateContainerAssociation",
-      "network-firewall:DeleteContainerAssociation",
-      "network-firewall:TagResource",
-      "network-firewall:UntagResource",
-      "network-firewall:ListTagsForResource",
-      "events:PutRule",
-      "events:PutTargets",
-      "events:DescribeRule",
-      "events:DeleteRule",
-      "events:RemoveTargets",
-      "ecs:ListClusters",
-      "ecs:DescribeClusters",
-      "ecs:ListContainerInstances",
-      "ecs:DescribeContainerInstances",
-      "eks:ListClusters",
-      "eks:DescribeCluster",
-      "iam:CreateServiceLinkedRole",
-      "ram:CreateResourceShare",
-      "ram:AssociateResourceShare",
-      "ram:DisassociateResourceShare",
-      "ram:GetResourceShares",
-      "ram:GetResourceShareAssociations",
-      "ram:ListResources",
-      "sts:GetCallerIdentity",
-      "bedrock:InvokeModel",
-      "bedrock:ListFoundationModels",
-      "bedrock:ListInferenceProfiles"
-    ],
-    "Resource": "*"
-  }]
-}'''
+# Derived from the Feature Model at Full_Selection. build_policy_json never
+# returns None for the full id set, so these are always strings.
+AWS_SETUP_IAM_POLICY_JSON = _build_iam_policy_json(_ALL_IAM_FEATURE_IDS)
 
-# Human-readable breakdown for the same tab, grouped by feature. Sourced from
-# one constant alongside the policy JSON.
-AWS_SETUP_PERMISSION_BREAKDOWN = (
-    "CloudWatch Logs (Rule Usage Analyzer & Traffic Analysis):\n"
-    "• logs:DescribeLogGroups - List available log groups\n"
-    "• logs:StartQuery - Initiates CloudWatch Logs Insights queries\n"
-    "• logs:GetQueryResults - Retrieves query results\n"
-    "• logs:StopQuery - Cancels running queries\n\n"
-    "Network Firewall (Rule Group Import & Managed Rule Analysis):\n"
-    "• network-firewall:ListRuleGroups - Browse account and managed rule groups\n"
-    "• network-firewall:DescribeRuleGroup - View rule group details and rules\n\n"
-    "Network Firewall (Rule Group Export):\n"
-    "• network-firewall:CreateRuleGroup - Deploy new rule groups\n"
-    "• network-firewall:UpdateRuleGroup - Overwrite existing rule groups\n\n"
-    "Network Firewall (Container Association Manager):\n"
-    "• network-firewall:List/Describe ContainerAssociation - list & inspect\n"
-    "• network-firewall:Create/Update/Delete ContainerAssociation - manage\n"
-    "• network-firewall:TagResource/UntagResource/ListTagsForResource - tags\n"
-    "• events:PutRule/PutTargets/DescribeRule/DeleteRule/RemoveTargets - for ECS,\n"
-    "  Network Firewall creates/removes a managed EventBridge rule (NetworkFirewallManagedRule-*)\n"
-    "  on your behalf to receive ECS task state-change events; your identity must allow these\n"
-    "• sts:GetCallerIdentity - determine your account to flag owned vs. shared-in associations\n\n"
-    "Cluster & attribute discovery (Container Association Manager):\n"
-    "• ecs:ListClusters/DescribeClusters/ListContainerInstances/DescribeContainerInstances\n"
-    "• eks:ListClusters/DescribeCluster\n\n"
-    "Service-linked role (first use):\n"
-    "• iam:CreateServiceLinkedRole - created automatically on first CreateContainerAssociation\n\n"
-    "Cross-account sharing via AWS RAM (Container Association Manager):\n"
-    "• ram:CreateResourceShare/AssociateResourceShare/DisassociateResourceShare - share/unshare\n"
-    "• ram:GetResourceShares - find the tool-managed resource share to reuse before sharing\n"
-    "• ram:GetResourceShareAssociations/ListResources - show \u201cShared with\u201d\n\n"
-    "Amazon Bedrock (AI Rule Assistant):\n"
-    "• bedrock:InvokeModel - Send prompts to Claude for rule generation\n"
-    "• bedrock:ListFoundationModels - Discover available models\n"
-    "• bedrock:ListInferenceProfiles - List inference profiles for model selection\n"
-    "• Note: Model access must also be enabled in the Bedrock console"
-)
+# Human-readable breakdown for the same tab, grouped by feature — also derived
+# from the shared Feature Model so the policy and breakdown cannot diverge.
+AWS_SETUP_PERMISSION_BREAKDOWN = _build_iam_breakdown(_ALL_IAM_FEATURE_IDS)
 
 
 class UIManager:
@@ -13951,12 +13879,34 @@ Would you like to run a complete analysis?"""
 
         return results
     
+    def _get_iam_feature_selection(self):
+        """Return the session-scoped IAM feature selection (feature id -> bool).
+
+        Lazily created on the main app the first time the AWS Setup window is
+        opened in a program session, seeded to all features selected
+        (Full_Selection). It is retained in memory across closing/reopening the
+        window within the same run, and resets to all-selected on restart
+        because it dies with the process (never persisted to disk).
+        Requirements 3.2, 3a.1–3a.4.
+        """
+        selection = getattr(self.parent, '_iam_feature_selection', None)
+        if selection is None:
+            selection = {fid: True for fid in _ALL_IAM_FEATURE_IDS}
+            self.parent._iam_feature_selection = selection
+        return selection
+
     # Phase 11: Help Menu - AWS Setup Guide (covers Rule Usage Analyzer + Rule Group Import)
     def show_aws_setup_help(self, default_tab='prerequisites'):
-        """Show 4-tab setup guide dialog for AWS features (CloudWatch + Network Firewall)
-        
+        """Show the AWS Setup guide dialog for AWS features (CloudWatch + Network Firewall).
+
+        Tabs: Prerequisites, IAM Permissions & Testing, Credentials. The former
+        standalone Testing tab was merged into the IAM tab (its capability is now
+        the "Test these permissions" button). The legacy default_tab value
+        'testing' maps to the combined 'iam' tab for backward compatibility.
+
         Args:
-            default_tab: Which tab to open by default ('prerequisites', 'iam', 'credentials', 'testing')
+            default_tab: Which tab to open by default ('prerequisites', 'iam',
+                'credentials'; 'testing' is accepted and maps to 'iam').
         """
         help_dialog = tk.Toplevel(self.parent.root)
         help_dialog.title("AWS Setup - Help Guide")
@@ -14106,7 +14056,7 @@ Would you like to run a complete analysis?"""
         
         # Tab 2: IAM Permissions
         iam_frame = ttk.Frame(notebook)
-        notebook.add(iam_frame, text="IAM Permissions")
+        notebook.add(iam_frame, text="IAM Permissions & Testing")
         
         # Create scrollable content
         iam_canvas = tk.Canvas(iam_frame)
@@ -14139,54 +14089,204 @@ Would you like to run a complete analysis?"""
         iam_canvas.bind("<Enter>", lambda e: iam_canvas.bind_all("<MouseWheel>", on_iam_mousewheel))
         iam_canvas.bind("<Leave>", lambda e: iam_canvas.unbind_all("<MouseWheel>"))
         
-        # IAM content
+        # IAM content — feature-selectable policy generator + tester.
+        # The user ticks the features they use; the policy, breakdown, and the
+        # "Test these permissions" run are all derived from that one selection
+        # (the shared Feature Model). At Full_Selection (the default) this
+        # reproduces the previous fixed policy/breakdown exactly.
+        from src.aws.iam_feature_model import (
+            FEATURES as _IAM_FEATURES,
+            build_policy_json as _iam_build_policy,
+            build_breakdown as _iam_build_breakdown,
+            resolve_selection as _iam_resolve,
+        )
+
+        # Dark-mode palette for the read-only policy text (workspace UI convention).
+        import platform as _iam_plat
+        _iam_is_dark = False
+        if _iam_plat.system() == 'Darwin':
+            try:
+                import subprocess as _iam_sp
+                _iam_r = _iam_sp.run(['defaults', 'read', '-g', 'AppleInterfaceStyle'],
+                                     capture_output=True, text=True)
+                _iam_is_dark = 'Dark' in _iam_r.stdout
+            except Exception:
+                _iam_is_dark = False
+        _policy_bg = "#1E1E1E" if _iam_is_dark else "#F5F5F5"
+        _policy_fg = "#E0E0E0" if _iam_is_dark else "#000000"
+
+        # Session_Selection: feature id -> bool, lazily seeded to all-True on the
+        # first open in this program session, then retained across reopen and
+        # reset on restart (it dies with the process). See _iam_feature_selection.
+        selection = self._get_iam_feature_selection()
+
+        ttk.Label(iam_content, text="Select the features you use:",
+                 font=("TkDefaultFont", 11, "bold")).pack(anchor=tk.W, padx=15, pady=(15, 5))
+        ttk.Label(iam_content,
+                 text="This is an interactive IAM permission policy generator. Select the "
+                      "features you plan to use and a matching sample permission policy is "
+                      "generated below. Once you've applied that policy in AWS, come back and "
+                      "use \u201cTest these permissions\u201d to verify it.",
+                 font=("TkDefaultFont", 9), foreground="#666666",
+                 wraplength=680, justify=tk.LEFT).pack(anchor=tk.W, padx=15, pady=(0, 8))
+
+        checkbox_frame = ttk.Frame(iam_content)
+        checkbox_frame.pack(fill=tk.X, padx=15, pady=(0, 10))
+
+        # One BooleanVar per feature, bound to Session_Selection. Dependent
+        # features (sharing) are rendered indented under their parent.
+        feature_vars = {}
+        feature_checkbuttons = {}
+
+        # Forward declarations so the checkbox command closures can call refresh.
+        def _on_feature_toggle():
+            _refresh_iam_policy_view()
+
+        for feature in _IAM_FEATURES:
+            var = tk.BooleanVar(value=bool(selection.get(feature.id, True)))
+            feature_vars[feature.id] = var
+            indent = 30 if feature.parent_id is not None else 12
+            cb = ttk.Checkbutton(checkbox_frame, text=feature.label, variable=var,
+                                 command=_on_feature_toggle)
+            cb.pack(anchor=tk.W, padx=(indent, 0), pady=1)
+            feature_checkbuttons[feature.id] = cb
+
+        # Required IAM Policy heading + action buttons (kept from before).
         ttk.Label(iam_content, text="Required IAM Policy:",
-                 font=("TkDefaultFont", 11, "bold")).pack(anchor=tk.W, padx=15, pady=(15, 10))
-        
-        # Copy button (uses the single-source policy constant)
+                 font=("TkDefaultFont", 11, "bold")).pack(anchor=tk.W, padx=15, pady=(10, 5))
+
+        button_row = ttk.Frame(iam_content)
+        button_row.pack(anchor=tk.W, padx=15, pady=5)
+
         def copy_iam_policy():
+            # Copy exactly the policy currently shown for the active selection.
+            selected = [fid for fid, v in feature_vars.items() if v.get()]
+            policy = _iam_build_policy(selected)
+            if not policy:
+                return  # Button is disabled in this state; guard anyway.
             self.parent.root.clipboard_clear()
-            self.parent.root.clipboard_append(AWS_SETUP_IAM_POLICY_JSON)
+            self.parent.root.clipboard_append(policy)
             messagebox.showinfo("Copied", "IAM policy copied to clipboard!")
-        
-        ttk.Button(iam_content, text="Copy Policy to Clipboard", 
-                  command=copy_iam_policy).pack(padx=15, pady=5)
-        
-        # Policy text
+
+        copy_button = ttk.Button(button_row, text="Copy Policy to Clipboard",
+                                 command=copy_iam_policy)
+        copy_button.pack(side=tk.LEFT)
+
+        def test_permissions():
+            selected = [fid for fid, v in feature_vars.items() if v.get()]
+            resolved = _iam_resolve(selected)
+            if not resolved:
+                return  # Button is disabled in this state; guard anyway.
+            # Preserve canonical feature order for the results window.
+            ordered = [f.id for f in _IAM_FEATURES if f.id in resolved]
+            self._open_test_results_window(ordered)
+
+        test_button = ttk.Button(button_row, text="Test these permissions",
+                                 command=test_permissions)
+        test_button.pack(side=tk.LEFT, padx=(8, 0))
+
+        # Policy text (read-only, dark-mode aware, dual-copy, scroll-wheel).
         policy_frame = ttk.Frame(iam_content)
         policy_frame.pack(fill=tk.X, padx=15, pady=10)
-        
+
         policy_text = tk.Text(policy_frame, height=18, wrap=tk.WORD, font=("Consolas", 9),
-                             bg="#F5F5F5", relief=tk.SOLID, borderwidth=1)
+                             bg=_policy_bg, fg=_policy_fg, insertbackground=_policy_fg,
+                             relief=tk.SOLID, borderwidth=1)
         policy_text.pack(fill=tk.X)
-        
-        # Displayed policy uses the same single-source constant as the copy button.
-        policy_text.insert("1.0", AWS_SETUP_IAM_POLICY_JSON)
-        policy_text.config(state=tk.DISABLED)
-        
-        # Permission breakdown
+
+        def _iam_copy_selection(event=None):
+            try:
+                sel = policy_text.get(tk.SEL_FIRST, tk.SEL_LAST)
+                self.parent.root.clipboard_clear()
+                self.parent.root.clipboard_append(sel)
+            except tk.TclError:
+                pass
+            return "break"
+
+        policy_text.bind("<Control-c>", _iam_copy_selection)
+        policy_text.bind("<Command-c>", _iam_copy_selection)
+
+        def _iam_policy_wheel(event):
+            try:
+                if event.delta:
+                    policy_text.yview_scroll(int(-1*(event.delta/120)), "units")
+                elif event.num == 4:
+                    policy_text.yview_scroll(-1, "units")
+                elif event.num == 5:
+                    policy_text.yview_scroll(1, "units")
+            except Exception:
+                pass
+            return "break"
+
+        policy_text.bind("<MouseWheel>", _iam_policy_wheel)
+        policy_text.bind("<Button-4>", _iam_policy_wheel)
+        policy_text.bind("<Button-5>", _iam_policy_wheel)
+
+        # Permission breakdown (selection-aware).
         breakdown_frame = ttk.LabelFrame(iam_content, text="Permission Breakdown")
         breakdown_frame.pack(fill=tk.X, padx=15, pady=10)
-        
-        ttk.Label(breakdown_frame, text=AWS_SETUP_PERMISSION_BREAKDOWN, font=("TkDefaultFont", 9),
-                 justify=tk.LEFT).pack(anchor=tk.W, padx=10, pady=10)
-        
-        # Security notes
+
+        breakdown_label = ttk.Label(breakdown_frame, text="", font=("TkDefaultFont", 9),
+                                    justify=tk.LEFT)
+        breakdown_label.pack(anchor=tk.W, padx=10, pady=10)
+
+        # Live refresh: rebuild policy text, breakdown, and button states from
+        # the current checkbox selection. Also enforces the dependency (Req 2.3/
+        # 2.4): a dependent whose parent is off is cleared and disabled.
+        def _refresh_iam_policy_view():
+            raw = [fid for fid, v in feature_vars.items() if v.get()]
+            resolved = _iam_resolve(raw)
+
+            # Reconcile the BooleanVars + enable/disable dependent checkboxes.
+            for feature in _IAM_FEATURES:
+                var = feature_vars[feature.id]
+                cb = feature_checkbuttons[feature.id]
+                if feature.parent_id is not None:
+                    # Parent state drives the dependent's interactivity.
+                    parent_selected = feature_vars[feature.parent_id].get()
+                    if parent_selected:
+                        cb.state(["!disabled"])
+                    else:
+                        # Auto-clear + disable the dependent when parent is off.
+                        if var.get():
+                            var.set(False)
+                        cb.state(["disabled"])
+                # Persist to Session_Selection.
+                selection[feature.id] = bool(var.get())
+
+            # Recompute from the reconciled vars (dependents may have cleared).
+            final_ids = [fid for fid, v in feature_vars.items() if v.get()]
+            policy = _iam_build_policy(final_ids)
+
+            policy_text.config(state=tk.NORMAL)
+            policy_text.delete("1.0", tk.END)
+            if policy is None:
+                policy_text.insert("1.0",
+                    "No features selected — select at least one feature above "
+                    "to generate a policy.")
+                copy_button.state(["disabled"])
+                test_button.state(["disabled"])
+            else:
+                policy_text.insert("1.0", policy)
+                copy_button.state(["!disabled"])
+                test_button.state(["!disabled"])
+            policy_text.config(state=tk.DISABLED)
+
+            breakdown_label.config(text=_iam_build_breakdown(final_ids))
+
+        # Initial render from the (possibly retained) Session_Selection.
+        _refresh_iam_policy_view()
+
+        # Security notes (retained; adapted to note the policy is selection-driven).
         security_frame = ttk.LabelFrame(iam_content, text="Security Notes")
         security_frame.pack(fill=tk.X, padx=15, pady=10)
         
         security_text = (
-            "• Read permissions for CloudWatch Logs and Rule Group browsing\n"
-            "• Read access to AWS managed rule groups (for analysis only)\n"
-            "• Write permissions for Rule Group deployment (CreateRuleGroup, UpdateRuleGroup)\n"
-            "• Bedrock InvokeModel sends rule descriptions to Claude (no data stored by AWS)\n"
-            "• Bedrock List permissions are read-only for model discovery\n"
-            "• Resource set to * because Bedrock ARNs vary by region and model\n"
-            "• No access to firewalls, policies, EC2, VPC, or other services\n"
-            "• Overwrite protection via confirmation dialog\n"
-            "• Same security model as AWS CLI\n"
-            "• No credentials stored by application\n"
-            "• Single policy covers all AWS features"
+            "• The policy above grants only the permissions for the features you selected\n"
+            "• Resource is set to \"*\" — scoping to specific resources/ARNs is left to the administrator\n"
+            "• Grant this policy to the least-privileged principal that needs it, and prefer\n"
+            "  temporary credentials (see the Credentials tab)\n"
+            "• This application stores no AWS credentials; it uses your configured profile/role"
         )
         ttk.Label(security_frame, text=security_text, font=("TkDefaultFont", 9),
                  justify=tk.LEFT).pack(anchor=tk.W, padx=10, pady=10)
@@ -14228,208 +14328,325 @@ Would you like to run a complete analysis?"""
         
         # Credentials content
         ttk.Label(cred_content, text="Configure AWS credentials using one of these options:",
-                 font=("TkDefaultFont", 11, "bold")).pack(anchor=tk.W, padx=15, pady=(15, 10))
-        
-        # Option 1: AWS CLI
-        opt1_frame = ttk.LabelFrame(cred_content, text="Option 1: AWS CLI (Recommended)")
+                 font=("TkDefaultFont", 11, "bold")).pack(anchor=tk.W, padx=15, pady=(15, 4))
+        # Options are listed most-preferred first. AWS best practice is to use
+        # temporary, automatically-refreshed credentials (IAM Identity Center /
+        # roles) and to avoid long-lived access keys where possible.
+        ttk.Label(cred_content,
+                 text="Listed from most to least recommended. Prefer temporary, "
+                      "auto-refreshed credentials (IAM Identity Center or a role) over "
+                      "long-lived access keys whenever you can.",
+                 font=("TkDefaultFont", 9), foreground="#666666",
+                 wraplength=680, justify=tk.LEFT).pack(anchor=tk.W, padx=15, pady=(0, 10))
+
+        # Option 1: IAM Identity Center (SSO) — recommended for laptop/desktop use.
+        opt1_frame = ttk.LabelFrame(cred_content,
+                                    text="Option 1: IAM Identity Center / SSO (Recommended)")
         opt1_frame.pack(fill=tk.X, padx=15, pady=10)
-        
+
         opt1_text = (
-            "If you have AWS CLI installed:\n"
-            "  aws configure\n\n"
+            "Best for running this tool on your laptop. Credentials are temporary\n"
+            "and refresh automatically — no long-lived keys stored on disk.\n"
+            "Requires AWS IAM Identity Center enabled by your administrator.\n"
+            "\n"
+            "STEP 1 — Create a shared SSO session (run once):\n"
+            "  aws configure sso-session\n"
             "You will be prompted for:\n"
-            "• AWS Access Key ID\n"
-            "• AWS Secret Access Key\n"
-            "• Default region (e.g., us-east-1)\n"
-            "• Default output format (json)\n\n"
-            "These credentials will be used by this tool automatically."
+            "• SSO session name (a common name reused in the steps below)\n"
+            "• SSO start URL (e.g., https://my-sso-portal.awsapps.com/start)\n"
+            "• SSO Region (the Region hosting IAM Identity Center)\n"
+            "• SSO registration scopes (optional — can be left blank)\n"
+            "\n"
+            "STEP 2 — Create a profile for EACH account/role (run once per account):\n"
+            "  aws configure sso\n"
+            "You will be prompted for:\n"
+            "• The shared SSO session name from Step 1\n"
+            "• (authenticate in the browser window that opens)\n"
+            "• The account and permission set (role) for this profile\n"
+            "• Default client Region and output format\n"
+            "• A UNIQUE profile name (this is what appears in the status-bar\n"
+            "  Profile dropdown — e.g., prod-admin, dev-readonly)\n"
+            "Repeat Step 2 for every account you need; each unique profile name\n"
+            "becomes its own dropdown entry, so you can switch accounts without\n"
+            "reconfiguring.\n"
+            "\n"
+            "STEP 3 — Sign in each day (or whenever the session expires):\n"
+            "  aws sso login --sso-session your-session-name\n"
+            "One login activates every profile that shares that session.\n"
+            "\n"
+            "Then select the profile for the account you want from the status-bar\n"
+            "Profile dropdown."
         )
         ttk.Label(opt1_frame, text=opt1_text, font=("TkDefaultFont", 9),
                  justify=tk.LEFT).pack(anchor=tk.W, padx=10, pady=10)
-        
-        # Option 2: Environment Variables
-        opt2_frame = ttk.LabelFrame(cred_content, text="Option 2: Environment Variables")
+
+        # Option 2: IAM Role via EC2 Instance Profile (running on AWS compute).
+        opt2_frame = ttk.LabelFrame(cred_content,
+                                    text="Option 2: IAM Role via EC2 Instance Profile (If Running on AWS)")
         opt2_frame.pack(fill=tk.X, padx=15, pady=10)
-        
+
         opt2_text = (
-            "Set these environment variables:\n\n"
+            "If you run this tool on an EC2 instance:\n"
+            "• You attach an IAM role to the instance through an instance profile\n"
+            "  (AWS creates the instance profile for you when you attach a role in\n"
+            "  the console). The instance profile is the container that delivers the\n"
+            "  role; the role is what grants the permissions.\n"
+            "• The tool then receives that role's temporary credentials automatically\n"
+            "• Temporary and auto-rotated — nothing to configure or store\n"
+            "• The most secure option when the tool runs on AWS compute\n\n"
+            "You can also assume a role from a named profile in ~/.aws/config\n"
+            "(role_arn + source_profile), which also yields temporary credentials.\n\n"
+            "Verify credentials:\n"
+            "  aws sts get-caller-identity"
+        )
+        ttk.Label(opt2_frame, text=opt2_text, font=("TkDefaultFont", 9),
+                 justify=tk.LEFT).pack(anchor=tk.W, padx=10, pady=10)
+
+        # Option 3: Environment Variables.
+        opt3_frame = ttk.LabelFrame(cred_content, text="Option 3: Environment Variables")
+        opt3_frame.pack(fill=tk.X, padx=15, pady=10)
+
+        opt3_intro = ttk.Label(opt3_frame,
+            text="Useful for short-lived / temporary credentials (note the "
+                 "AWS_SESSION_TOKEN). If your org uses IAM Identity Center, the access "
+                 "portal's \u201cCommand line or programmatic access\u201d option gives you "
+                 "exactly these three values to paste here — the same credential source "
+                 "as Option 1. They are temporary and expire, so Option 1 (aws configure "
+                 "sso) is smoother for repeated use because it refreshes them for you. "
+                 "Avoid pasting long-lived access keys here on a shared machine.",
+            font=("TkDefaultFont", 9), foreground="#666666",
+            wraplength=640, justify=tk.LEFT)
+        opt3_intro.pack(anchor=tk.W, padx=10, pady=(10, 0))
+
+        opt3_text = (
             "Linux/Mac:\n"
             '  export AWS_ACCESS_KEY_ID="your-access-key-id"\n'
             '  export AWS_SECRET_ACCESS_KEY="your-secret-key"\n'
+            '  export AWS_SESSION_TOKEN="your-session-token"   # if temporary\n'
             '  export AWS_DEFAULT_REGION="us-east-1"\n\n'
             "Windows (Command Prompt):\n"
             "  set AWS_ACCESS_KEY_ID=your-access-key-id\n"
             "  set AWS_SECRET_ACCESS_KEY=your-secret-key\n"
+            "  set AWS_SESSION_TOKEN=your-session-token\n"
             "  set AWS_DEFAULT_REGION=us-east-1\n\n"
             "Windows (PowerShell):\n"
             '  $env:AWS_ACCESS_KEY_ID="your-access-key-id"\n'
             '  $env:AWS_SECRET_ACCESS_KEY="your-secret-key"\n'
+            '  $env:AWS_SESSION_TOKEN="your-session-token"\n'
             '  $env:AWS_DEFAULT_REGION="us-east-1"'
         )
-        
-        opt2_text_widget = tk.Text(opt2_frame, height=13, wrap=tk.WORD,
+
+        opt3_text_widget = tk.Text(opt3_frame, height=15, wrap=tk.WORD,
                                    font=("Consolas", 8), bg="#F5F5F5")
-        opt2_text_widget.pack(fill=tk.X, padx=10, pady=10)
-        opt2_text_widget.insert("1.0", opt2_text)
-        opt2_text_widget.config(state=tk.DISABLED)
-        
-        # Option 3: IAM Role
-        opt3_frame = ttk.LabelFrame(cred_content, text="Option 3: IAM Role (If Running on AWS)")
-        opt3_frame.pack(fill=tk.X, padx=15, pady=10)
-        
-        opt3_text = (
-            "If running on an EC2 instance or in Cloud9:\n"
-            "• Credentials provided automatically via instance role\n"
-            "• No configuration needed\n"
-            "• Most secure option (no credentials to manage)\n\n"
-            "Verify credentials:\n"
-            "  aws sts get-caller-identity"
+        opt3_text_widget.pack(fill=tk.X, padx=10, pady=10)
+        opt3_text_widget.insert("1.0", opt3_text)
+        opt3_text_widget.config(state=tk.DISABLED)
+
+        # Option 4: AWS CLI static keys (aws configure) — least preferred fallback.
+        opt4_frame = ttk.LabelFrame(cred_content,
+                                    text="Option 4: Long-lived Access Keys (aws configure)")
+        opt4_frame.pack(fill=tk.X, padx=15, pady=10)
+
+        opt4_text = (
+            "Use only if the options above are unavailable (no IAM Identity Center,\n"
+            "not running on AWS). This stores a long-lived secret on disk, which\n"
+            "AWS discourages as a default.\n\n"
+            "Create a named profile for EACH account/role you need (a plain\n"
+            "'aws configure' writes the DEFAULT profile, so use --profile):\n"
+            "  aws configure --profile your-profile-name\n\n"
+            "You will be prompted for:\n"
+            "• AWS Access Key ID\n"
+            "• AWS Secret Access Key\n"
+            "• Default Region (e.g., us-east-1)\n"
+            "• Default output format (json)\n\n"
+            "Give each account/role a UNIQUE profile name (e.g., prod-admin,\n"
+            "dev-readonly) so it appears as its own entry in the status-bar\n"
+            "Profile dropdown; repeat for every account you need.\n\n"
+            "If you must use access keys, rotate them regularly and delete unused keys."
         )
-        ttk.Label(opt3_frame, text=opt3_text, font=("TkDefaultFont", 9),
+        ttk.Label(opt4_frame, text=opt4_text, font=("TkDefaultFont", 9),
                  justify=tk.LEFT).pack(anchor=tk.W, padx=10, pady=10)
         
-        # Tab 4: Testing
-        test_frame = ttk.Frame(notebook)
-        notebook.add(test_frame, text="Testing")
-        
-        # Create scrollable content for Testing tab
-        test_canvas = tk.Canvas(test_frame)
-        test_scrollbar = ttk.Scrollbar(test_frame, orient=tk.VERTICAL, command=test_canvas.yview)
-        test_main = ttk.Frame(test_canvas)
-        
-        test_main.bind(
-            "<Configure>",
-            lambda e: test_canvas.configure(scrollregion=test_canvas.bbox("all"))
-        )
-        
-        test_canvas.create_window((0, 0), window=test_main, anchor="nw")
-        test_canvas.configure(yscrollcommand=test_scrollbar.set)
-        
-        test_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        test_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
-        
-        # Enable mouse wheel scrolling for Testing tab
-        def on_test_mousewheel(event):
-            try:
-                if event.delta:
-                    test_canvas.yview_scroll(int(-1*(event.delta/120)), "units")
-                elif event.num == 4:
-                    test_canvas.yview_scroll(-1, "units")
-                elif event.num == 5:
-                    test_canvas.yview_scroll(1, "units")
-            except:
-                pass
-        
-        test_canvas.bind("<Enter>", lambda e: test_canvas.bind_all("<MouseWheel>", on_test_mousewheel))
-        test_canvas.bind("<Leave>", lambda e: test_canvas.unbind_all("<MouseWheel>"))
-        
-        # Content frame (now packed inside test_main which is in scrollable canvas)
-        test_content = ttk.Frame(test_main)
-        test_content.pack(fill=tk.BOTH, expand=True, padx=15, pady=15)
-        
-        ttk.Label(test_content, text="Test your AWS setup automatically:",
-                 font=("TkDefaultFont", 11, "bold")).pack(anchor=tk.W, pady=(0, 10))
-        
-        ttk.Label(test_content, 
-                 text="This will test all AWS permissions and connectivity without requiring any input.",
-                 font=("TkDefaultFont", 9), foreground="#666666").pack(anchor=tk.W, pady=(0, 15))
-        
-        # Test button
-        def run_connection_test():
-            # Clear previous results
-            for widget in results_display.winfo_children():
-                widget.destroy()
-            
-            # Run tests (no log group needed)
-            self._run_connection_test(None, results_display)
-        
-        ttk.Button(test_content, text="Run Tests", command=run_connection_test).pack(pady=(0, 15))
-        
-        # Results display
-        results_frame = ttk.LabelFrame(test_content, text="Test Results")
-        results_frame.pack(fill=tk.BOTH, expand=True)
-        
-        results_display = ttk.Frame(results_frame)
-        results_display.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
-        
-        ttk.Label(results_display, text="Click 'Test Connection' to run diagnostic tests",
-                 font=("TkDefaultFont", 9, "italic"), foreground="#666666").pack(pady=20)
-        
-        # Select default tab
-        tab_map = {'prerequisites': 0, 'iam': 1, 'credentials': 2, 'testing': 3}
+        # The former standalone "Testing" tab has been removed. Its capability
+        # now lives on the IAM Permissions & Testing tab via the "Test these
+        # permissions" button, which runs only the selected features' probes in
+        # a separate results popup (_open_test_results_window).
+
+        # Select default tab. The legacy 'testing' value maps to the combined
+        # 'iam' tab so existing callers don't error (Req 5a.2/5a.3).
+        if default_tab == 'testing':
+            default_tab = 'iam'
+        tab_map = {'prerequisites': 0, 'iam': 1, 'credentials': 2}
         notebook.select(tab_map.get(default_tab, 0))
         
         # Close button
         ttk.Button(help_dialog, text="Close", command=help_dialog.destroy).pack(pady=10)
     
     def _run_connection_test(self, log_group, results_display):
-        """Run connection test and display results
-        
+        """Run the full connection test (all features) and display results.
+
+        Retained for backward compatibility (Full_Selection). The per-feature
+        probes below are the single implementation; this wrapper runs every
+        feature, matching the legacy Testing-tab behavior.
+
         Args:
-            log_group: Not used (kept for compatibility)
-            results_display: Frame to display results in
+            log_group: Not used (kept for compatibility).
+            results_display: Frame to display results in.
+        """
+        from src.aws.iam_feature_model import ALL_FEATURE_IDS
+        results = self._collect_probe_results(list(ALL_FEATURE_IDS))
+        self._display_test_results(results, results_display)
+
+    # ------------------------------------------------------------------
+    # Per-feature probes (Req 6.1: each is independent — it appends its own
+    # result tuples and swallows its own exceptions, so one feature's failure
+    # never aborts the others). Probes build clients using the app-selected
+    # Region (Req 6.7), passed explicitly so a test run targets the Region the
+    # user is working in rather than relying on ambient-only SDK resolution.
+    # ------------------------------------------------------------------
+
+    # Map a feature id -> the probe method that verifies it. Used by both the
+    # full-run wrapper and the selective results popup.
+    def _feature_probe_map(self):
+        return {
+            'cloudwatch': self._probe_cloudwatch,
+            'rule_group_import': self._probe_rule_group_import,
+            'rule_group_export': self._probe_rule_group_export,
+            'container_associations': self._probe_container_associations,
+            'sharing': self._probe_sharing,
+            'bedrock': self._probe_bedrock,
+        }
+
+    def _collect_probe_results(self, probe_ids):
+        """Run the preamble, then the requested probes, into one results list.
+
+        probe_ids are the *probe* ids (from the Feature Model's probe_ids), in
+        the order they should run. Preamble runs first regardless (Req 6.4); if
+        it signals a hard stop (no boto3 / no credentials) the feature probes
+        are skipped because none could run (Req 6.2/6.3).
         """
         results = []
-        
-        # Test 1: boto3
+        can_continue, region = self._probe_preamble(results)
+        if not can_continue:
+            return results
+
+        probe_map = self._feature_probe_map()
+        passed_labels = []
+        for pid in probe_ids:
+            probe = probe_map.get(pid)
+            if probe is None:
+                continue
+            before = len(results)
+            probe(results, region)
+            # A feature "passed" for the summary if it added no ✗ rows.
+            if not any(sym == "✗" for sym, _ in results[before:]):
+                passed_labels.append(self._probe_label(pid))
+
+        # "Ready to use" summary listing the selected features that passed.
+        results.append(("", ""))
+        if passed_labels:
+            results.append(("", "Ready to use:"))
+            for label in passed_labels:
+                results.append(("", "• " + label))
+        failed = [self._probe_label(pid) for pid in probe_ids
+                  if pid in probe_map and self._probe_label(pid) not in passed_labels]
+        if failed:
+            results.append(("", ""))
+            results.append(("⚠️", "Some selected features reported a problem:"))
+            for label in failed:
+                results.append(("✗", label))
+        return results
+
+    def _probe_label(self, probe_id):
+        """Human label for a probe id (for the Ready-to-use summary)."""
+        return {
+            'cloudwatch': "Rule Usage Analyzer & Traffic Analysis",
+            'rule_group_import': "Rule Group Direct Import",
+            'rule_group_export': "Rule Group Direct Export",
+            'container_associations': "Container Association Manager",
+            'sharing': "Cross-account Sharing",
+            'bedrock': "AI Rule Assistant",
+        }.get(probe_id, probe_id)
+
+    def _probe_preamble(self, results):
+        """Verify boto3, credentials, profile, and Region.
+
+        Returns (can_continue, region). can_continue is False only when nothing
+        could possibly run (boto3 missing, or no credentials). A missing Region
+        is reported as a ⚠️ problem but does NOT stop the run (Req 6.6): each
+        feature probe still runs and reports its own result.
+        """
+        # boto3 present?
         try:
             import boto3
             version = boto3.__version__
             results.append(("✓", f"boto3 installed (version {version})"))
         except ImportError:
             results.append(("✗", "boto3 not installed"))
-            self._display_test_results(results, results_display)
-            return
-        
-        # Test 2: Credentials (using aws_session for profile support)
+            return (False, None)
+
+        # Credentials + profile + region.
+        region = None
         try:
             session = self.parent.aws_session.get_session()
             creds = session.get_credentials()
-            if creds:
-                results.append(("✓", "AWS credentials configured"))
-                profile = session.profile_name or 'default'
-                results.append(("✓", f"Using profile: {profile}"))
-                region = session.region_name
-                if region:
-                    results.append(("✓", f"Region: {region}"))
-                else:
-                    # No region resolved (common on an EC2 instance role with no
-                    # configured default region). Flag it clearly; per-service
-                    # calls below will fail with NoRegionError until a region is
-                    # set, but each probe reports its own result and the run
-                    # continues rather than aborting.
-                    results.append(("⚠️", "Region: not set — set a default region "
-                                          "(AWS_DEFAULT_REGION / AWS_REGION env var, "
-                                          "or the status-bar Region selector)"))
-            else:
+            if not creds:
                 results.append(("✗", "No AWS credentials found"))
-                self._display_test_results(results, results_display)
-                return
+                return (False, None)
+            results.append(("✓", "AWS credentials configured"))
+            profile = session.profile_name or 'default'
+            results.append(("✓", f"Using profile: {profile}"))
+            # Prefer the app-selected Region (get_default_region resolves the
+            # profile's region); fall back to the raw session region.
+            region = session.region_name
+            if not region:
+                try:
+                    resolved = self.parent.aws_session.get_default_region()
+                    # get_default_region falls back to 'us-east-1'; only treat a
+                    # value as "set" if the session actually had one.
+                    region = resolved if session.region_name else None
+                except Exception:
+                    region = None
+            if region:
+                results.append(("✓", f"Region: {region}"))
+            else:
+                # No region resolved (common on an EC2 instance role with no
+                # configured default region). Flag it clearly; per-feature
+                # probes below still run and report their own result rather than
+                # aborting (Req 6.6).
+                results.append(("⚠️", "Region: not set — set a default region "
+                                      "(AWS_DEFAULT_REGION / AWS_REGION env var, "
+                                      "or the status-bar Region selector)"))
         except Exception as e:
             results.append(("✗", f"Credentials error: {str(e)}"))
-            self._display_test_results(results, results_display)
-            return
-        
-        # Test 3: CloudWatch Logs - DescribeLogGroups (essential for dropdown population)
+            return (False, None)
+
+        return (True, region)
+
+    def _probe_client(self, service, region):
+        """Build a boto3 client for a probe using the app-selected Region."""
+        return self.parent.aws_session.get_client(service, region_name=region)
+
+    def _probe_cloudwatch(self, results, region):
         results.append(("", ""))
         results.append(("", "CloudWatch Logs:"))
         try:
-            client = self.parent.aws_session.get_client('logs')
-            
+            client = self._probe_client('logs', region)
+
             # Test DescribeLogGroups (no filter - list ALL log groups)
             response = client.describe_log_groups(limit=10)
             total_log_groups = len(response.get('logGroups', []))
-            
+
             if total_log_groups > 0:
                 results.append(("✓", f"logs:DescribeLogGroups - Verified ({total_log_groups} log groups found)"))
-                
+
                 # Check specifically for Network Firewall log groups
                 nfw_response = client.describe_log_groups(
                     logGroupNamePrefix='/aws/network-firewall/',
                     limit=10
                 )
                 nfw_count = len(nfw_response.get('logGroups', []))
-                
+
                 if nfw_count > 0:
                     results.append(("✓", f"Found {nfw_count} Network Firewall log group(s)"))
                     test_log_group = nfw_response['logGroups'][0]['logGroupName']
@@ -14437,7 +14654,7 @@ Would you like to run a complete analysis?"""
                     # Use any available log group for testing
                     results.append(("ℹ️", "No Network Firewall log groups (using any available for testing)"))
                     test_log_group = response['logGroups'][0]['logGroupName']
-                
+
                 # Test StartQuery with a found log group
                 test_query = "fields @timestamp | limit 1"
                 query_response = client.start_query(
@@ -14448,12 +14665,12 @@ Would you like to run a complete analysis?"""
                     limit=1
                 )
                 results.append(("✓", "logs:StartQuery - Verified"))
-                
+
                 # Test GetQueryResults
                 query_id = query_response['queryId']
                 result = client.get_query_results(queryId=query_id)
                 results.append(("✓", "logs:GetQueryResults - Verified"))
-                
+
                 # Test StopQuery (safe to call even if query completed)
                 try:
                     client.stop_query(queryId=query_id)
@@ -14466,26 +14683,23 @@ Would you like to run a complete analysis?"""
                 results.append(("⚠️", "No log groups found in account"))
                 results.append(("ℹ️", "Create log groups to enable StartQuery/GetQueryResults testing"))
                 results.append(("ℹ️", "Dropdown will work but will be empty until log groups exist"))
-                
+
         except Exception as e:
             error_str = str(e)
             if "AccessDenied" in error_str:
-                results.append(("✗", "Access denied to CloudWatch Logs"))
+                results.append(("✗", f"Access denied to CloudWatch Logs: {error_str[:120]}"))
             elif "must specify a region" in error_str.lower() or "NoRegionError" in error_str:
                 results.append(("✗", "CloudWatch: no region set (set a default region and retry)"))
             else:
                 results.append(("✗", f"CloudWatch test failed: {error_str[:50]}"))
-            # Do NOT abort the whole run: other services are independent of
-            # CloudWatch, so continue testing them and let each report its own
-            # result (an EC2 instance role with no region should still see the
-            # Network Firewall / Container Association results).
-        
-        # Test 5: Network Firewall access (NEW)
+            # Do NOT abort the whole run: other features are independent.
+
+    def _probe_rule_group_import(self, results, region):
         results.append(("", ""))
-        results.append(("", "Network Firewall:"))
+        results.append(("", "Network Firewall (Rule Group Import):"))
         try:
-            nfw_client = self.parent.aws_session.get_client('network-firewall')
-            
+            nfw_client = self._probe_client('network-firewall', region)
+
             # Test ListRuleGroups
             response = nfw_client.list_rule_groups(
                 Scope='ACCOUNT',
@@ -14495,7 +14709,7 @@ Would you like to run a complete analysis?"""
             rule_group_count = len(response.get('RuleGroups', []))
             results.append(("✓", "network-firewall:ListRuleGroups - Verified"))
             results.append(("✓", f"Found {rule_group_count} rule group(s) in account"))
-            
+
             # Test DescribeRuleGroup if rule groups exist
             if rule_group_count > 0:
                 first_rg_arn = response['RuleGroups'][0]['Arn']
@@ -14506,7 +14720,7 @@ Would you like to run a complete analysis?"""
                 results.append(("✓", "network-firewall:DescribeRuleGroup - Verified"))
             else:
                 results.append(("ℹ️", "No rule groups to test DescribeRuleGroup (0 in account)"))
-            
+
             # Test ListRuleGroups with MANAGED scope (for managed rule group analysis)
             try:
                 managed_response = nfw_client.list_rule_groups(
@@ -14522,44 +14736,47 @@ Would you like to run a complete analysis?"""
                     results.append(("✗", "network-firewall:ListRuleGroups (MANAGED) - Permission missing"))
                 else:
                     results.append(("⚠️", f"Managed rule groups: {managed_err[:50]}"))
-                
+
         except Exception as e:
             error_str = str(e)
             if "AccessDenied" in error_str:
-                results.append(("✗", "Network Firewall permissions missing"))
+                results.append(("✗", f"Network Firewall permissions missing: {error_str[:120]}"))
             else:
                 results.append(("✗", f"Network Firewall test failed: {error_str[:50]}"))
-        
-        # Test export permissions (NEW)
+
+    def _probe_rule_group_export(self, results, region):
         results.append(("", ""))
-        results.append(("", "Export Permissions:"))
-        
-        # Note: We can't actually test CreateRuleGroup without creating a rule group
-        # Instead, check if user has the permission by attempting describe on a non-existent group
-        # This will return AccessDenied if missing CreateRuleGroup, or ResourceNotFound if has permission
+        results.append(("", "Network Firewall (Rule Group Export):"))
+        # We can't actually create a rule group without side effects. Instead,
+        # describe a non-existent group: ResourceNotFound means we have the
+        # permission to check; AccessDenied means we don't.
         try:
-            test_describe = nfw_client.describe_rule_group(
-                RuleGroupName='test-permission-check-do-not-create',
-                Type='STATEFUL'
-            )
-            results.append(("✓", "network-firewall:CreateRuleGroup - Permissions verified"))
-        except nfw_client.exceptions.ResourceNotFoundException:
-            # ResourceNotFound means we have permission to check (good)
-            results.append(("✓", "network-firewall:CreateRuleGroup - Permissions verified"))
-        except nfw_client.exceptions.AccessDeniedException:
-            # Access denied means we don't have permission
-            results.append(("✗", "network-firewall:CreateRuleGroup - Permission missing"))
-        except:
-            pass
-        
+            nfw_client = self._probe_client('network-firewall', region)
+            try:
+                test_describe = nfw_client.describe_rule_group(
+                    RuleGroupName='test-permission-check-do-not-create',
+                    Type='STATEFUL'
+                )
+                results.append(("✓", "network-firewall:CreateRuleGroup - Permissions verified"))
+            except nfw_client.exceptions.ResourceNotFoundException:
+                results.append(("✓", "network-firewall:CreateRuleGroup - Permissions verified"))
+            except nfw_client.exceptions.AccessDeniedException as ade:
+                msg = ade.response.get('Error', {}).get('Message', str(ade))
+                results.append(("✗", f"network-firewall:CreateRuleGroup - Permission missing: {msg[:120]}"))
+        except Exception as e:
+            error_str = str(e)
+            if "must specify a region" in error_str.lower() or "NoRegionError" in error_str:
+                results.append(("✗", "Rule Group Export: no region set (set a default region and retry)"))
+            else:
+                results.append(("✗", f"Rule Group Export test failed: {error_str[:50]}"))
         # Note about UpdateRuleGroup
         results.append(("ℹ️", "network-firewall:UpdateRuleGroup - Same permissions as Create"))
-        
-        # Test: Container Associations (Container Association Manager)
+
+    def _probe_container_associations(self, results, region):
         results.append(("", ""))
         results.append(("", "Network Firewall - Container Associations:"))
         try:
-            ca_client = self.parent.aws_session.get_client('network-firewall')
+            ca_client = self._probe_client('network-firewall', region)
             ca_response = ca_client.list_container_associations(MaxResults=5)
             ca_count = len(ca_response.get('ContainerAssociations', []))
             results.append(("✓", "network-firewall:ListContainerAssociations - Verified"))
@@ -14567,39 +14784,50 @@ Would you like to run a complete analysis?"""
         except Exception as e:
             error_str = str(e)
             if "AccessDenied" in error_str:
-                results.append(("✗", "network-firewall:ListContainerAssociations - Permission missing"))
+                # Surface the actual AWS message where available (Req 6a).
+                msg = getattr(e, 'response', {}).get('Error', {}).get('Message', error_str) \
+                    if hasattr(e, 'response') else error_str
+                results.append(("✗", f"network-firewall:ListContainerAssociations - Permission missing: {msg[:120]}"))
+            elif "must specify a region" in error_str.lower() or "NoRegionError" in error_str:
+                results.append(("✗", "Container Associations: no region set (set a default region and retry)"))
             else:
                 results.append(("✗", f"Container association test failed: {error_str[:50]}"))
-        # RAM read (for the "Shared with" column) is optional; report informational only.
+
+    def _probe_sharing(self, results, region):
+        results.append(("", ""))
+        results.append(("", "Cross-account Sharing (AWS RAM):"))
         try:
-            ram_client = self.parent.aws_session.get_client('ram')
+            ram_client = self._probe_client('ram', region)
             # get_resource_share_associations does NOT accept resourceOwner
             # (that parameter belongs to get_resource_shares); passing it raises
-            # a ParamValidationError that was masked as an informational line,
-            # so the check never reported success even with the permission.
+            # a ParamValidationError, so we omit it.
             ram_client.get_resource_share_associations(
                 associationType='RESOURCE', maxResults=1)
             results.append(("✓", "ram:GetResourceShareAssociations - Verified (sharing visibility)"))
         except Exception as e:
             error_str = str(e)
             if "AccessDenied" in error_str:
-                results.append(("ℹ️", "RAM read not available - the \"Shared with\" column will be hidden"))
+                msg = getattr(e, 'response', {}).get('Error', {}).get('Message', error_str) \
+                    if hasattr(e, 'response') else error_str
+                results.append(("✗", f"ram:GetResourceShareAssociations - Permission missing: {msg[:120]}"))
+            elif "must specify a region" in error_str.lower() or "NoRegionError" in error_str:
+                results.append(("✗", "Cross-account Sharing: no region set (set a default region and retry)"))
             else:
-                results.append(("ℹ️", f"RAM check skipped: {error_str[:50]}"))
-        
-        # Test 6: Amazon Bedrock access (AI Rule Assistant)
+                results.append(("⚠️", f"RAM check skipped: {error_str[:50]}"))
+
+    def _probe_bedrock(self, results, region):
         results.append(("", ""))
         results.append(("", "Amazon Bedrock (AI Rule Assistant):"))
         try:
-            bedrock_client = self.parent.aws_session.get_client('bedrock')
-            
+            bedrock_client = self._probe_client('bedrock', region)
+
             # Test ListFoundationModels
             response = bedrock_client.list_foundation_models(
                 byOutputModality="TEXT",
             )
             model_count = len(response.get('modelSummaries', []))
             results.append(("✓", f"bedrock:ListFoundationModels - Verified ({model_count} models)"))
-            
+
             # Test ListInferenceProfiles
             try:
                 profile_response = bedrock_client.list_inference_profiles()
@@ -14611,7 +14839,7 @@ Would you like to run a complete analysis?"""
                     results.append(("✗", "bedrock:ListInferenceProfiles - Permission missing"))
                 else:
                     results.append(("⚠️", f"ListInferenceProfiles: {profile_err[:50]}"))
-            
+
             # Check for Claude model access
             claude_models = [m for m in response.get('modelSummaries', [])
                            if 'claude' in m.get('modelId', '').lower()
@@ -14620,10 +14848,10 @@ Would you like to run a complete analysis?"""
                 results.append(("✓", f"Claude models available: {len(claude_models)} active"))
             else:
                 results.append(("⚠️", "No active Claude models found — enable model access in Bedrock console"))
-            
+
             # Test InvokeModel permission with a minimal request
             try:
-                bedrock_rt_client = self.parent.aws_session.get_client('bedrock-runtime')
+                bedrock_rt_client = self._probe_client('bedrock-runtime', region)
                 # Use Converse API with minimal input to test permission
                 # This will fail with ValidationException if model not enabled,
                 # or succeed with a tiny response — either confirms IAM permission
@@ -14648,30 +14876,117 @@ Would you like to run a complete analysis?"""
                     results.append(("✓", "bedrock:InvokeModel - Verified (throttled)"))
                 else:
                     results.append(("⚠️", f"InvokeModel test: {invoke_err[:60]}"))
-                    
+
         except Exception as e:
             error_str = str(e)
             if "AccessDenied" in error_str:
                 results.append(("✗", "Amazon Bedrock permissions missing"))
             elif "EndpointConnectionError" in error_str or "Could not connect" in error_str:
                 results.append(("⚠️", "Bedrock not available in this region"))
+            elif "must specify a region" in error_str.lower() or "NoRegionError" in error_str:
+                results.append(("✗", "Bedrock: no region set (set a default region and retry)"))
             else:
                 results.append(("✗", f"Bedrock test failed: {error_str[:50]}"))
-        
-        # All tests complete
-        results.append(("", ""))
-        results.append(("✓", "All checks passed!"))
-        results.append(("", ""))
-        results.append(("", "Ready to use:"))
-        results.append(("", "• Tools > Analyze Rule Usage"))
-        results.append(("", "• Tools > Analyze Rule Usage > Managed Rule Groups"))
-        results.append(("", "• Tools > AI Rule Assistant"))
-        results.append(("", "• Tools > Manage Container Associations"))
-        results.append(("", "• File > Import Rule Group"))
-        results.append(("", "• File > Export Rule Group"))
-        
-        self._display_test_results(results, results_display)
-    
+
+    def _open_test_results_window(self, selected_ids):
+        """Open a popup that runs and shows probes for the selected features.
+
+        selected_ids are *feature* ids (canonical order). Only the selected
+        features' probes run (Req 5.3/5.5). Follows the workspace UI conventions:
+        resizable + minsize(), no transient(), grab_set(), dark-mode palette,
+        Close button packed side=tk.BOTTOM first, dual Ctrl/Cmd copy on the
+        read-only results text, and mouse-wheel scrolling.
+        """
+        from src.aws.iam_feature_model import selected_probe_ids
+
+        probe_ids = selected_probe_ids(selected_ids)
+
+        win = tk.Toplevel(self.parent.root)
+        win.title("Test Permissions — Results")
+        win.geometry("620x560")
+        win.grab_set()
+        win.resizable(True, True)
+        win.minsize(480, 360)
+        win.geometry("+%d+%d" % (
+            self.parent.root.winfo_rootx() + 120,
+            self.parent.root.winfo_rooty() + 60
+        ))
+
+        # Dark-mode palette (workspace convention).
+        import platform as _plat
+        _is_dark = False
+        if _plat.system() == 'Darwin':
+            try:
+                import subprocess as _sp
+                _r = _sp.run(['defaults', 'read', '-g', 'AppleInterfaceStyle'],
+                             capture_output=True, text=True)
+                _is_dark = 'Dark' in _r.stdout
+            except Exception:
+                _is_dark = False
+        bg = "#1E1E1E" if _is_dark else "#FFFFFF"
+        fg = "#E0E0E0" if _is_dark else "#000000"
+
+        # Close button FIRST (side=tk.BOTTOM), so it stays visible (UI convention).
+        button_bar = ttk.Frame(win)
+        button_bar.pack(side=tk.BOTTOM, fill=tk.X, padx=12, pady=(0, 12))
+        ttk.Button(button_bar, text="Close", command=win.destroy).pack(side=tk.RIGHT)
+
+        header = ttk.Label(win,
+            text="Testing selected features against the current AWS profile…",
+            font=("TkDefaultFont", 10))
+        header.pack(side=tk.TOP, anchor=tk.W, padx=12, pady=(12, 6))
+
+        # Scrollable read-only results text.
+        body = ttk.Frame(win)
+        body.pack(side=tk.TOP, fill=tk.BOTH, expand=True, padx=12, pady=(0, 8))
+        results_text = tk.Text(body, wrap=tk.WORD, font=("TkDefaultFont", 9),
+                               bg=bg, fg=fg, insertbackground=fg,
+                               relief=tk.SOLID, borderwidth=1)
+        vsb = ttk.Scrollbar(body, orient=tk.VERTICAL, command=results_text.yview)
+        results_text.configure(yscrollcommand=vsb.set)
+        results_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        vsb.pack(side=tk.RIGHT, fill=tk.Y)
+
+        def _copy_selection(event=None):
+            try:
+                sel = results_text.get(tk.SEL_FIRST, tk.SEL_LAST)
+                self.parent.root.clipboard_clear()
+                self.parent.root.clipboard_append(sel)
+            except tk.TclError:
+                pass
+            return "break"
+
+        results_text.bind("<Control-c>", _copy_selection)
+        results_text.bind("<Command-c>", _copy_selection)
+
+        def _on_wheel(event):
+            try:
+                if event.delta:
+                    results_text.yview_scroll(int(-1*(event.delta/120)), "units")
+                elif event.num == 4:
+                    results_text.yview_scroll(-1, "units")
+                elif event.num == 5:
+                    results_text.yview_scroll(1, "units")
+            except Exception:
+                pass
+            return "break"
+
+        results_text.bind("<MouseWheel>", _on_wheel)
+        results_text.bind("<Button-4>", _on_wheel)
+        results_text.bind("<Button-5>", _on_wheel)
+
+        # Run the probes and render into the text widget.
+        results = self._collect_probe_results(probe_ids)
+        results_text.config(state=tk.NORMAL)
+        for icon, message in results:
+            if not icon and not message:
+                results_text.insert(tk.END, "\n")
+            elif icon:
+                results_text.insert(tk.END, f"{icon} {message}\n")
+            else:
+                results_text.insert(tk.END, f"{message}\n")
+        results_text.config(state=tk.DISABLED)
+
     def _display_test_results(self, results, results_display):
         """Display test results in the results frame
         

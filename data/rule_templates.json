@@ -1,6 +1,6 @@
 {
-  "version": "1.2.0",
-  "last_updated": "2026-09-07",
+  "version": "1.2.1",
+  "last_updated": "2026-09-28",
   "description": "Rule Templates Library for Suricata Rule Generator",
   "templates": [
     {
@@ -745,8 +745,7 @@
               "label": "Afghanistan",
               "region": "Asia",
               "regions": [
-                "Asia",
-                "ITAR Countries"
+                "Asia"
               ]
             },
             {
@@ -784,8 +783,7 @@
               "label": "Cambodia",
               "region": "Asia",
               "regions": [
-                "Asia",
-                "ITAR Countries"
+                "Asia"
               ]
             },
             {
@@ -793,8 +791,7 @@
               "label": "China",
               "region": "Asia",
               "regions": [
-                "Asia",
-                "ITAR Countries"
+                "Asia"
               ]
             },
             {
@@ -807,8 +804,7 @@
               "label": "Hong Kong",
               "region": "Asia",
               "regions": [
-                "Asia",
-                "ITAR Countries"
+                "Asia"
               ]
             },
             {
@@ -841,8 +837,7 @@
               "label": "Kyrgyzstan",
               "region": "Asia",
               "regions": [
-                "Asia",
-                "ITAR Countries"
+                "Asia"
               ]
             },
             {
@@ -875,8 +870,7 @@
               "label": "Myanmar",
               "region": "Asia",
               "regions": [
-                "Asia",
-                "ITAR Countries"
+                "Asia"
               ]
             },
             {
@@ -889,8 +883,7 @@
               "label": "North Korea",
               "region": "Asia",
               "regions": [
-                "Asia",
-                "ITAR Countries"
+                "Asia"
               ]
             },
             {
@@ -1058,8 +1051,7 @@
               "label": "Cuba",
               "region": "Americas",
               "regions": [
-                "Americas",
-                "ITAR Countries"
+                "Americas"
               ]
             },
             {
@@ -1127,8 +1119,7 @@
               "label": "Haiti",
               "region": "Americas",
               "regions": [
-                "Americas",
-                "ITAR Countries"
+                "Americas"
               ]
             },
             {
@@ -1161,8 +1152,7 @@
               "label": "Nicaragua",
               "region": "Americas",
               "regions": [
-                "Americas",
-                "ITAR Countries"
+                "Americas"
               ]
             },
             {
@@ -1245,8 +1235,7 @@
               "label": "Venezuela",
               "region": "Americas",
               "regions": [
-                "Americas",
-                "ITAR Countries"
+                "Americas"
               ]
             },
             {
@@ -1299,8 +1288,7 @@
               "label": "Central African Republic",
               "region": "Africa",
               "regions": [
-                "Africa",
-                "ITAR Countries"
+                "Africa"
               ]
             },
             {
@@ -1323,8 +1311,7 @@
               "label": "Congo (DRC)",
               "region": "Africa",
               "regions": [
-                "Africa",
-                "ITAR Countries"
+                "Africa"
               ]
             },
             {
@@ -1352,8 +1339,7 @@
               "label": "Eritrea",
               "region": "Africa",
               "regions": [
-                "Africa",
-                "ITAR Countries"
+                "Africa"
               ]
             },
             {
@@ -1361,8 +1347,7 @@
               "label": "Ethiopia",
               "region": "Africa",
               "regions": [
-                "Africa",
-                "ITAR Countries"
+                "Africa"
               ]
             },
             {
@@ -1410,8 +1395,7 @@
               "label": "Libya",
               "region": "Africa",
               "regions": [
-                "Africa",
-                "ITAR Countries"
+                "Africa"
               ]
             },
             {
@@ -1509,8 +1493,7 @@
               "label": "Somalia",
               "region": "Africa",
               "regions": [
-                "Africa",
-                "ITAR Countries"
+                "Africa"
               ]
             },
             {
@@ -1523,8 +1506,7 @@
               "label": "South Sudan",
               "region": "Africa",
               "regions": [
-                "Africa",
-                "ITAR Countries"
+                "Africa"
               ]
             },
             {
@@ -1532,8 +1514,7 @@
               "label": "Sudan",
               "region": "Africa",
               "regions": [
-                "Africa",
-                "ITAR Countries"
+                "Africa"
               ]
             },
             {
@@ -1576,8 +1557,7 @@
               "label": "Zimbabwe",
               "region": "Africa",
               "regions": [
-                "Africa",
-                "ITAR Countries"
+                "Africa"
               ]
             },
             {
@@ -1585,8 +1565,7 @@
               "label": "Cyprus",
               "region": "Middle East",
               "regions": [
-                "Middle East",
-                "ITAR Countries"
+                "Middle East"
               ]
             },
             {
@@ -1594,8 +1573,7 @@
               "label": "Iran",
               "region": "Middle East",
               "regions": [
-                "Middle East",
-                "ITAR Countries"
+                "Middle East"
               ]
             },
             {
@@ -1603,8 +1581,7 @@
               "label": "Iraq",
               "region": "Middle East",
               "regions": [
-                "Middle East",
-                "ITAR Countries"
+                "Middle East"
               ]
             },
             {
@@ -1622,8 +1599,7 @@
               "label": "Lebanon",
               "region": "Middle East",
               "regions": [
-                "Middle East",
-                "ITAR Countries"
+                "Middle East"
               ]
             },
             {
@@ -1636,8 +1612,7 @@
               "label": "Syria",
               "region": "Middle East",
               "regions": [
-                "Middle East",
-                "ITAR Countries"
+                "Middle East"
               ]
             },
             {
@@ -1675,8 +1650,7 @@
               "label": "Belarus",
               "region": "Europe",
               "regions": [
-                "Europe",
-                "ITAR Countries"
+                "Europe"
               ]
             },
             {
@@ -1859,8 +1833,7 @@
               "label": "Russia",
               "region": "Europe",
               "regions": [
-                "Europe",
-                "ITAR Countries"
+                "Europe"
               ]
             },
             {

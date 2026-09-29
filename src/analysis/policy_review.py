@@ -34,9 +34,16 @@ from src.analysis.policy_models import (
     RuleGroupSource,
 )
 
-# Variable names that are policy-wide (Policy_Level_HomeNet, Req 5.3, 5.6) and
-# therefore NOT namespaced per group: they are carried through under their real
-# names using the Current_Group's value. Compared without the leading $/@.
+# $HOME_NET / $EXTERNAL_NET are special: in AWS Network Firewall these can be
+# defined PER RULE GROUP (and $HOME_NET can additionally be set at the policy
+# level), and the values can differ between groups. So — like every other
+# variable — they are namespaced per group ($gN__HOME_NET / $gN__EXTERNAL_NET)
+# so each group's rules resolve against that group's OWN definition. What makes
+# them special is the FALLBACK: a group that does not define its own value
+# inherits the policy-level value (taken from the Current_Group / open file),
+# matching how AWS layers a policy-level $HOME_NET under the rule groups. See
+# build_namespaced_variables for the fallback logic. Compared without the
+# leading $/@.
 _POLICY_WIDE_VARS = frozenset({"HOME_NET", "EXTERNAL_NET"})
 
 # Matches a single Suricata variable reference token inside a network/port
@@ -257,12 +264,17 @@ class PolicyReviewService:
         distinct entries, so each group's rules resolve against their own
         definition (Req 5.1, 5.2).
 
-        ``$HOME_NET`` and ``$EXTERNAL_NET`` are added ONCE, un-namespaced, under
-        their real names, from the Current_Group's variables (Policy_Level_
-        HomeNet, Req 5.3, 5.6). They are handled exactly as the single-group
-        analyzer handles them today: passed straight through, and if the current
-        group does not define them they are simply absent (the analyzer then
-        stays conservative, as it does now).
+        ``$HOME_NET`` and ``$EXTERNAL_NET`` are namespaced per group the SAME
+        way as any other variable, so a group whose ``$HOME_NET`` differs from
+        another group's is analyzed against its OWN value (they can legitimately
+        differ per rule group in AWS Network Firewall). The only special part is
+        the fallback: a group that does not define its own ``$HOME_NET`` /
+        ``$EXTERNAL_NET`` inherits the policy-level value — taken from the
+        Current_Group (the open file) — under the group's OWN namespaced key, so
+        it resolves exactly as AWS would layer a policy-level ``$HOME_NET`` under
+        that group's rules. If neither the group nor the Current_Group defines a
+        value, that group's namespaced key is simply absent and the analyzer
+        stays conservative (as it does today).
 
         Args:
             policy_set: The assembled Policy_Set.
@@ -273,6 +285,19 @@ class PolicyReviewService:
         """
         namespaced: Dict[str, dict] = {}
 
+        # Policy-level fallback values for $HOME_NET / $EXTERNAL_NET, taken from
+        # the Current_Group (the open file). A group that defines its own value
+        # overrides this; a group that does not inherit it. $EXTERNAL_NET has no
+        # policy-level concept in AWS (it is group-level only), but the tool's
+        # Current_Group carries an auto-derived $EXTERNAL_NET, so we use it as a
+        # sensible fallback for groups that omit their own.
+        current = policy_set.current_group()
+        current_vars = (current.variables or {}) if current is not None else {}
+        policy_fallback = {
+            name: current_vars.get(f"${name}")
+            for name in _POLICY_WIDE_VARS
+        }
+
         for idx, group in enumerate(policy_set.ordered_groups()):
             variables = group.variables or {}
             for key, value in variables.items():
@@ -282,9 +307,6 @@ class PolicyReviewService:
                     continue
                 symbol = key[0]
                 name = key[1:]
-                # Policy-wide vars are handled once below, never per group.
-                if name in _POLICY_WIDE_VARS:
-                    continue
                 namespaced_key = f"{symbol}{self._namespace_token(idx, name)}"
                 # Copy the definition dict so the source group's dict is never
                 # aliased into the analyzer input.
@@ -292,15 +314,19 @@ class PolicyReviewService:
                     dict(value) if isinstance(value, dict) else value
                 )
 
-        # Add $HOME_NET / $EXTERNAL_NET once, un-namespaced, from current group.
-        current = policy_set.current_group()
-        if current is not None:
-            current_vars = current.variables or {}
-            for policy_var in ("$HOME_NET", "$EXTERNAL_NET"):
-                value = current_vars.get(policy_var)
-                if value is not None:
-                    namespaced[policy_var] = (
-                        dict(value) if isinstance(value, dict) else value
+            # For $HOME_NET / $EXTERNAL_NET, ensure this group has a namespaced
+            # entry even when it does not define its own — falling back to the
+            # policy-level value so a group inherits the policy's $HOME_NET
+            # exactly as AWS does. A group's OWN definition (added in the loop
+            # above) takes precedence and is left untouched.
+            for name in _POLICY_WIDE_VARS:
+                namespaced_key = f"${self._namespace_token(idx, name)}"
+                if namespaced_key in namespaced:
+                    continue  # group defined its own; group value wins.
+                fallback = policy_fallback.get(name)
+                if fallback is not None:
+                    namespaced[namespaced_key] = (
+                        dict(fallback) if isinstance(fallback, dict) else fallback
                     )
 
         return namespaced
@@ -310,13 +336,16 @@ class PolicyReviewService:
         """Rewrite the variable tokens in a single network/port field.
 
         Substitutes each ``$NAME`` / ``@NAME`` reference to its group-namespaced
-        form ``$g<idx>__NAME`` / ``@g<idx>__NAME``, leaving ``$HOME_NET`` and
-        ``$EXTERNAL_NET`` untouched. Only the token itself is replaced;
-        surrounding brackets, negation (``!``), commas, ``any`` and any other
-        literal text are preserved because the regex matches ONLY the
-        symbol+identifier and nothing around it. For example, with ``idx == 0``:
+        form ``$g<idx>__NAME`` / ``@g<idx>__NAME``. ``$HOME_NET`` and
+        ``$EXTERNAL_NET`` are namespaced the SAME way as any other variable (so
+        each group's rules resolve against that group's own value, with the
+        policy-level fallback supplied in ``build_namespaced_variables``). Only
+        the token itself is replaced; surrounding brackets, negation (``!``),
+        commas, ``any`` and any other literal text are preserved because the
+        regex matches ONLY the symbol+identifier and nothing around it. For
+        example, with ``idx == 0``:
 
-            ``"[$SERVERS,!$HOME_NET]"`` -> ``"[$g0__SERVERS,!$HOME_NET]"``
+            ``"[$SERVERS,!$HOME_NET]"`` -> ``"[$g0__SERVERS,!$g0__HOME_NET]"``
             ``"any"``                   -> ``"any"`` (no token, unchanged)
             ``"@VPCREF"``               -> ``"@g0__VPCREF"``
 
@@ -328,9 +357,6 @@ class PolicyReviewService:
         def _sub(match: "re.Match") -> str:
             symbol = match.group(1)
             name = match.group(2)
-            if name in _POLICY_WIDE_VARS:
-                # Leave $HOME_NET / $EXTERNAL_NET exactly as written.
-                return match.group(0)
             return f"{symbol}{cls._namespace_token(idx, name)}"
 
         return _VAR_REF_RE.sub(_sub, field_value)

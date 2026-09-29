@@ -3664,7 +3664,8 @@ class RuleAnalyzer:
             lines += f"  {ordinal}. {name}{current_marker} \u2014 {count} rules\n"
         home_net = header.get("home_net")
         if home_net and header.get("home_net_differed"):
-            lines += f"Policy $HOME_NET: {home_net} (defined in currently open file; other groups defined differently)\n"
+            lines += f"Policy $HOME_NET: {home_net} (from the currently open file; used only for groups that don't define their own)\n"
+            lines += "Note: rule groups define $HOME_NET differently; each group was analyzed against its own value.\n"
         elif home_net:
             lines += f"Policy $HOME_NET: {home_net}\n"
         return lines
@@ -3980,7 +3981,8 @@ class RuleAnalyzer:
             html += f"&nbsp;&nbsp;{ordinal}. {name}{current_marker} \u2014 {count} rules<br>"
         home_net = header.get("home_net")
         if home_net and header.get("home_net_differed"):
-            html += f"<strong>Policy $HOME_NET:</strong> {home_net} (defined in currently open file; other groups defined differently)"
+            html += f"<strong>Policy $HOME_NET:</strong> {home_net} (from the currently open file; used only for groups that don't define their own)<br>"
+            html += "<em>Note: rule groups define $HOME_NET differently; each group was analyzed against its own value.</em>"
         elif home_net:
             html += f"<strong>Policy $HOME_NET:</strong> {home_net}"
         return html

@@ -1,5 +1,17 @@
 # Release Notes
 
+## Version 2.9.1 - September 28, 2026
+
+### Bug Fix: Multi-Rule-Group Analysis now honors per-group `$HOME_NET` / `$EXTERNAL_NET` (Rule Analyzer v3.0.1)
+
+- **Each rule group is analyzed against its own `$HOME_NET` / `$EXTERNAL_NET`**: In a multi-rule-group review (**Tools > Review Rules**), these two variables were treated as a single policy-wide value taken from the rule group open in the editor and applied to every group. AWS Network Firewall lets each rule group define its own `$HOME_NET`/`$EXTERNAL_NET` (and the values can differ between groups), so forcing one value onto all groups could miss real conflicts or report shadowing/redundancy that would not actually occur. The analyzer now resolves these variables per group — exactly as it already did for every other `$`/`@` variable — so each group is evaluated against its own definitions.
+  - **Policy-level fallback preserved**: A group that does not define its own `$HOME_NET`/`$EXTERNAL_NET` inherits the value from the currently open file, mirroring how AWS layers a policy-level `$HOME_NET` under the rule groups. A group's own definition always takes precedence.
+  - **Report wording**: When groups define `$HOME_NET` differently, the policy-level header now notes that the open file's value is used only for groups that don't define their own, and that each group was analyzed against its own value (previously the note implied the differing groups were analyzed against the open file's value).
+  - **Findings display**: Because variables are namespaced per group during analysis, a rule quoted in a finding may now show `$HOME_NET`/`$EXTERNAL_NET` with the group prefix (for example, `$g0__HOME_NET`), consistent with how other per-group variables already appear. This is analysis-only and never changes your files.
+  - Custom `$`/`@` variables are unaffected — they were already resolved correctly per group.
+
+---
+
 ## Version 2.9.0 - September 25, 2026
 
 ### Interactive IAM Policy Generator & Permission Tester (Help > AWS Setup)

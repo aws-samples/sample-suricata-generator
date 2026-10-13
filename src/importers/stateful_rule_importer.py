@@ -5,6 +5,9 @@ from typing import List, Dict, Optional
 import time
 
 from src.core.suricata_rule import SuricataRule
+from src.importers.rule_group_parsing import (
+    parse_rules_string as _shared_parse_rules_string,
+)
 
 # Optional boto3 import with graceful degradation
 HAS_BOTO3 = False
@@ -1108,29 +1111,9 @@ class StatefulRuleImporter:
         Returns:
             List of SuricataRule objects
         """
-        rules = []
-        lines = rules_string.split('\n')
-        
-        for line in lines:
-            line = line.strip()
-            if not line:
-                # Blank line
-                blank_rule = SuricataRule()
-                blank_rule.is_blank = True
-                rules.append(blank_rule)
-            elif line.startswith('#'):
-                # Comment line
-                comment_rule = SuricataRule()
-                comment_rule.is_comment = True
-                comment_rule.comment_text = line
-                rules.append(comment_rule)
-            else:
-                # Parse as Suricata rule
-                rule = SuricataRule.from_string(line)
-                if rule:
-                    rules.append(rule)
-        
-        return rules
+        # Delegate to the shared UI-free helper so the JSON importer and the
+        # live AWS ingestion layer parse rules identically.
+        return _shared_parse_rules_string(rules_string)
     
     def parse_rule_options(self, rule_options: List[dict]) -> tuple:
         """Parse RuleOptions array into message, sid, rev, and content

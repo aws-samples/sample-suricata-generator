@@ -1,5 +1,33 @@
 # Release Notes
 
+## Version 2.10.0 - October 12, 2026
+
+### Review Firewall Policy: Analyze a Live AWS Network Firewall Policy
+
+**Tools > Review Firewall Policy** adds a new way to start a review: instead of staging every rule group on disk first, you select one of your AWS Network Firewall firewall policies and the tool reads its composition directly from AWS. It discovers which stateful rule groups the policy references, determines which are customer-owned (and therefore analyzable), fetches their Suricata rules in the policy's real evaluation order, and runs them through the same trusted multi-rule-group review — then adds a set of policy-level best-practice checks that only a policy-sourced review can perform. This feature requires boto3, AWS credentials, and read-only AWS access, and never modifies the policy or any AWS resource.
+
+### New Features
+
+- **Start a review straight from a live policy**: Pick an AWS profile (from the status-bar selector) and a Region, list the firewall policies in that account/Region, and select one. The tool fetches the policy's customer-owned Suricata rule groups and assembles them in ascending reference-priority order — the order AWS actually evaluates them — with no need to import and save each group as a local `.suricata` file first. The assembled policy set is handed to the existing analyzer, so you get the same cross-group shadowing/conflict review, source attribution, AI Analysis tab, and HTML/PDF exports as a local multi-group review.
+
+- **Policy Overview and group classification**: Before analysis, a Policy Overview summarizes the policy — name/ARN, Region, rule-order mode, stateful default actions, stream-exception policy, policy-level `$HOME_NET`, and the ordered list of stateful rule group references. Each group is classified as **customer-owned** (analyzed) or **AWS-managed/shared-in** (surfaced for situational awareness but not analyzed, since managed threat-signature groups can hold tens of thousands of unactionable rules). Classification is done by cross-referencing each reference against the account's own rule groups, not by whether rule bodies are returned.
+
+- **Policy-level best-practice checks**: Because the policy is read from AWS, the review can flag whole-policy misconfigurations the per-rule-group analyzer cannot see, rendered in a dedicated section above the rule-group report:
+  - **ClientHello fragmentation / missing-SNI risk** (critical): a fragmentation-unsafe default drop (`Drop all` / `Drop established`) combined with domain/SNI-dependent rules and no reassembly-permitting mitigation can silently drop fragmented TLS ClientHellos before `tls.sni` is populated, so domain rules never match.
+  - **Inconsistent `$HOME_NET` across the policy** (warning): rule groups that resolve `$HOME_NET` to different values silently misalign the derived `$EXTERNAL_NET`; redundant same-value definitions are deliberately not flagged.
+  - **Default drop action without its matching alert variant** (warning): a drop default without its paired alert causes blocked traffic to be discarded with no log entry.
+  - **Stream exception policy not set to REJECT** (informational) and **stateless rule groups present** (informational).
+
+- **Clear, actionable stops when a policy can't be analyzed**: The flow explains — and still shows the read-only overview — when a policy uses `DEFAULT_ACTION_ORDER` (the analyzer models strict order only), references no stateful rule groups, has only managed/shared groups, or includes a customer group in a non-Suricata format (domain list or standard stateful rules), naming the offending group so you know exactly what blocked the review.
+
+- **AWS Setup integration**: A new **Review Firewall Policy** feature appears in the **Help > AWS Setup** IAM policy generator and permission tester. It contributes the read-only `network-firewall:ListFirewallPolicies` and `network-firewall:DescribeFirewallPolicy` actions (plus the rule-group reads it shares with Rule Group Direct Import), so you can generate a least-privilege policy and verify access for just this feature.
+
+### Under the Hood
+
+- **Reuses the analysis pipeline unchanged**: The AWS path only populates a policy set from AWS and calls the existing `PolicyReviewService` → `RuleAnalyzer`; the rule-group report renders byte-for-byte identically to a local multi-group review. The ingestion layer (`src/aws/firewall_policy_api.py`), the policy fact model (`src/analysis/policy_facts.py`), and the policy-level checker (`src/analysis/policy_best_practice.py`) are UI-free and unit-tested headlessly with mocked AWS clients. Existing single-group and local multi-group reviews are unaffected.
+
+---
+
 ## Version 2.9.1 - September 28, 2026
 
 ### Bug Fix: Multi-Rule-Group Analysis now honors per-group `$HOME_NET` / `$EXTERNAL_NET` (Rule Analyzer v3.0.1)

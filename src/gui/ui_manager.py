@@ -112,7 +112,6 @@ class UIManager:
         menubar.add_cascade(label="Tools", menu=tools_menu)
         tools_menu.add_command(label="Advanced Editor", command=self.parent.show_advanced_editor, accelerator="Ctrl+E")
         tools_menu.add_separator()
-        tools_menu.add_command(label="Review Rules", command=lambda: self.parent.review_rules(allow_multi_group=True))
         tools_menu.add_command(label="SID Management", command=self.show_sid_management)
         tools_menu.add_command(label="Test Flow", command=self.show_test_flow_dialog)
         tools_menu.add_separator()
@@ -121,9 +120,20 @@ class UIManager:
         self.parent.tracking_menu_var = tk.BooleanVar(value=self.parent.tracking_enabled)
         tools_menu.add_checkbutton(label="Enable Change Tracking", variable=self.parent.tracking_menu_var, command=self.parent.toggle_tracking)
         
-        # Add Rule Usage Analyzer menu item (Phase 2)
+        # Rule/policy review and analysis section
         tools_menu.add_separator()
+        tools_menu.add_command(label="Review Rule Groups", command=lambda: self.parent.review_rules(allow_multi_group=True))
+
+        # Review Firewall Policy (requires boto3) - reads a live AWS NFW policy
         from src.analysis.rule_usage_analyzer import HAS_BOTO3
+        if HAS_BOTO3:
+            tools_menu.add_command(label="Review Firewall Policy",
+                                  command=self.parent.review_firewall_policy)
+        else:
+            tools_menu.add_command(label="Review Firewall Policy (requires boto3)",
+                                  command=self.parent.review_firewall_policy, state='disabled')
+
+        # Add Rule Usage Analyzer menu item (Phase 2)
         if HAS_BOTO3:
             tools_menu.add_command(label="Analyze Rule Usage", command=self.show_rule_usage_analyzer)
         else:
@@ -3517,7 +3527,7 @@ Would you like to run a complete analysis?"""
         # Display insights
         insight_text = f"• {very_low_count} rules had <3 hits (potential shadow rules)\n"
         insight_text += f"• {stale_count} rules not triggered in last 14+ days (stale)\n"
-        insight_text += "• Consider using 'Review Rules' feature to check for shadowing"
+        insight_text += "• Consider using 'Review Rule Groups' feature to check for shadowing"
         
         ttk.Label(insights_content, text=insight_text, 
                  font=("TkDefaultFont", 10), justify=tk.LEFT).pack(anchor=tk.W)
@@ -6083,7 +6093,7 @@ Would you like to run a complete analysis?"""
                 f.write("🟡 MEDIUM PRIORITY:\n")
                 f.write(f"   Review {categories['low_freq']} low-frequency rules\n")
                 f.write(f"   → May be shadowed by earlier rules\n")
-                f.write(f"   → Consider using Review Rules feature\n\n")
+                f.write(f"   → Consider using Review Rule Groups feature\n\n")
             
             # Check for broad rules
             if sid_stats:
@@ -6358,7 +6368,7 @@ Would you like to run a complete analysis?"""
         <div class="section-title">🟡 MEDIUM: Review low-frequency rules</div>
         <p>→ {categories['low_freq']} rules with <{results.get('low_freq_threshold', 10)} hits</p>
         <p>→ May be shadowed by earlier rules</p>
-        <p>→ Use Review Rules feature to check</p>
+        <p>→ Use Review Rule Groups feature to check</p>
     </div>'''
         
         html += f'''
@@ -7795,7 +7805,7 @@ Would you like to run a complete analysis?"""
                 interpretation += "• Triggers infrequently\n"
                 interpretation += "• May be shadowed by earlier rules\n"
             
-            interpretation += "• Consider using 'Review Rules' feature to check for shadowing"
+            interpretation += "• Consider using 'Review Rule Groups' feature to check for shadowing"
         elif percent > 30:
             interpretation = f"• CRITICAL: Handles {percent:.1f}% of all traffic\n"
             interpretation += "• Rule is too generic/broad\n"
@@ -12468,7 +12478,7 @@ Would you like to run a complete analysis?"""
         text_widget.insert(tk.END, "─" * 50 + "\n", "body")
         text_widget.insert(tk.END, "• IPONLY rules process before APP_TX rules regardless of file position\n", "body")
         text_widget.insert(tk.END, "• This can cause unexpected shadowing and conflicts\n", "body")
-        text_widget.insert(tk.END, "• Use 'Review Rules' to detect protocol layering conflicts\n", "body")
+        text_widget.insert(tk.END, "• Use 'Review Rule Groups' to detect protocol layering conflicts\n", "body")
         text_widget.insert(tk.END, "• Add flow keywords to IPONLY rules to elevate them to PKT type\n\n", "body")
         
         text_widget.insert(tk.END, "For complete details, see:\n", "body")
@@ -14515,6 +14525,7 @@ Would you like to run a complete analysis?"""
             'container_associations': self._probe_container_associations,
             'sharing': self._probe_sharing,
             'bedrock': self._probe_bedrock,
+            'analyze_policy': self._probe_analyze_policy,
         }
 
     def _collect_probe_results(self, probe_ids):
@@ -14566,6 +14577,7 @@ Would you like to run a complete analysis?"""
             'container_associations': "Container Association Manager",
             'sharing': "Cross-account Sharing",
             'bedrock': "AI Rule Assistant",
+            'analyze_policy': "Review Firewall Policy",
         }.get(probe_id, probe_id)
 
     def _probe_preamble(self, results):
@@ -14743,6 +14755,25 @@ Would you like to run a complete analysis?"""
                 results.append(("✗", f"Network Firewall permissions missing: {error_str[:120]}"))
             else:
                 results.append(("✗", f"Network Firewall test failed: {error_str[:50]}"))
+
+    def _probe_analyze_policy(self, results, region):
+        results.append(("", ""))
+        results.append(("", "Network Firewall (Review Firewall Policy):"))
+        try:
+            nfw_client = self._probe_client('network-firewall', region)
+
+            # Test ListFirewallPolicies (read-only). A successful call alone is
+            # sufficient to verify Review Firewall Policy access.
+            response = nfw_client.list_firewall_policies(MaxResults=5)
+            policy_count = len(response.get('FirewallPolicies', []))
+            results.append(("✓", "network-firewall:ListFirewallPolicies - Verified"))
+            results.append(("✓", f"Found {policy_count} firewall policy(ies) in this Region"))
+        except Exception as e:
+            error_str = str(e)
+            if "AccessDenied" in error_str:
+                results.append(("✗", f"Review Firewall Policy permissions missing: {error_str[:120]}"))
+            else:
+                results.append(("✗", f"Review Firewall Policy test failed: {error_str[:50]}"))
 
     def _probe_rule_group_export(self, results, region):
         results.append(("", ""))

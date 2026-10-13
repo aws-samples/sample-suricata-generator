@@ -300,6 +300,7 @@ class AIAnalysisTab:
         rules=None,
         variables=None,
         group_markers=None,
+        policy_context=None,
     ):
         self._notebook = parent_notebook
         self._app = parent_app
@@ -318,6 +319,10 @@ class AIAnalysisTab:
         self._injected_rules = rules
         self._injected_variables = variables
         self._group_markers = group_markers
+        # Optional policy-level context (Review Firewall Policy path). Threaded
+        # into AIRuleAnalyzer.analyze(policy_context=...). None (the default and
+        # every non-firewall caller) → the AI prompt/cache key are unchanged.
+        self._injected_policy_context = policy_context
 
         # AI analyzer instance (created lazily on first analysis trigger)
         self._ai_analyzer = None  # AIRuleAnalyzer | None
@@ -929,6 +934,9 @@ class AIAnalysisTab:
         # provided alongside injected rules (i.e. the multi-group path).
         rules = self._build_analysis_rules(rules)
 
+        # Capture the optional policy-level context for the background thread.
+        policy_context = self._injected_policy_context
+
         static_findings = dict(self._static_findings) if self._static_findings else {}
 
         def _on_progress(message: str) -> None:
@@ -969,6 +977,7 @@ class AIAnalysisTab:
                     variables=variables,
                     static_findings=static_findings,
                     on_progress=_on_progress,
+                    policy_context=policy_context,
                 )
 
                 # Check for cancellation after analysis completes

@@ -64,27 +64,47 @@ class AIRuleAnalyzer:
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _compute_cache_key(rules: list, variables: dict[str, Any]) -> str:
+    def _compute_cache_key(
+        rules: list,
+        variables: dict[str, Any],
+        policy_context: dict | None = None,
+    ) -> str:
         """Compute a SHA-256 cache key from the ruleset and variables.
 
         The key is derived from the sorted serialized rule strings joined
         together, concatenated with the JSON-serialized variables (with
         sorted keys for determinism).
+
+        When ``policy_context`` is provided (not None), its canonical
+        JSON serialization (``json.dumps(..., sort_keys=True)``) is folded
+        into the hash so that different policy contexts yield different
+        keys. When ``policy_context`` is None (the default), the key is
+        byte-for-byte identical to the two-argument form, preserving
+        backward compatibility.
         """
         sorted_rule_strings = sorted(rule.to_string() for rule in rules)
         rules_part = "".join(sorted_rule_strings)
         variables_part = json.dumps(variables, sort_keys=True)
         combined = rules_part + variables_part
+        if policy_context is not None:
+            combined += json.dumps(policy_context, sort_keys=True)
         return hashlib.sha256(combined.encode("utf-8")).hexdigest()
 
     def get_cached(
-        self, rules: list, variables: dict[str, Any]
+        self,
+        rules: list,
+        variables: dict[str, Any],
+        policy_context: dict | None = None,
     ) -> StructuredAnalysisResponse | None:
         """Return cached results if the ruleset state matches, else None.
 
         Returns a copy of the cached response with ``is_cached=True``.
+
+        When ``policy_context`` is provided it is forwarded to
+        ``_compute_cache_key`` so lookup and store share the same key.
+        The default None path preserves today's exact key.
         """
-        key = self._compute_cache_key(rules, variables)
+        key = self._compute_cache_key(rules, variables, policy_context)
         cached = self._cache.get(key)
         if cached is None:
             return None
@@ -108,6 +128,7 @@ class AIRuleAnalyzer:
         variables: dict[str, Any],
         static_findings: dict[str, list[dict]],
         on_progress: Callable[[str], None] | None = None,
+        policy_context: dict | None = None,
     ) -> StructuredAnalysisResponse:
         """Run AI analysis on the ruleset.
 
@@ -124,6 +145,13 @@ class AIRuleAnalyzer:
             static_findings: Raw output from
                 ``RuleAnalyzer.analyze_rule_conflicts()``.
             on_progress: Optional callback for progress updates.
+            policy_context: Optional small factual AI_Policy_Context dict,
+                e.g. ``{"default_actions": [...], "rule_order": "...",
+                "stream_exception": "..."}``. When provided it is folded
+                into the cache key and appended to the user message. The
+                deterministic Requirement-10 findings are never passed
+                here. Defaults to None, which reproduces today's exact
+                cache key and prompt.
 
         Returns:
             StructuredAnalysisResponse with parsed findings.
@@ -133,7 +161,7 @@ class AIRuleAnalyzer:
                 descriptive message for the UI layer to display.
         """
         # 1. Check cache — return immediately on hit (Req 14.1)
-        cached = self.get_cached(rules, variables)
+        cached = self.get_cached(rules, variables, policy_context)
         if cached is not None:
             return cached
 
@@ -152,6 +180,7 @@ class AIRuleAnalyzer:
         prompt_data = self._assemble_prompt_data(
             rules_to_send, variables, static_findings
         )
+        prompt_data["policy_context"] = policy_context
 
         # 3. Build prompts
         if on_progress is not None:
@@ -181,7 +210,7 @@ class AIRuleAnalyzer:
         response.was_summarized = was_summarized
 
         # 7. Store in cache (Req 14.1)
-        cache_key = self._compute_cache_key(rules, variables)
+        cache_key = self._compute_cache_key(rules, variables, policy_context)
         self._cache[cache_key] = response
 
         return response
@@ -933,5 +962,24 @@ class AIRuleAnalyzer:
             parts.append("\nRULE TYPE ANNOTATIONS:")
             for sid, rule_type in annotations.items():
                 parts.append(f"Rule SID {sid}: {rule_type}")
+
+        # --- Policy context (optional, additive) ---
+        # Only emitted when a factual policy_context dict is supplied; when
+        # absent/None the message is byte-for-byte identical to today. The
+        # deterministic Requirement-10 findings are never included here.
+        policy_context = prompt_data.get("policy_context")
+        if policy_context:
+            default_actions = policy_context.get("default_actions")
+            rule_order = policy_context.get("rule_order")
+            stream_exception = policy_context.get("stream_exception")
+
+            parts.append("\nPOLICY CONTEXT:")
+            if isinstance(default_actions, (list, tuple)):
+                actions_str = ", ".join(str(a) for a in default_actions)
+            else:
+                actions_str = str(default_actions)
+            parts.append(f"- Default actions: {actions_str}")
+            parts.append(f"- Rule order: {rule_order}")
+            parts.append(f"- Stream exception: {stream_exception}")
 
         return "\n".join(parts)

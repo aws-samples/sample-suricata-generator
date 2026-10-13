@@ -7184,6 +7184,174 @@ class SuricataRuleGenerator:
             # Fallback if file can't be read
             return "Release Notes:\n\nUnable to load release notes from RELEASE_NOTES.md file."
     
+    def review_firewall_policy(self):
+        """Entry point for the Review Firewall Policy feature.
+
+        Reads a live AWS Network Firewall policy (via ``FirewallPolicyDialog``)
+        and runs the multi-group rule review plus the policy-level
+        best-practice checks against it, surfacing the results in the existing
+        Review Results window with a prepended Policy Overview / Policy Findings
+        region.
+
+        Mirrors ``_review_rules_multi_group`` end to end, but sources the
+        ``PolicySet`` from the firewall dialog instead of the Policy_Set config
+        splash. Mutates NO editor/disk/AWS state: it operates only on the facts
+        and policy_set the dialog returns and on the service's analysis copies
+        (Req 1.6, 9.2). The firewall path has its own dialog, so it does NOT
+        touch ``self._policy_set_session`` (the Review-Rules-only session cache).
+        """
+        # Defensive boto3 re-check at invocation (mirrors show_ai_assistant and
+        # the other AWS features), even though the Tools menu already gates on
+        # the same HAS_BOTO3 symbol (Req 1.4).
+        if not HAS_BOTO3:
+            messagebox.showinfo(
+                "Review Firewall Policy",
+                "Reviewing a live AWS Network Firewall policy requires boto3.\n\n"
+                "Install with: pip install boto3",
+            )
+            return
+
+        # Local imports to avoid module-load-time coupling (mirrors how the
+        # service and dialogs are imported inside _review_rules_multi_group).
+        from src.analysis.policy_review import PolicyReviewService
+        from src.analysis.policy_best_practice import PolicyBestPracticeChecker
+        from src.gui.firewall_policy_dialog import FirewallPolicyDialog
+
+        # Source the (facts, PolicySet) from the firewall dialog. Cancel/close
+        # returns None → no window, no analysis, no state change (Req 6.10, 9.2).
+        dialog_result = FirewallPolicyDialog(self.root, self.aws_session).show()
+        if dialog_result is None:
+            return
+        facts, policy_set = dialog_result
+
+        # No analyzable rules in the assembled set → today's "no rules" message,
+        # no results window (Req 1.6).
+        analyzable_count = policy_set.total_analyzable_rules()
+        if analyzable_count == 0:
+            messagebox.showinfo("Analysis", "No rules to analyze.")
+            return
+
+        # Large-analysis guard (Req 6.9) — reused VERBATIM from
+        # _review_rules_multi_group. The pairwise shadowing cost grows with the
+        # square of the analyzable rule count.
+        if analyzable_count > 30000:
+            proceed = messagebox.askyesno(
+                "Large Analysis",
+                f"This policy set has {analyzable_count:,} analyzable rules. "
+                "Conflict analysis compares rules pairwise, so the time grows "
+                "with the square of the rule count and may take a long time.\n\n"
+                "Do you want to proceed?",
+            )
+            if not proceed:
+                return  # Declined — back out, no analysis.
+        elif analyzable_count > 10000:
+            messagebox.showinfo(
+                "Large Analysis",
+                f"This policy set has {analyzable_count:,} analyzable rules. "
+                "Conflict analysis compares rules pairwise, so this may take a "
+                "while. You can cancel from the progress dialog if needed.",
+            )
+
+        # Build the same cancellable progress dialog the other paths use.
+        progress_dialog, progress_bar, progress_text, cancel_requested = \
+            self._build_analysis_progress_dialog(analyzable_count)
+
+        # Run the multi-group review through the service (analysis copies only).
+        service = PolicyReviewService(self.rule_analyzer, self.file_manager)
+        result = service.run(
+            policy_set,
+            progress_bar=progress_bar,
+            progress_text=progress_text,
+            progress_dialog=progress_dialog,
+            cancel_requested=cancel_requested,
+        )
+
+        # Close the progress dialog if still open.
+        try:
+            progress_dialog.destroy()
+        except Exception:
+            pass  # Dialog may already be closed by the cancel button.
+
+        if result.cancelled:
+            messagebox.showinfo("Analysis Cancelled", "Rule analysis was cancelled by user.")
+            return
+
+        # Attribute findings back to their source groups (annotates in place).
+        service.attribute_findings(result)
+
+        # Policy-level best-practice checks over the ingested facts + policy_set
+        # (Req 6.1). Facts-driven; independent of the rule-group findings.
+        checker = PolicyBestPracticeChecker()
+        policy_findings = checker.run(facts, policy_set)
+
+        # Facts-ONLY AI context (Req 6.6) — NEVER the policy_findings.
+        ai_policy_context = {
+            "default_actions": facts.stateful_default_actions,
+            "rule_order": facts.rule_order,
+            "stream_exception": facts.stream_exception_policy,
+        }
+
+        # Build the structured policy_set_header dict for the report generators.
+        current = result.policy_set.current_group()
+        policy_set_header = {
+            "groups": [
+                {
+                    "name": group.name,
+                    "is_current": (group is current),
+                    "analyzable_rule_count": group.analyzable_rule_count(),
+                }
+                for group in result.policy_set.ordered_groups()
+            ],
+            "home_net": result.home_net_chosen,
+            "home_net_differed": result.home_net_differed,
+        }
+
+        # Build combined display rules for the AI tab: map each analysis-copy
+        # rule back to its untouched original (via _original_rule) so the user
+        # sees un-namespaced rule text; fall back to the copy if no original.
+        combined_rules = [
+            getattr(rule, '_original_rule', rule)
+            for rule in result.combined.rules
+        ]
+
+        # Per-group markers for the AI tab (Req 8.6): combined_rules is the
+        # concatenation of each ordered group's rows in Group_Order, so each
+        # group contributes len(group.rules) consecutive rows. ``order`` is the
+        # 1-based Group_Order index.
+        group_markers = [
+            {
+                "name": group.name,
+                "order": idx + 1,
+                "rule_count": len(group.rules),
+            }
+            for idx, group in enumerate(result.policy_set.ordered_groups())
+        ]
+
+        # Best-effort merged variables view for the AI tab (current group wins
+        # on conflict).
+        ai_variables = {}
+        for group in result.policy_set.ordered_groups():
+            if group is current:
+                continue
+            for key, value in (group.variables or {}).items():
+                ai_variables.setdefault(key, value)
+        if current is not None:
+            for key, value in (current.variables or {}).items():
+                ai_variables[key] = value
+
+        self.show_analysis_report(
+            result.findings,
+            attribution=True,
+            policy_set=result.policy_set,
+            policy_set_header=policy_set_header,
+            combined_rules=combined_rules,
+            ai_variables=ai_variables,
+            group_markers=group_markers,
+            policy_facts=facts,
+            policy_findings=policy_findings,
+            ai_policy_context=ai_policy_context,
+        )
+
     def review_rules(self, allow_multi_group=False):
         """Analyze rules for conflicts and shadowing issues.
 
@@ -7698,6 +7866,45 @@ class SuricataRuleGenerator:
         }
 
     @staticmethod
+    def _fold_policy_findings_into_counts(counts, policy_findings):
+        """Add the policy-level best-practice findings into the status counts.
+
+        ``counts`` is the dict returned by ``_summarize_conflict_counts``.
+        ``policy_findings`` is the list of ``PolicyFinding`` objects produced by
+        the Review Firewall Policy feature (or ``None`` for every other review).
+        Each finding's severity is mapped to the matching headline bucket —
+        ``critical`` -> critical (🚨), ``warning`` -> warning (⚠️),
+        ``informational`` -> info (ℹ️) — and the grand total is incremented so
+        the bottom-bar icons account for both the rule-group conflicts and the
+        policy-level findings.
+
+        Returns a NEW dict; the input is not mutated. When ``policy_findings``
+        is falsy the input counts are returned unchanged, so the single-group
+        and local multi-group paths are unaffected.
+        """
+        if not policy_findings:
+            return counts
+
+        # Map a PolicyFinding severity string to a headline bucket key.
+        # These string values are the SEV_* constants in
+        # src/analysis/policy_best_practice.py ("critical"/"warning"/
+        # "informational"); an unrecognized severity falls into info so a
+        # finding is never silently lost from the total.
+        bucket_for = {
+            'critical': 'critical',
+            'warning': 'warning',
+            'informational': 'info',
+        }
+
+        merged = dict(counts)
+        for finding in policy_findings:
+            severity = getattr(finding, 'severity', None)
+            bucket = bucket_for.get(severity, 'info')
+            merged[bucket] = merged.get(bucket, 0) + 1
+            merged['total'] = merged.get('total', 0) + 1
+        return merged
+
+    @staticmethod
     def _attach_status_tooltip(widget, text):
         """Attach a lightweight hover tooltip to a status-bar Label.
 
@@ -7741,7 +7948,8 @@ class SuricataRuleGenerator:
         # Hide if the widget itself is destroyed (window closed).
         widget.bind('<Destroy>', hide, add='+')
 
-    def _build_static_status_info(self, status_bar, conflicts, policy_set):
+    def _build_static_status_info(self, status_bar, conflicts, policy_set,
+                                  policy_findings=None):
         """Populate the left side of the Static Analysis status bar.
 
         Lays out, left-aligned on the shared bottom bar:
@@ -7749,8 +7957,16 @@ class SuricataRuleGenerator:
         The severity counts are color-coded (dark-mode aware). The
         ``Policy: G groups`` segment is shown only for a multi-group review
         (``policy_set`` provided); it is omitted for a single-group review.
+
+        When ``policy_findings`` (the Review Firewall Policy policy-level
+        best-practice findings) is provided, each one is folded into the
+        headline severity counts and the grand total so the icons at the
+        bottom reflect BOTH the rule-group conflicts and the policy-level
+        findings. ``None`` (the single-group / local multi-group path) leaves
+        the counts exactly as they are today.
         """
         counts = self._summarize_conflict_counts(conflicts)
+        counts = self._fold_policy_findings_into_counts(counts, policy_findings)
         total_rules = len([
             r for r in self.rules
             if not getattr(r, 'is_comment', False)
@@ -7812,7 +8028,8 @@ class SuricataRuleGenerator:
     def show_analysis_report(self, conflicts, *, attribution=None,
                              policy_set=None, policy_set_header=None,
                              combined_rules=None, ai_variables=None,
-                             group_markers=None):
+                             group_markers=None, policy_facts=None,
+                             policy_findings=None, ai_policy_context=None):
         """Show analysis results in a tabbed notebook window.
 
         Creates a Toplevel with a ttk.Notebook containing:
@@ -7844,6 +8061,19 @@ class SuricataRuleGenerator:
                 insert ``# === Group ... ===`` comment marker rows into the
                 combined stream so the analyzer sees group membership (Req 8.6).
                 ``None`` in the single-group path.
+            policy_facts: Ingested ``PolicyFacts`` (Review Firewall Policy path
+                only). When present (together with ``policy_findings``), the
+                Static tab prepends a Policy Overview + Policy Findings region
+                ABOVE the unchanged rule-group report, and the Save buttons
+                carry the same region into exported HTML/PDF (Req 7.6, 7.10).
+            policy_findings: Policy-level best-practice findings
+                (``List[PolicyFinding]``) rendered under the overview.
+            ai_policy_context: Facts-only dict threaded into the AI tab's
+                ``analyze(policy_context=...)`` call (Req 6.6). NEVER carries the
+                ``policy_findings``.
+            When all three of ``policy_facts``/``policy_findings``/
+            ``ai_policy_context`` are ``None`` (every existing caller), behavior
+            is byte-for-byte identical to today.
         """
         # Local import to avoid circular dependency (ai_analysis_tab
         # uses TYPE_CHECKING guard for SuricataRuleGenerator)
@@ -7870,19 +8100,57 @@ class SuricataRuleGenerator:
         # report (Req 9.1-9.4); with all kwargs None they are identical to today.
         ttk.Button(status_bar, text="Close",
                    command=report_window.destroy).pack(side=tk.RIGHT, padx=(4, 6), pady=3)
+        def _restore_report_focus():
+            """Bring the Rule Analysis Report back to the front after an export.
+
+            The native Save file dialog and the success/error messagebox hand
+            focus back to the main application window when they close, leaving
+            the report window hidden behind it. Re-raise and focus the report
+            window so the user lands back on it after Save as HTML / PDF.
+            Scheduled on ``after(0, ...)`` so it runs once the dialog/messagebox
+            event has fully settled; guarded with ``winfo_exists`` so a closed
+            window never raises (ui-conventions rule 4).
+            """
+            def _lift():
+                try:
+                    if report_window.winfo_exists():
+                        report_window.lift()
+                        report_window.focus_force()
+                except tk.TclError:
+                    pass
+            try:
+                report_window.after(0, _lift)
+            except tk.TclError:
+                pass
+
+        def _on_save_pdf():
+            self.save_report_pdf(
+                conflicts, attribution=attribution,
+                policy_set_header=policy_set_header,
+                policy_facts=policy_facts,
+                policy_findings=policy_findings)
+            _restore_report_focus()
+
+        def _on_save_html():
+            self.save_report_html(
+                conflicts, attribution=attribution,
+                policy_set_header=policy_set_header,
+                policy_facts=policy_facts,
+                policy_findings=policy_findings)
+            _restore_report_focus()
+
         ttk.Button(status_bar, text="Save as PDF",
-                   command=lambda: self.save_report_pdf(
-                       conflicts, attribution=attribution,
-                       policy_set_header=policy_set_header)).pack(side=tk.RIGHT, padx=4, pady=3)
+                   command=_on_save_pdf).pack(side=tk.RIGHT, padx=4, pady=3)
         ttk.Button(status_bar, text="Save as HTML",
-                   command=lambda: self.save_report_html(
-                       conflicts, attribution=attribution,
-                       policy_set_header=policy_set_header)).pack(side=tk.RIGHT, padx=4, pady=3)
+                   command=_on_save_html).pack(side=tk.RIGHT, padx=4, pady=3)
 
         # Info segments (left-aligned): Rules | Findings + severity counts
         # [ | Policy: N groups ]. Populated by the shared helper so counts
-        # stay consistent with the report body.
-        self._build_static_status_info(status_bar, conflicts, policy_set)
+        # stay consistent with the report body. ``policy_findings`` (Review
+        # Firewall Policy) is folded into the severity counts; it is None for
+        # every other review, leaving the counts unchanged.
+        self._build_static_status_info(status_bar, conflicts, policy_set,
+                                       policy_findings=policy_findings)
 
         # ── Notebook ─────────────────────────────────────────────────
         notebook = ttk.Notebook(report_window)
@@ -7913,6 +8181,20 @@ class SuricataRuleGenerator:
         # default to None → today's exact single-group report.
         report = self.generate_analysis_report(
             conflicts, attribution=attribution, policy_set_header=policy_set_header)
+        # Review Firewall Policy path: prepend the policy-level region (overview
+        # + findings) ABOVE the unchanged rule-group report. The report string
+        # itself is left exactly as generate_analysis_report produced it, so
+        # when policy_facts is None this block is skipped and the Static tab is
+        # byte-for-byte identical to today (Req 7.6, 7.10).
+        if policy_facts is not None:
+            from src.gui.policy_findings_render import (
+                format_policy_overview_text, format_policy_findings_text)
+            separator = "=" * 70
+            report = (
+                format_policy_overview_text(policy_facts) + "\n\n"
+                + format_policy_findings_text(policy_findings) + "\n\n"
+                + separator + "\n\n"
+                + report)
         text_widget.insert(tk.END, report)
 
         # Make read-only but allow selection and copying
@@ -7977,10 +8259,14 @@ class SuricataRuleGenerator:
             self._ai_analysis_tab = AIAnalysisTab(
                 notebook, self, conflicts,
                 rules=combined_rules, variables=ai_variables,
-                group_markers=group_markers)
+                group_markers=group_markers,
+                policy_context=ai_policy_context)
         else:
-            # Single-group / default path: unchanged from today.
-            self._ai_analysis_tab = AIAnalysisTab(notebook, self, conflicts)
+            # Single-group / default path: unchanged from today. ``ai_policy_context``
+            # defaults to ``None`` so the AI prompt/cache key stay identical.
+            self._ai_analysis_tab = AIAnalysisTab(
+                notebook, self, conflicts,
+                policy_context=ai_policy_context)
     
     def generate_analysis_report(self, conflicts, *, attribution=None,
                                  policy_set_header=None):
@@ -7996,12 +8282,15 @@ class SuricataRuleGenerator:
             attribution=attribution, policy_set_header=policy_set_header)
     
     def save_report_html(self, conflicts, *, attribution=None,
-                         policy_set_header=None):
+                         policy_set_header=None, policy_facts=None,
+                         policy_findings=None):
         """Save analysis report as HTML file.
 
         Forwards ``attribution``/``policy_set_header`` into the HTML generator so
         the exported report carries the policy-level header + attribution
-        (Req 9.1, 9.2, 9.3, 9.4). Defaults ``None`` → today's export unchanged.
+        (Req 9.1, 9.2, 9.3, 9.4). ``policy_facts``/``policy_findings`` (Review
+        Firewall Policy path) prepend the policy region to the exported HTML.
+        Defaults ``None`` → today's export unchanged.
         """
         filename = filedialog.asksaveasfilename(
             title="Save Analysis Report as HTML",
@@ -8013,7 +8302,9 @@ class SuricataRuleGenerator:
             try:
                 html_content = self.generate_html_report(
                     conflicts, attribution=attribution,
-                    policy_set_header=policy_set_header)
+                    policy_set_header=policy_set_header,
+                    policy_facts=policy_facts,
+                    policy_findings=policy_findings)
                 with open(filename, 'w', encoding='utf-8') as f:
                     f.write(html_content)
                 messagebox.showinfo("Success", f"Report saved as {filename}")
@@ -8021,12 +8312,15 @@ class SuricataRuleGenerator:
                 messagebox.showerror("Error", f"Failed to save HTML report: {str(e)}")
     
     def save_report_pdf(self, conflicts, *, attribution=None,
-                        policy_set_header=None):
+                        policy_set_header=None, policy_facts=None,
+                        policy_findings=None):
         """Save analysis report as PDF file.
 
         Forwards ``attribution``/``policy_set_header`` into the HTML generator so
         the exported PDF carries the policy-level header + attribution
-        (Req 9.1, 9.2, 9.3, 9.4). Defaults ``None`` → today's export unchanged.
+        (Req 9.1, 9.2, 9.3, 9.4). ``policy_facts``/``policy_findings`` (Review
+        Firewall Policy path) prepend the policy region to the HTML the PDF is
+        derived from. Defaults ``None`` → today's export unchanged.
         """
         try:
             import webbrowser
@@ -8036,7 +8330,9 @@ class SuricataRuleGenerator:
             # Generate HTML first
             html_content = self.generate_html_report(
                 conflicts, attribution=attribution,
-                policy_set_header=policy_set_header)
+                policy_set_header=policy_set_header,
+                policy_facts=policy_facts,
+                policy_findings=policy_findings)
             
             # Create temporary HTML file
             with tempfile.NamedTemporaryFile(mode='w', suffix='.html', delete=False, encoding='utf-8') as temp_file:
@@ -8052,17 +8348,27 @@ class SuricataRuleGenerator:
             messagebox.showerror("Error", f"Failed to export PDF: {str(e)}")
     
     def generate_html_report(self, conflicts, *, attribution=None,
-                             policy_set_header=None):
+                             policy_set_header=None, policy_facts=None,
+                             policy_findings=None):
         """Generate HTML formatted analysis report.
 
         ``attribution`` and ``policy_set_header`` are forwarded to the analyzer's
         HTML generator; both default ``None`` → today's single-group output
-        unchanged (Req 9.3).
+        unchanged (Req 9.3). When ``policy_facts`` is present (Review Firewall
+        Policy path), the policy overview + findings HTML is PREPENDED above the
+        unchanged rule-group HTML (Req 7.3, 7.9, 7.10).
         """
         total_rules = len([r for r in self.rules if not getattr(r, 'is_comment', False) and not getattr(r, 'is_blank', False)])
-        return self.rule_analyzer.generate_html_report(
+        html_report = self.rule_analyzer.generate_html_report(
             conflicts, total_rules, self.current_file, self.get_version_number(),
             attribution=attribution, policy_set_header=policy_set_header)
+        if policy_facts is not None:
+            from src.gui.policy_findings_render import (
+                format_policy_overview_html, format_policy_findings_html)
+            return (format_policy_overview_html(policy_facts)
+                    + format_policy_findings_html(policy_findings)
+                    + html_report)
+        return html_report
     
     
 

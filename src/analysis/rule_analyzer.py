@@ -3725,7 +3725,7 @@ class RuleAnalyzer:
         analyzer_version = get_analyzer_version()
         
         if policy_set_header is not None:
-            report = f"SURICATA RULE ANALYSIS REPORT (Multi-Rule-Group / Policy-Level Review)\n"
+            report = f"SURICATA RULE ANALYSIS REPORT (Multi-Rule-Group)\n"
             report += f"=" * 50 + "\n\n"
             report += f"Generated: {timestamp}\n"
             report += f"Rule Analyzer Version: {analyzer_version}\n"
@@ -4008,7 +4008,7 @@ class RuleAnalyzer:
         analyzer_version = get_analyzer_version()
         
         if policy_set_header is not None:
-            report_title = "SURICATA RULE ANALYSIS REPORT (Multi-Rule-Group / Policy-Level Review)"
+            report_title = "SURICATA RULE ANALYSIS REPORT (Multi-Rule-Group)"
             header_detail = self._format_policy_set_header_html(policy_set_header)
         else:
             report_title = "SURICATA RULE ANALYSIS REPORT"

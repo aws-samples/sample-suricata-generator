@@ -150,7 +150,7 @@ class PolicySetDialog:
 
         # --- Toplevel -----------------------------------------------------
         self.dialog = tk.Toplevel(parent)
-        self.dialog.title("Review Rules \u2014 Configure Rule Groups")
+        self.dialog.title("Review Rule Groups \u2014 Configure Rule Groups")
         # Cross_Platform_UI_Guidelines: resizable + minsize; NO transient().
         self.dialog.resizable(True, True)
         self.dialog.minsize(720, 460)

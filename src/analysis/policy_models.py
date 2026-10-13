@@ -25,6 +25,7 @@ from src.core.suricata_rule import SuricataRule
 # stored on RuleGroupSource.kind and RuleAttribution.group_kind.
 GROUP_KIND_CURRENT = "current"
 GROUP_KIND_LOCAL = "local"
+GROUP_KIND_AWS = "aws"  # rule group fetched live from AWS Network Firewall
 
 
 def _is_analyzable(rule: SuricataRule) -> bool:

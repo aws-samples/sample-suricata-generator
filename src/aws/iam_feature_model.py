@@ -116,6 +116,10 @@ _ORDERED_ACTIONS: Tuple[Tuple[str, str], ...] = (
     ("bedrock", "bedrock:InvokeModel"),
     ("bedrock", "bedrock:ListFoundationModels"),
     ("bedrock", "bedrock:ListInferenceProfiles"),
+    # Review Firewall Policy — policy-level reads (rule-group reads stay owned
+    # by rg_import; the action union handles the overlap).
+    ("analyze_policy", "network-firewall:ListFirewallPolicies"),
+    ("analyze_policy", "network-firewall:DescribeFirewallPolicy"),
 )
 
 
@@ -232,6 +236,21 @@ FEATURES: Tuple[Feature, ...] = (
             ),
         ),
         probe_ids=("bedrock",),
+    ),
+    Feature(
+        id="analyze_policy",
+        label="Review Firewall Policy",
+        breakdown=(
+            (
+                "Network Firewall (Review Firewall Policy):",
+                (
+                    "network-firewall:ListFirewallPolicies - List firewall policies in the account/Region",
+                    "network-firewall:DescribeFirewallPolicy - Read a policy's composition, default actions, and rule order",
+                    "Note: also uses ListRuleGroups/DescribeRuleGroup (shared with Rule Group Direct Import) to classify and fetch customer-owned groups",
+                ),
+            ),
+        ),
+        probe_ids=("analyze_policy",),
     ),
 )
 

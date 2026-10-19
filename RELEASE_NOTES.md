@@ -1,5 +1,33 @@
 # Release Notes
 
+## Version 2.11.0 - October 18, 2026
+
+### Interactive Static Analysis Report with Finding Ignore/Acknowledge, and a More Accurate Rule Analyzer (Rule Analyzer v4.0.0)
+
+This release reworks the **Static Analysis** report into an interactive, master-detail view and makes the rule analyzer's findings and suggestions substantially more accurate. The improvements apply to every way a review is started — **Tools > Review Rule Groups** (the current group alone or with additional groups) and **Tools > Review Firewall Policy** — because all three share the same analyzer and report window.
+
+#### Interactive report: ignore (acknowledge) noisy findings
+
+- **Master-detail report**: The Static Analysis tab is now a findings table (one row per finding) above a read-only detail pane, with a resizable, shaded report header and a draggable divider so you can trade space between the header, the findings table, and the ignored-rules area.
+- **Ignore a rule, or a whole category, to declutter the report**: A single noisy rule can generate dozens of valid-but-repetitive findings that bury the unique conflicts. Right-click a finding to ignore the rule it references (hiding every finding that rule participates in) or to ignore the finding's entire category. Ignored rules and categories are listed with live hidden counts and can be restored individually or all at once.
+  - **Hiding is a view filter only — it does NOT fix the underlying issue.** Ignoring a finding does not modify any rule, variable, rule-group file, or AWS resource, and it never re-runs the analyzer. It is purely a way to reduce noise so a report with a large number of findings is easier to read; the acknowledged conflict still exists in your rules and still needs a real fix. Ignore state lives only for the open report window and is discarded when it closes.
+- **Counts and exports track what you see**: The status-bar severity counts and the HTML/PDF exports reflect the current ignore state, so a shared or saved report matches the on-screen view. The AI Analysis tab always receives the full, unfiltered finding set.
+- **Jump from a finding to the rule in the editor**: Right-click a finding and choose "Edit …" for either referenced rule to be taken straight to that rule in the main editor — it opens the correct rule-group file if it isn't already open (through the usual save-changes prompt) and selects the rule by SID. The option is shown only for rules that live in a file on disk, so it is hidden for Review Firewall Policy findings whose groups come from AWS.
+- **Keyboard navigation**: With the findings table focused, Home jumps to the first visible finding and End to the last, selecting it and updating the detail pane (ignored/hidden findings are skipped).
+
+#### Rule analyzer accuracy (v4.0.0)
+
+- **Category and severity are now separate**: Every finding carries an explicit category (what kind of problem) and an independent severity (Critical / Warning / Informational). The three former severity-named "categories" collapse into one **Rule Shadowing** category whose findings carry their own severity, and the status-bar badges are now a clean Critical / Warning / Informational scale that you can verify by counting rows.
+- **GeoIP-aware protocol layering**: A broad rule gated by a specific-country `geoip` list (or an `app-layer-protocol` enforcement rule) is no longer reported as a severe "redundant/unreachable" error. It is reframed as an informational note that the rule pre-empts others only for the matching traffic — while a negated `geoip` rule (block all except a few countries) is still treated as significant.
+- **Protocol-layering suggestions tell the truth about ordering**: For findings driven by Suricata's rule-type processing order (IP-only before packet before app-layer), the report no longer advises a reordering that cannot help — not "move line X above line Y" within a file, and not "evaluate this rule group before that one" across groups. Because processing order is determined by rule type, not file or group position, reordering changes nothing for these findings. The suggestion now advises constraining the higher-priority rule (add flow keywords, tighten scope, use a port-bearing protocol, or add a country qualifier) or leaving it as intended.
+- **Fewer false conflicts between rules that cannot overlap**: Two rules whose networks provably do not intersect are no longer reported as conflicting. In particular, a rule whose destination is an internal subnet no longer appears to conflict with a rule whose destination is a negated set that excludes that subnet (for example `!$HOME_NET`), once the variables resolve to their real values per rule group. This is a conservative, proof-based change: a pair is suppressed only when non-overlap is certain; anything the analyzer cannot fully resolve is still flagged, so genuine conflicts are never missed.
+- **Each protocol-layering interaction is reported once**: Inter-type findings are no longer double-counted.
+- **Meaningless port on a portless protocol**: An `ip` or `icmp` rule that specifies a source or destination port (other than `any`) now produces an informational finding explaining that these protocols match at the network layer, which has no port concept — Suricata ignores the port, so the rule actually matches all traffic to/from the specified networks. The suggestion recommends a port-bearing protocol (tcp/udp/dns/…) if port scoping was intended.
+- **Domain apex + subdomain consolidation**: When two `pass` rules together cover a domain's apex and its subdomains (TLS or HTTP), the analyzer recognizes they are not actually redundant and suggests consolidating them into a single, precise rule using the `dotprefix` transform — tailored to your own rule's variables and keywords when possible. This works whether the two rules live in the same rule group or in different groups of a multi-group / firewall-policy review.
+- **Catches an over-broad "apex" allowlist mistake**: If the apex rule is written with an unanchored `endswith` and no `startswith`, it silently also allows look-alike domains (for example, a rule meant for `box.com` also allows `notbox.com`). The analyzer now flags this as a **Warning** and suggests the precise `dotprefix` replacement.
+
+---
+
 ## Version 2.10.0 - October 12, 2026
 
 ### Review Firewall Policy: Analyze a Live AWS Network Firewall Policy

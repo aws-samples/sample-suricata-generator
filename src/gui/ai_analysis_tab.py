@@ -12,6 +12,7 @@ from __future__ import annotations
 import logging
 import os
 import platform as _plat
+import re
 import subprocess as _sp
 import tempfile
 import threading
@@ -40,6 +41,78 @@ except ImportError:
     boto3 = None
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+#  Default-model selection ranking
+# ---------------------------------------------------------------------------
+# A Claude ".1" minor release (e.g. opus-4-1, sonnet-4-1) is intentionally
+# de-prioritized: it is treated as an older/deprecated point release that must
+# never be chosen over the base family or any later minor. All other minors
+# sort by version, newest first, so when several Opus (or several Sonnet)
+# versions are offered the latest one is the default (e.g. Opus 4.8 over 4.5
+# over the base 4.0).
+_DEPRECATED_MINORS = (1,)
+
+
+def _model_selection_key(model, index):
+    """Return a sort key for choosing the default model (higher sorts first).
+
+    The key is ``(family_tier, version_rank, -index)``:
+
+    * ``family_tier`` — 3 for Claude Opus, 2 for Claude Sonnet, 1 for any other
+      Claude model, 0 for a non-Claude model. Opus is preferred over Sonnet,
+      Sonnet over other Claude, and any Claude over non-Claude.
+    * ``version_rank`` — within a family, the model version so the NEWEST wins:
+      a tuple ``(major, minor)`` for a normal release, or a sentinel that sorts
+      below every normal release for a deprecated ``.1`` minor and for models
+      with no detectable version.
+    * ``-index`` — ties (same family and version) resolve to the EARLIEST model
+      in the provided list, preserving the previous first-wins behavior.
+
+    Pure and tkinter-free so it is unit-testable headlessly, and uses only
+    typing-safe constructs for the Python 3.7 floor.
+    """
+    mid = (model.get("modelId", "") or "").lower()
+    mname = (model.get("modelName", "") or "").lower()
+    combined = mid + " " + mname
+
+    if "claude" not in combined:
+        return (0, (-1, -1), -index)
+
+    if "opus" in combined:
+        family_tier = 3
+    elif "sonnet" in combined:
+        family_tier = 2
+    else:
+        family_tier = 1
+
+    # Parse the family version, e.g. "opus-4-5" -> (4, 5), "sonnet-4" -> (4, 0).
+    # The major and minor are each at most two digits; the long date suffix in a
+    # model id (e.g. "-20251101") must NOT be read as the minor, so the minor
+    # group is bounded to one or two digits and a longer run of digits (the
+    # date) is excluded via a negative lookahead.
+    major = None
+    minor = 0
+    match = re.search(
+        r"(opus|sonnet|haiku)-(\d{1,2})(?:-(\d{1,2})(?!\d))?", combined)
+    if match is not None:
+        major = int(match.group(2))
+        if match.group(3) is not None:
+            minor = int(match.group(3))
+
+    if major is None:
+        # No detectable version — sort below any versioned model in its tier.
+        version_rank = (-1, -1)
+    elif minor in _DEPRECATED_MINORS:
+        # Deprecated ".1" point release — rank below the base family (minor 0)
+        # and every later minor, but still above an unversioned Claude.
+        version_rank = (major, -1)
+    else:
+        version_rank = (major, minor)
+
+    return (family_tier, version_rank, -index)
+
 
 # ---------------------------------------------------------------------------
 #  Dark mode detection (follows ui-conventions.md pattern)
@@ -650,11 +723,15 @@ class AIAnalysisTab:
         thread.start()
 
     def _populate_models(self, models: list[dict]) -> None:
-        """Populate model dropdown with same default selection priority as AI Rule Assistant.
+        """Populate the model dropdown and pick the default model.
 
-        Priority order: (1) Claude Opus 4, (2) Claude Sonnet 4,
-        (3) any other Claude model, (4) first available model.
-        Excludes deprecated versions (e.g., opus-4-1 when selecting opus-4).
+        Family preference (highest first): Claude Opus, then Claude Sonnet,
+        then any other Claude model, then any non-Claude model. Within a family
+        the NEWEST version is chosen, so when several Opus versions are offered
+        the latest wins (e.g. Opus 4.8 over 4.5 over the base 4.0). A deprecated
+        ``.1`` minor (e.g. opus-4-1) is ranked below the base family and every
+        later minor. Ties resolve to the first model in the list. See
+        :func:`_model_selection_key`.
         """
         # Guard against destroyed window
         if self._tab_frame is None:
@@ -675,31 +752,15 @@ class AIAnalysisTab:
             self._model_combo.config(state="readonly")
 
             # Try to select the best Claude model by default.
-            # Preference order (highest first):
-            #   1. Claude Opus 4  (claude-opus-4, not opus-4-1)
-            #   2. Claude Sonnet 4
-            #   3. Any other Claude model
-            selected_idx = 0
-            best_priority = -1  # -1 = no Claude found yet
-            for i, m in enumerate(models):
-                mid = m.get("modelId", "").lower()
-                mname = m.get("modelName", "").lower()
-                combined = mid + " " + mname
-
-                if "claude" not in combined:
-                    continue
-
-                # Determine priority for this model
-                if "opus-4" in combined and "opus-4-1" not in combined:
-                    priority = 3  # Claude Opus 4 (latest flagship)
-                elif "sonnet-4" in combined and "sonnet-4-1" not in combined:
-                    priority = 2  # Claude Sonnet 4
-                else:
-                    priority = 1  # Any other Claude model
-
-                if priority > best_priority:
-                    best_priority = priority
-                    selected_idx = i
+            # Pick the default model by the composite ranking in
+            # _model_selection_key (Opus > Sonnet > other Claude > non-Claude;
+            # within a family the NEWEST version wins, with the deprecated ".1"
+            # minor pinned below the base family; ties resolve to the earliest
+            # listed model). This keeps Opus the default while tracking new Opus
+            # releases automatically (e.g. Opus 4.8 over 4.5 over 4.0).
+            selected_idx = max(
+                range(len(models)),
+                key=lambda i: _model_selection_key(models[i], i))
 
             self._model_var.set(display_names[selected_idx])
         else:

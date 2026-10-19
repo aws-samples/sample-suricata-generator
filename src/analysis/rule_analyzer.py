@@ -10,9 +10,10 @@ Version: See version.py for current version information
 
 import re
 import ipaddress
-from typing import List, Dict, Optional, Tuple
+from typing import List, Dict, Optional, Set, Tuple
 from src.core.suricata_rule import SuricataRule
 from src.core.version import get_analyzer_version
+from src.analysis.finding_model import Category, Severity, tag_finding
 
 
 class RuleAnalyzer:
@@ -36,7 +37,7 @@ class RuleAnalyzer:
         Returns:
             Dictionary with conflict categories: {'critical': [], 'warning': [], 'info': [], 'protocol_layering': [], 'sticky_buffer_order': [], 'udp_flow_established': [], 'protocol_keyword_mismatch': []}
         """
-        conflicts = {'critical': [], 'warning': [], 'info': [], 'protocol_layering': [], 'sticky_buffer_order': [], 'udp_flow_established': [], 'protocol_keyword_mismatch': [], 'asymmetric_flow': [], 'reject_ip_protocol': [], 'reject_quic_protocol': [], 'unsupported_keywords': [], 'pcre_restrictions': [], 'priority_strict_order': []}
+        conflicts = {'critical': [], 'warning': [], 'info': [], 'protocol_layering': [], 'sticky_buffer_order': [], 'udp_flow_established': [], 'protocol_keyword_mismatch': [], 'asymmetric_flow': [], 'reject_ip_protocol': [], 'reject_quic_protocol': [], 'unsupported_keywords': [], 'pcre_restrictions': [], 'priority_strict_order': [], 'port_on_portless_protocol': []}
         
         # Filter out comments and blank lines for analysis
         actual_rules = [r for r in rules if not getattr(r, 'is_comment', False) and not getattr(r, 'is_blank', False)]
@@ -90,18 +91,18 @@ class RuleAnalyzer:
                 
                 # Protocol layering check: Only check forward direction for intra-type conflicts
                 # For inter-type conflicts, check both directions since protocol layering affects processing regardless of rule order
+                # Protocol layering is detected on the forward pairwise call
+                # only. check_rule_type_conflict assigns higher/lower processing
+                # priority independent of argument order, so the forward call
+                # yields the same interaction content for the unordered pair as a
+                # reverse call would. The previous reverse call
+                # (check_protocol_layering_conflict(rule_b, rule_a, line_b,
+                # line_a)) was removed to collapse the forward/reverse
+                # double-report to ONE finding per unordered pair
+                # (Requirement 9, investigation NEW ITEM A).
                 protocol_conflict = self.check_protocol_layering_conflict(rule_a, rule_b, line_a, line_b, variables)
                 if protocol_conflict:
                     conflicts['protocol_layering'].append(protocol_conflict)
-                
-                # Only check reverse direction for inter-type protocol layering conflicts
-                upper_type = self.get_suricata_rule_type(rule_a)
-                lower_type = self.get_suricata_rule_type(rule_b)
-                
-                if upper_type != lower_type:
-                    reverse_protocol_conflict = self.check_protocol_layering_conflict(rule_b, rule_a, line_b, line_a, variables)
-                    if reverse_protocol_conflict:
-                        conflicts['protocol_layering'].append(reverse_protocol_conflict)
         
         # Remove critical/warning conflicts that are covered by protocol layering conflicts
         self._deduplicate_protocol_layering_conflicts(conflicts)
@@ -139,6 +140,9 @@ class RuleAnalyzer:
         reject_ip_issues = self.check_reject_on_ip_protocol(rules)
         conflicts['reject_ip_protocol'] = reject_ip_issues
         
+        # Check for concrete ports on portless (ip/icmp) protocol rules (informational)
+        conflicts['port_on_portless_protocol'] = self.check_port_on_portless_protocol(rules)
+        
         # Check for reject actions on QUIC protocol rules (AWS Network Firewall restriction)
         reject_quic_issues = self.check_reject_on_quic_protocol(rules)
         conflicts['reject_quic_protocol'] = reject_quic_issues
@@ -159,7 +163,65 @@ class RuleAnalyzer:
         priority_strict_issues = self.check_priority_strict_order(rules)
         conflicts['priority_strict_order'] = priority_strict_issues
         
+        # Tag every specialized-check finding with its Category and today's
+        # Severity (Requirement 1.6, 2.1, 2.4, 2.5). The Rule_Shadowing findings
+        # (critical/warning/info) and the Protocol_Layering findings are already
+        # tagged at their source return sites; only the specialized categories
+        # are tagged here.
+        self._tag_specialized_findings(conflicts)
+        
         return conflicts
+    
+    def _tag_specialized_findings(self, conflicts: Dict[str, List[Dict]]) -> None:
+        """Attach Category + Severity to every specialized-check finding in
+        ``conflicts`` (Requirement 1.6, 2.1). The per-category Severity follows
+        Requirement 2's inventory; the two mixed categories
+        (``protocol_keyword_mismatch``, ``asymmetric_flow``) map their per-item
+        legacy ``severity`` string to the Severity enum. Rule_Shadowing
+        (``critical``/``warning``/``info``) and ``protocol_layering`` are tagged
+        at their source and skipped here."""
+        # Fixed-severity specialized categories (category key -> Severity).
+        fixed = {
+            'sticky_buffer_order': Severity.WARNING,
+            'udp_flow_established': Severity.WARNING,
+            'port_protocol_mismatch': Severity.INFORMATIONAL,
+            'port_on_portless_protocol': Severity.INFORMATIONAL,
+            'contradictory_flow': Severity.WARNING,
+            'packet_drop_flow_pass': Severity.WARNING,
+            'reject_ip_protocol': Severity.CRITICAL,
+            'reject_quic_protocol': Severity.CRITICAL,
+            'unsupported_keywords': Severity.CRITICAL,
+            'pcre_restrictions': Severity.CRITICAL,
+            'threshold_limited': Severity.WARNING,
+            'priority_strict_order': Severity.WARNING,
+        }
+        for key, sev in fixed.items():
+            for finding in (conflicts.get(key) or []):
+                tag_finding(finding, key, sev)
+        
+        # Mixed-severity categories: map the per-item legacy 'severity' string.
+        per_item_map = {
+            'critical': Severity.CRITICAL,
+            'warning': Severity.WARNING,
+            'info': Severity.INFORMATIONAL,
+            'informational': Severity.INFORMATIONAL,
+        }
+        for key in ('protocol_keyword_mismatch', 'asymmetric_flow'):
+            for finding in (conflicts.get(key) or []):
+                legacy = finding.get('severity') if hasattr(finding, 'get') else None
+                sev = per_item_map.get(legacy, Severity.INFORMATIONAL)
+                tag_finding(finding, key, sev)
+        
+        # Protocol_Layering findings from check_rule_type_conflict are already
+        # tagged at their source (with Informational/Warning per the reframe).
+        # Findings from the traditional-layering fallback path
+        # (check_traditional_protocol_layering) are not reframed and carry no
+        # 'sev' yet — tag any untagged protocol_layering finding Warning by
+        # default (Requirement 6.1). This is defensive and never overrides an
+        # existing sev.
+        for finding in (conflicts.get('protocol_layering') or []):
+            if hasattr(finding, 'get') and finding.get('sev') is None:
+                tag_finding(finding, Category.PROTOCOL_LAYERING, Severity.WARNING)
     
     def check_rule_conflict(self, upper_rule: SuricataRule, lower_rule: SuricataRule, 
                            upper_line: int, lower_line: int, variables: Dict[str, str]) -> Optional[Dict]:
@@ -219,12 +281,31 @@ class RuleAnalyzer:
             suggestion = f"Move line {lower_line} above line {upper_line} to ensure logging occurs"
         elif upper_rule.action == lower_rule.action:
             severity = 'info'
-            issue = f"Redundant {upper_rule.action.upper()} rule (same action, overlapping conditions)"
-            suggestion = f"Consider removing line {lower_line} or making it more specific"
+            # Apex+subdomain consolidation: before emitting the generic
+            # "redundant" advice, check whether this same-action pair is a
+            # TLS/HTTP apex+subdomain domain-allow pair whose two rules match
+            # disjoint SNI/host sets. If so, replace the issue/suggestion with
+            # a corrected explanation and a single dotprefix consolidation rule;
+            # otherwise emit today's generic redundant finding unchanged. A
+            # strict pair keeps severity 'info'; a loose unanchored-apex pair
+            # elevates to 'warning'. The result dict shape, bucketing, and the
+            # final tag_finding(... RULE_SHADOWING, shadow_sev) are untouched
+            # (shadow_sev already maps 'warning'->WARNING).
+            consolidation = self._apex_subdomain_consolidation(
+                upper_rule, lower_rule, upper_line, lower_line, variables)
+            if consolidation is not None:
+                # The helper supplies the per-finding severity: 'info' for a
+                # strict apex+subdomain pair (unchanged), 'warning' for a loose
+                # unanchored-apex pair. The pre-call severity='info' default is
+                # kept for the generic (None) case below.
+                issue, suggestion, severity = consolidation
+            else:
+                issue = f"Redundant {upper_rule.action.upper()} rule (same action, overlapping conditions)"
+                suggestion = f"Consider removing line {lower_line} or making it more specific"
         else:
             return None
         
-        return {
+        result = {
             'upper_rule': upper_rule,
             'lower_rule': lower_rule,
             'upper_line': upper_line,
@@ -233,7 +314,430 @@ class RuleAnalyzer:
             'issue': issue,
             'suggestion': suggestion
         }
-    
+        # Rule_Shadowing Category; map the legacy severity string to the
+        # three-member Severity (Requirement 1.4). The finding is still
+        # appended to the critical/warning/info dict list by its legacy
+        # 'severity' string in analyze_rule_conflicts (unchanged).
+        shadow_sev = {
+            'critical': Severity.CRITICAL,
+            'warning': Severity.WARNING,
+            'info': Severity.INFORMATIONAL,
+        }.get(severity, Severity.INFORMATIONAL)
+        return tag_finding(result, Category.RULE_SHADOWING, shadow_sev)
+
+    # ------------------------------------------------------------------
+    # Domain apex/subdomain consolidation (dotprefix suggestion)
+    #
+    # These helpers positively detect the specific same-action overlap where
+    # two TLS/HTTP `pass` rules together cover a domain apex and its
+    # subdomains. For such a pair the generic "redundant / remove line X"
+    # advice is wrong (the two rules match disjoint SNI/host sets), so a
+    # corrected issue + a single `dotprefix` consolidation rule is suggested
+    # instead. All methods are UI-free and read only the parsed SuricataRule
+    # fields; any uncertainty or error degrades to None so the generic
+    # redundant finding stands.
+    # ------------------------------------------------------------------
+
+    def _apex_subdomain_consolidation(self, upper_rule, lower_rule, upper_line, lower_line, variables=None):
+        # type: (...) -> Optional[Tuple[str, str, str]]
+        """Return (issue, suggestion, severity) for a positively-detected
+        apex+subdomain pass-rule pair, or None otherwise (and None on any
+        internal error, so the generic redundant finding is emitted).
+
+        The pair may be a Strict_Apex_Subdomain_Pair (role set
+        {'apex','subdomain'} -> severity 'info', unchanged behavior) or a
+        Loose_Apex_Subdomain_Pair (role set {'loose_apex','subdomain'} ->
+        severity 'warning': the unanchored apex rule silently over-matches
+        look-alike domains, a likely mistake worth a more prominent flag). The
+        suggested dotprefix rule TEXT is identical for both variants; only the
+        issue text and the suggestion lead-in differ. Called from the
+        same-action branch of check_rule_conflict.
+
+        The optional `variables` dict (default None) is the same network/port
+        variable map `check_rule_conflict` already resolves with. It lets the
+        four header fields be compared by RESOLVED traffic rather than by
+        literal token, so a cross-group apex+subdomain pair whose namespaced
+        tokens ($g0__WORKSPACES vs $g1__WORKSPACES) resolve to the SAME CIDR
+        still consolidates, while two groups resolving to DIFFERENT CIDRs do
+        not. When `variables` is None/empty (single-group direct calls), the
+        resolution helpers short-circuit on literal equality, so behavior is
+        identical to the previous literal compare."""
+        try:
+            # Header fields must describe the SAME resolved traffic for this
+            # finding: the only thing reasoned about between the two rules is
+            # the parentheses Body_Keywords. Require equality (not merely
+            # overlap) of action, protocol, and the four network/port header
+            # fields. Action and protocol are not namespaced, so compare them
+            # literally. The four network/port fields may carry per-group
+            # namespaced $VARIABLES in multi-group mode, so compare them by
+            # RESOLUTION (broader-both-ways == equal) using the analyzer's
+            # existing helpers; literal-equal tokens short-circuit True in
+            # those helpers, preserving single-group behavior exactly.
+            if not (upper_rule.action == lower_rule.action == 'pass'):
+                return None
+            if (upper_rule.protocol or '').lower() != (lower_rule.protocol or '').lower():
+                return None
+            vars_for_resolve = variables or {}
+            un = (getattr(upper_rule, 'src_net', '') or '').strip()
+            ln = (getattr(lower_rule, 'src_net', '') or '').strip()
+            if not (self.is_network_equal_or_broader(un, ln, vars_for_resolve)
+                    and self.is_network_equal_or_broader(ln, un, vars_for_resolve)):
+                return None
+            ud = (getattr(upper_rule, 'dst_net', '') or '').strip()
+            ld = (getattr(lower_rule, 'dst_net', '') or '').strip()
+            if not (self.is_network_equal_or_broader(ud, ld, vars_for_resolve)
+                    and self.is_network_equal_or_broader(ld, ud, vars_for_resolve)):
+                return None
+            usp = (getattr(upper_rule, 'src_port', '') or '').strip()
+            lsp = (getattr(lower_rule, 'src_port', '') or '').strip()
+            if not (self.is_port_equal_or_broader(usp, lsp, vars_for_resolve)
+                    and self.is_port_equal_or_broader(lsp, usp, vars_for_resolve)):
+                return None
+            udp = (getattr(upper_rule, 'dst_port', '') or '').strip()
+            ldp = (getattr(lower_rule, 'dst_port', '') or '').strip()
+            if not (self.is_port_equal_or_broader(udp, ldp, vars_for_resolve)
+                    and self.is_port_equal_or_broader(ldp, udp, vars_for_resolve)):
+                return None
+
+            upper_cls = self._classify_domain_matcher(upper_rule)
+            lower_cls = self._classify_domain_matcher(lower_rule)
+            if upper_cls is None or lower_cls is None:
+                return None
+
+            upper_role, upper_buf, upper_domain = upper_cls
+            lower_role, lower_buf, lower_domain = lower_cls
+
+            # Same host-buffer family, one apex + one subdomain, same domain.
+            if upper_buf != lower_buf:
+                return None
+            if upper_domain != lower_domain:
+                return None
+            # Accept exactly one of two role shapes; anything else (both-apex,
+            # both-subdomain, both-loose, loose_apex+apex, ...) is not a pair.
+            roles = {upper_role, lower_role}
+            if roles == {'apex', 'subdomain'}:
+                variant = 'strict'
+            elif roles == {'loose_apex', 'subdomain'}:
+                variant = 'loose'
+            else:
+                return None
+
+            host_buffer = upper_buf
+            base_domain = upper_domain
+            if not base_domain:
+                return None
+
+            # The apex-side rule is whichever rule is the (strict) 'apex' or the
+            # 'loose_apex'; the other is the 'subdomain'.
+            apex_is_upper = upper_role in ('apex', 'loose_apex')
+            apex_rule = upper_rule if apex_is_upper else lower_rule
+            sub_rule = lower_rule if apex_is_upper else upper_rule
+
+            # The suggested consolidation rule text is variant-agnostic.
+            if self._body_keywords_agree(apex_rule, sub_rule, host_buffer):
+                rule_text = self._synthesize_tailored(apex_rule, sub_rule, host_buffer, base_domain)
+            else:
+                rule_text = self._synthesize_fallback(apex_rule, host_buffer, base_domain)
+
+            if not rule_text:
+                return None
+
+            # Only the issue text, lead-in, and severity differ by variant.
+            if variant == 'loose':
+                severity = 'warning'
+                issue = self._build_loose_consolidation_issue(
+                    upper_line, lower_line, base_domain, apex_is_upper)
+                lead_in = (
+                    "The following rule matches the intended apex and "
+                    "subdomains precisely, without allowing look-alike "
+                    "domains:\n"
+                )
+            else:
+                severity = 'info'
+                issue = self._build_consolidation_issue(
+                    upper_line, lower_line, base_domain, apex_is_upper)
+                lead_in = (
+                    "The following rule achieves the same result as the two "
+                    "rules above:\n"
+                )
+
+            suggestion = lead_in + rule_text
+            return (issue, suggestion, severity)
+        except Exception:
+            return None
+
+    def _classify_domain_matcher(self, rule):
+        # type: (...) -> Optional[Tuple[str, str, str]]
+        """Classify a rule as an apex, subdomain, or loose-apex domain matcher.
+
+        Returns (role, host_buffer, base_domain) with role in
+        {'apex','subdomain','loose_apex'} and host_buffer the canonical dotted
+        form ('tls.sni' or 'http.host'), or None when the rule is not a clean
+        matcher on a supported host buffer.
+
+        The three roles partition on (startswith?, leading-dot?):
+          * startswith + no dot  -> 'apex'       (exact-equality apex)
+          * no startswith + dot   -> 'subdomain'  (leading-dot subdomains)
+          * no startswith + no dot -> 'loose_apex' (unanchored endswith; the
+                over-matching shape that also admits look-alike domains)
+          * startswith + dot       -> None (not a defined idiom)
+        All other conservative gates (protocol, Excluded_Host_Buffer, endswith,
+        extractable domain, exactly one content token) are identical for every
+        role.
+        """
+        try:
+            full = ((getattr(rule, 'content', '') or '').lower()
+                    + ' ' + (getattr(rule, 'original_options', '') or '').lower())
+            # Normalize the underscore host-buffer spellings to the dotted form
+            # BEFORE any token test/helper call (the reused helpers only
+            # recognize the dotted spelling). Rewrite the .raw form first so it
+            # is not partially rewritten.
+            full = full.replace('http_host.raw', 'http.host.raw')
+            full = full.replace('http_host', 'http.host')
+
+            protocol = (getattr(rule, 'protocol', '') or '').lower()
+            if protocol not in ('tls', 'http'):
+                return None
+
+            # Host_Buffer determination with the Excluded_Host_Buffer gate
+            # FIRST (ordering is load-bearing because 'http.host' is a substring
+            # of 'http.host.raw').
+            has_raw_host = 'http.host.raw' in full
+            # A non-.raw http.host token is an occurrence of 'http.host' that is
+            # not immediately followed by '.raw'.
+            has_plain_http_host = bool(
+                re.search(r'http\.host(?!\.raw)', full))
+
+            if has_raw_host and not has_plain_http_host:
+                # The only host token is http.host.raw (Excluded_Host_Buffer).
+                return None
+
+            if protocol == 'tls':
+                if 'tls.sni' not in full:
+                    return None
+                host_buffer = 'tls.sni'
+            else:  # http
+                if not has_plain_http_host:
+                    return None
+                host_buffer = 'http.host'
+
+            # Require endswith + an extractable domain.
+            if 'endswith' not in full:
+                return None
+            domain = self.extract_endswith_domain(full)
+            if not domain:
+                return None
+
+            # Exactly one content: token (the leading-dot discriminator reads
+            # only the first content:"..." via re.search). Count on the raw
+            # original_options alone; the combined `full` duplicates the
+            # content keyword (SuricataRule.content is a subset of
+            # original_options), so counting on `full` would double-count.
+            raw_options = (getattr(rule, 'original_options', '') or '').lower()
+            raw_options = raw_options.replace('http_host.raw', 'http.host.raw')
+            raw_options = raw_options.replace('http_host', 'http.host')
+            if raw_options.count('content:') != 1:
+                return None
+
+            content_match = re.search(r'content:\s*"([^"]*)"', full)
+            if not content_match:
+                content_match = re.search(r"content:\s*'([^']*)'", full)
+            if not content_match:
+                return None
+            raw_value = content_match.group(1)
+
+            has_startswith = 'startswith' in full
+            has_leading_dot = raw_value.startswith('.')
+
+            if self.has_exact_domain_match(full) and not has_leading_dot:
+                role = 'apex'
+            elif ('endswith' in full) and (not has_startswith) and has_leading_dot:
+                role = 'subdomain'
+            elif ('endswith' in full) and (not has_startswith) and (not has_leading_dot):
+                # Loose apex: bare domain anchored only by endswith (no
+                # startswith, no leading dot) -> over-matches any host ENDING in
+                # the literal base domain (the apex, but also look-alikes like
+                # notbox.com). Detected only when paired with a matching
+                # subdomain rule (see _apex_subdomain_consolidation).
+                role = 'loose_apex'
+            else:
+                return None
+
+            return (role, host_buffer, domain)
+        except Exception:
+            return None
+
+    def _body_keywords(self, rule, host_buffer):
+        # type: (...) -> set
+        """Return the normalized Body_Keywords set for a rule: every
+        parentheses keyword except msg/sid/rev and the content-anchoring tokens
+        (the content:"..." value, startswith, endswith). nocase IS kept so a
+        nocase mismatch counts as disagreement. The host buffer keyword is
+        normalized to its dotted form."""
+        tokens = set()
+        raw = (getattr(rule, 'original_options', '') or '')
+        for part in raw.split(';'):
+            token = part.strip().lower()
+            if not token:
+                continue
+            if token.startswith('msg:') or token.startswith('sid:') or token.startswith('rev:'):
+                continue
+            if token.startswith('content:'):
+                continue
+            if token in ('startswith', 'endswith'):
+                continue
+            # Normalize underscore host-buffer spelling to the dotted form.
+            token = token.replace('http_host.raw', 'http.host.raw')
+            token = token.replace('http_host', 'http.host')
+            tokens.add(token)
+        return tokens
+
+    def _body_keywords_agree(self, apex_rule, sub_rule, host_buffer):
+        # type: (...) -> bool
+        """True iff the two rules carry the same Body_Keywords as a normalized
+        set (content-anchoring, msg/sid/rev excluded)."""
+        return self._body_keywords(apex_rule, host_buffer) == self._body_keywords(sub_rule, host_buffer)
+
+    @staticmethod
+    def _source_rule(rule):
+        # type: (...) -> object
+        """Return the un-namespaced source rule to render in a suggestion.
+
+        In Multi_Group_Mode the analyzer works on a namespaced copy whose
+        variables are rewritten to the internal ``$g<idx>__NAME`` form; the
+        copy carries an ``_original_rule`` back-reference to the rule as the
+        user authored it. A suggestion shown to the user MUST read from that
+        original so it displays ``$WORKSPACES``, not ``$g0__WORKSPACES``
+        (Single_Group_Mode has no namespacing and no back-reference, so the
+        rule is returned unchanged)."""
+        original = getattr(rule, '_original_rule', None)
+        return original if original is not None else rule
+
+    def _reused_header(self, rule):
+        # type: (...) -> str
+        """The 7-field header string reused verbatim from a pair rule, read
+        from the un-namespaced source rule so user-authored variables (e.g.
+        ``$WORKSPACES``) are preserved rather than the ``$g<idx>__`` form."""
+        src = self._source_rule(rule)
+        return "{action} {protocol} {src_net} {src_port} {direction} {dst_net} {dst_port}".format(
+            action=src.action,
+            protocol=src.protocol,
+            src_net=src.src_net,
+            src_port=src.src_port,
+            direction=src.direction,
+            dst_net=src.dst_net,
+            dst_port=src.dst_port,
+        )
+
+    def _synthesize_tailored(self, apex_rule, sub_rule, host_buffer, base_domain):
+        # type: (...) -> str
+        """Build the single tailored consolidation rule: reuse the pair's
+        header and shared Body_Keywords, replacing only the content matching
+        with the dotprefix idiom on the host buffer. Never widens scope."""
+        header = self._reused_header(apex_rule)
+        # Read the shared body keywords from the un-namespaced source rule so
+        # any variable-bearing keyword renders in the user-authored form
+        # (no $g<idx>__ namespace) in the suggested rule.
+        shared = self._body_keywords(self._source_rule(apex_rule), host_buffer)
+
+        # Drop any stale host-buffer / transform / content-anchoring tokens from
+        # the shared body; these are re-emitted canonically around dotprefix.
+        anchoring = {'tls.sni', 'http.host', 'dotprefix', 'nocase'}
+        body_keywords = [tok for tok in shared if tok not in anchoring]
+        # Deterministic order for a stable suggestion string.
+        body_keywords.sort()
+
+        shared_has_nocase = 'nocase' in shared
+
+        opts = []
+        msg = 'Domain allow rule for *.' + base_domain
+        opts.append('msg:"' + msg + '"')
+        opts.extend(body_keywords)
+        opts.append(host_buffer)
+        opts.append('dotprefix')
+        opts.append('content:".' + base_domain + '"')
+        opts.append('endswith')
+        if host_buffer == 'tls.sni' and shared_has_nocase:
+            opts.append('nocase')
+        opts.append('sid:<SID>')
+        opts.append('rev:1')
+
+        return header + ' (' + '; '.join(opts) + ';)'
+
+    def _synthesize_fallback(self, apex_rule, host_buffer, base_domain):
+        # type: (...) -> str
+        """Build the single best-practice fallback consolidation rule using the
+        pinned static idiom (TLS carries nocase, HTTP omits it). Reuses the
+        header; does not merge divergent bodies."""
+        header = self._reused_header(apex_rule)
+        d = base_domain
+        if host_buffer == 'tls.sni':
+            body = ('msg:"Domain allow rule for *.' + d + '"; flow:to_server; '
+                    'tls.sni; dotprefix; content:".' + d + '"; endswith; nocase; '
+                    'sid:<SID>; rev:1;')
+        else:
+            body = ('msg:"Domain allow rule for *.' + d + '"; flow:to_server; '
+                    'http.host; dotprefix; content:".' + d + '"; endswith; '
+                    'sid:<SID>; rev:1;')
+        return header + ' (' + body + ')'
+
+    def _build_consolidation_issue(self, upper_line, lower_line, base_domain, apex_is_upper):
+        # type: (...) -> str
+        """Corrected issue text: the two rules are NOT redundant (apex-only vs
+        subdomain-only, disjoint SNI/host sets) and a single dotprefix rule
+        covers both. No 'Redundant' / 'remove line' wording."""
+        if apex_is_upper:
+            apex_line = upper_line
+            sub_line = lower_line
+        else:
+            apex_line = lower_line
+            sub_line = upper_line
+        return (
+            "The apex rule (line {apex}) and the subdomain rule (line {sub}) "
+            "together allow access to \"{d}\" and all of its subdomains using "
+            "two rules. A single rule using the dotprefix transform can cover "
+            "both the apex and its subdomains."
+        ).format(apex=apex_line, sub=sub_line, d=base_domain)
+
+    def _look_alike_domain(self, base_domain):
+        # type: (str) -> str
+        """Build the fixed Look_Alike_Domain by prepending the literal 'not' to
+        the FIRST LABEL of the base domain and re-joining the rest:
+        'box.com' -> 'notbox.com', 'a.b.co.uk' -> 'nota.b.co.uk'. A single-label
+        domain (no '.') -> 'not' + domain (e.g. 'localnet' -> 'notlocalnet').
+        The '.' guard avoids an IndexError on a dotless domain, so this never
+        raises. Used ONLY in the loose issue text, never in a synthesized rule
+        or the strict issue."""
+        if '.' in base_domain:
+            first, rest = base_domain.split('.', 1)
+            return 'not' + first + '.' + rest
+        return 'not' + base_domain
+
+    def _build_loose_consolidation_issue(self, upper_line, lower_line, base_domain, apex_is_upper):
+        # type: (...) -> str
+        """Loose-variant issue text: the apex-side rule uses endswith with no
+        startswith, so it also allows look-alike domains such as the
+        Look_Alike_Domain; together with the subdomain rule the pair may permit
+        unintended traffic; a single dotprefix rule matches precisely. Embeds
+        the not<firstlabel> look-alike and uses no 'Redundant' / 'remove line'
+        wording."""
+        if apex_is_upper:
+            apex_line = upper_line
+            sub_line = lower_line
+        else:
+            apex_line = lower_line
+            sub_line = upper_line
+        look_alike = self._look_alike_domain(base_domain)
+        return (
+            "The apex rule (line {apex}) is meant to match the apex \"{d}\", "
+            "but it uses endswith with no startswith, so it also allows "
+            "look-alike domains such as \"{look}\". Together with the subdomain "
+            "rule (line {sub}), these two rules may permit traffic that was not "
+            "intended. A single rule using the dotprefix transform matches the "
+            "apex and its subdomains precisely, without the look-alike "
+            "over-match."
+        ).format(apex=apex_line, sub=sub_line, d=base_domain, look=look_alike)
+
     def rules_overlap(self, rule1: SuricataRule, rule2: SuricataRule, variables: Dict[str, str]) -> bool:
         """Check if two rules overlap in their matching conditions"""
         # Protocol must be compatible
@@ -374,7 +878,75 @@ class RuleAnalyzer:
             }
         except ValueError:
             return None
-    
+
+    def _resolve_negated_set(self, spec: str, variables: Dict[str, str]) -> Optional[Set]:
+        """Resolve a Simple_Negation ``!S`` to a set of ``ipaddress`` networks.
+
+        Returns the concrete set ``S`` (the networks the negation EXCLUDES) when
+        ``spec`` is a simple negation of a fully-resolvable set, or ``None`` for
+        every un-enumerable case. This is a NEW helper used ONLY by the
+        provable-disjointness pre-check; it does NOT alter
+        ``_parse_network_specification`` (whose negation branch keeps returning
+        ``None`` for every other caller, so the Shadowing_Path is untouched).
+
+        Returns ``None`` (not fully resolvable) when: not a negation; bracketed
+        operand; undefined variable; dict definition that is not a string; a
+        member that is itself negated or bracketed; an ``ipaddress.ip_network``
+        ``ValueError``; or an empty result.
+        """
+        spec = spec.strip()
+        if not spec.startswith('!'):
+            return None
+        inner = spec[1:].strip()
+        # Bracketed/mixed negation is not a Simple_Negation.
+        if inner.startswith('['):
+            return None
+        # Resolve a single variable operand.
+        if inner.startswith(('$', '@')):
+            resolved = variables.get(inner, inner)
+            if resolved == inner:
+                # Undefined variable, not resolvable.
+                return None
+            if isinstance(resolved, dict):
+                resolved = resolved.get('definition', resolved)
+                if not isinstance(resolved, str):
+                    return None
+            inner = resolved
+        # Split the resolved string (or literal operand) on commas.
+        networks = set()
+        for member in inner.split(','):
+            member = member.strip()
+            if not member:
+                continue
+            # A nested-negated or bracketed member is un-enumerable.
+            if member.startswith('!') or member.startswith('['):
+                return None
+            try:
+                networks.add(ipaddress.ip_network(member, strict=False))
+            except ValueError:
+                return None
+        if not networks:
+            return None
+        return networks
+
+    def _resolve_concrete_cidrs(self, spec: str, variables: Dict[str, str]) -> Optional[Set]:
+        """Resolve ``spec`` to a set of concrete ``ipaddress`` networks.
+
+        Returns the ``networks`` set ONLY when ``_parse_network_specification``
+        yields a clean concrete spec -- a single CIDR (``type == 'simple'``) or
+        a clean bracketed union of concrete CIDRs (``type == 'group'``) -- with
+        NO exclusions and a non-empty network set. Returns
+        ``None`` for ``any``, exclusion-bearing, negated, or unparseable specs.
+        Thin wrapper so the pre-check reuses the existing concrete parsing.
+        """
+        parsed = self._parse_network_specification(spec, variables)
+        if (parsed is not None
+                and parsed.get('type') in ('simple', 'group')
+                and not parsed.get('excluded')
+                and parsed.get('networks')):
+            return parsed['networks']
+        return None
+
     def _parse_network_group(self, group_content: str, variables: Dict[str, str]) -> Optional[Dict]:
         """Parse the contents of a network group [item1, item2, ...]"""
         if not group_content.strip():
@@ -1532,6 +2104,127 @@ class RuleAnalyzer:
         # FINALLY: Rules with no special keywords are SIG_TYPE_IPONLY
         return 'SIG_TYPE_IPONLY'
     
+    # Direction-generalized geoip regex (Requirement 5.3 / investigation NEW
+    # ITEM B): the existing reuse regex at the shadowing path only matches
+    # ``geoip:dst,`` — here we accept any direction token and both positive and
+    # negated (``!``) country tokens so ``geoip:any,...`` / ``geoip:src,...``
+    # forms are parsed.
+    _GEOIP_COUNTRY_RE = re.compile(r'geoip:(?:any|src|dst),([A-Z,!]+)', re.IGNORECASE)
+
+    def _rule_full_content(self, rule) -> str:
+        """Combined content + original_options for a rule, mirroring the
+        shadowing path's full_content composition (lines 676-677)."""
+        content = (getattr(rule, 'content', '') or '')
+        original = (getattr(rule, 'original_options', '') or '')
+        return (content + ' ' + original)
+
+    def _geoip_positive_countries(self, full_content: str):
+        """Return the set of positive (non-negated) country codes in the first
+        geoip qualifier of ``full_content``, or an empty set when there is no
+        geoip qualifier / no positive country. ``!`` tokens are stripped."""
+        match = self._GEOIP_COUNTRY_RE.search(full_content or '')
+        if not match:
+            return set()
+        countries = set()
+        for token in match.group(1).split(','):
+            token = token.strip()
+            if not token or token.startswith('!'):
+                continue
+            countries.add(token.upper())
+        return countries
+
+    def _geoip_specificity(self, rule) -> Optional[str]:
+        """Classify a rule's geoip qualifier.
+
+        Returns:
+          * ``'positive'`` — Positive_Specific_GeoIP: a geoip qualifier with at
+            least one country code and NO ``,!`` negation token
+            (e.g. ``geoip:any,AF,BY``).
+          * ``'negated'`` — Negated_GeoIP: a geoip qualifier containing a ``,!``
+            negation token (e.g. ``geoip:any,!CA,!US``), which is genuinely broad.
+          * ``None`` — no geoip qualifier, or a bare ``geoip:any`` with no country
+            codes (Requirement 4.4).
+
+        Reuses the ``',!'`` discriminator of the shadowing path (lines 733-734 /
+        1008-1009) applied to the rule's full content (Requirement 4.3, 5.3).
+        """
+        full_content = self._rule_full_content(rule)
+        lowered = full_content.lower()
+        if 'geoip:' not in lowered:
+            return None
+        if ',!' in full_content:
+            return 'negated'
+        if self._geoip_positive_countries(full_content):
+            return 'positive'
+        # geoip present but no positive country and no negation (bare geoip:any)
+        return None
+
+    def _is_app_layer_protocol_enforcement(self, rule) -> bool:
+        """True iff the rule uses ``app-layer-protocol:!<proto>`` — a
+        PDONLY->APPLAYER deliberate egress-enforcement rule (investigation
+        NEW ITEM C / sample lines 11/13/15)."""
+        full_content = self._rule_full_content(rule).lower()
+        return bool(re.search(r'app-layer-protocol:\s*!\w+', full_content))
+
+    def file_order_suggestion(self, upper_line, lower_line, higher_priority_is_upper, action_kind):
+        """Compose a correct inter-type protocol-layering suggestion
+        (Defect #1, Requirement 8).
+
+        ``upper_line`` / ``lower_line`` are the TRUE file positions of the pair
+        (``upper_line`` is the physically-earlier rule by construction of the
+        pairwise loop). ``higher_priority_is_upper`` is True when the
+        higher-PROCESSING-PRIORITY rule is the physically-upper one.
+        ``action_kind`` selects the mitigation phrasing:
+          * ``'block_pass'``   — drop/reject (higher) vs pass (lower)
+          * ``'allow_block'``  — pass (higher) vs drop/reject (lower)
+          * ``'block_alert'``  — drop/reject (higher) vs alert (lower)
+          * ``'redundant'``    — drop/reject vs drop/reject
+
+        Decision (why no "move above" is ever offered here): this helper serves
+        the INTER-TYPE protocol-layering path (IPONLY < PKT < APPLAYER), where
+        Suricata's processing order is determined by rule TYPE, not by file
+        position. Reordering the rules in the file therefore does NOT change
+        which rule pre-empts which — moving the lower-priority rule above the
+        higher-priority one is a no-op in BOTH directions, so suggesting it is
+        misleading (the problem the user reported). The only effective remedies
+        are to constrain the higher-priority rule so it stops pre-empting (add
+        flow keywords, tighten scope, add a country/geo qualifier) or to accept
+        the behavior if it is intended. (The traditional low-level-vs-high-level
+        protocol path, where a file reorder CAN help, composes its own
+        file-order advice separately and does not call this helper.) The file
+        line numbers are used only to NAME the two rules, never to advise a
+        move.
+        """
+        # Resolve the higher-priority and lower-priority rules' true file lines
+        # (used only to name the rules in the advice).
+        if higher_priority_is_upper:
+            higher_file_line = upper_line
+            lower_file_line = lower_line
+        else:
+            higher_file_line = lower_line
+            lower_file_line = upper_line
+
+        constrain = (
+            "constrain the higher-priority rule at line {hi} "
+            "(add flow keywords, tighten scope, or add a country qualifier) "
+            "so it no longer pre-empts the rule at line {lo}"
+        ).format(hi=higher_file_line, lo=lower_file_line)
+
+        # A file-order move cannot fix type-based processing order, so advise
+        # constraining the higher-priority rule (or accepting the behavior).
+        # Reordering is never suggested here.
+        if action_kind == 'redundant':
+            return (
+                "The rule at line {lo} is not unreachable by reordering "
+                "(IPONLY/type processing order ignores file position); "
+                "{constrain}, or leave as-is if intended."
+            ).format(lo=lower_file_line, constrain=constrain)
+        return (
+            "Reordering the rules will not change this (processing order is "
+            "determined by rule type, not file position); {constrain}, or "
+            "leave as-is if intended."
+        ).format(constrain=constrain)
+
     def check_rule_type_conflict(self, upper_rule: SuricataRule, lower_rule: SuricataRule,
                                 upper_line: int, lower_line: int, upper_type: str, lower_type: str,
                                 variables: Dict[str, str]) -> Optional[Dict]:
@@ -1605,21 +2298,82 @@ class RuleAnalyzer:
                 return None  # Flow keywords help mitigate the issue
         # If it's IPONLY (no keywords), we continue to flag it
         
+        # ------------------------------------------------------------------
+        # Informational-layering reframe (Requirements 4, 5, 6) and
+        # file-order-aware suggestions (Requirement 8).
+        #
+        # Decide, on the GeoIP code path itself (NOT the flow-keyword gate),
+        # whether this interaction is a deliberate/benign partial pre-emption:
+        #   (a) the higher-priority rule carries a Positive_Specific_GeoIP
+        #       qualifier (>=1 country, no ',!'), OR
+        #   (b) the lower (higher-layer) counterpart is an
+        #       app-layer-protocol:!<proto> enforcement rule.
+        # A Negated_GeoIP higher rule stays significant (default Warning).
+        # ------------------------------------------------------------------
+        geo = self._geoip_specificity(higher_priority_rule)
+        applayer_enforcement = self._is_app_layer_protocol_enforcement(lower_priority_rule)
+        informational = (geo == 'positive') or applayer_enforcement
+
+        # Do NOT downgrade a genuine same/subset-country shadow: if the higher
+        # rule is positive-geoip AND the lower rule is confined to the same or a
+        # subset country set, keep it significant (Requirement 4.7). Uses the
+        # direction-generalized positive-country extraction.
+        if geo == 'positive':
+            higher_countries = self._geoip_positive_countries(
+                self._rule_full_content(higher_priority_rule))
+            lower_countries = self._geoip_positive_countries(
+                self._rule_full_content(lower_priority_rule))
+            lower_is_negated = self._geoip_specificity(lower_priority_rule) == 'negated'
+            if lower_countries and not lower_is_negated and lower_countries.issubset(higher_countries):
+                # The lower rule is itself scoped to the same/subset countries,
+                # so the higher rule genuinely shadows it -> not informational.
+                informational = False
+
+        # True relative file position of the higher-PRIORITY rule.
+        higher_priority_is_upper = (higher_line == upper_line)
+
         # Generate conflict description based on rule actions
         higher_type_name = higher_priority_rule.protocol.upper()
         lower_type_name = lower_priority_rule.protocol.upper()
         higher_type_label = self.get_display_label_for_type(self.get_detailed_suricata_rule_type(higher_priority_rule))
-        
+
+        def _informational_issue(effect_clause):
+            return (
+                "{hp} rule at line {hl} ({lbl}) is processed before {lp} rule "
+                "at line {ll} due to protocol layering, but it pre-empts the "
+                "lower rule only for the specific traffic it matches ({eff}); "
+                "the lower rule still applies to all other traffic. No action "
+                "is required unless this overlap was unintended."
+            ).format(hp=higher_type_name, hl=higher_line, lbl=higher_type_label,
+                     lp=lower_type_name, ll=lower_line_num, eff=effect_clause)
+
+        def _reframed_suggestion():
+            # Benign partial-pre-emption wording: never "redundant/unreachable"
+            # and never an already-occupied move. Advise narrowing the
+            # higher-priority rule only if the overlap was unintended.
+            return (
+                "No change needed unless the overlap was unintended; if it was, "
+                "constrain the higher-priority rule at line {hl} "
+                "(add flow keywords, tighten scope, or adjust the country "
+                "qualifier) so it no longer pre-empts the rule at line {ll}."
+            ).format(hl=higher_line, ll=lower_line_num)
+
+        result = None
+
         if (higher_priority_rule.action in ['drop', 'reject'] and 
             lower_priority_rule.action == 'pass'):
-            
-            issue = (f"{higher_type_name} rule at line {higher_line} ({higher_type_label}) "
-                    f"will be processed before {lower_type_name} rule at line {lower_line_num} due to protocol layering, "
-                    f"potentially blocking traffic that should be allowed")
-            
-            suggestion = f"Move line {lower_line_num} above line {higher_line} or add flow keywords to line {higher_line} to make it more specific"
-            
-            return {
+            action_kind = 'block_pass'
+            if informational:
+                issue = _informational_issue(
+                    "traffic the higher-priority rule is scoped to block")
+                suggestion = _reframed_suggestion()
+            else:
+                issue = (f"{higher_type_name} rule at line {higher_line} ({higher_type_label}) "
+                        f"will be processed before {lower_type_name} rule at line {lower_line_num} due to protocol layering, "
+                        f"potentially blocking traffic that should be allowed")
+                suggestion = self.file_order_suggestion(
+                    upper_line, lower_line, higher_priority_is_upper, action_kind)
+            result = {
                 'upper_rule': upper_rule,
                 'lower_rule': lower_rule,
                 'upper_line': upper_line,
@@ -1631,14 +2385,18 @@ class RuleAnalyzer:
         
         elif (higher_priority_rule.action == 'pass' and 
               lower_priority_rule.action in ['drop', 'reject']):
-            
-            issue = (f"{higher_type_name} rule at line {higher_line} ({higher_type_label}) "
-                    f"will be processed before {lower_type_name} rule at line {lower_line_num} due to protocol layering, "
-                    f"potentially allowing traffic that should be blocked")
-            
-            suggestion = f"Move line {lower_line_num} above line {higher_line} or add flow keywords to line {higher_line} to make it more specific"
-            
-            return {
+            action_kind = 'allow_block'
+            if informational:
+                issue = _informational_issue(
+                    "traffic the higher-priority rule is scoped to allow")
+                suggestion = _reframed_suggestion()
+            else:
+                issue = (f"{higher_type_name} rule at line {higher_line} ({higher_type_label}) "
+                        f"will be processed before {lower_type_name} rule at line {lower_line_num} due to protocol layering, "
+                        f"potentially allowing traffic that should be blocked")
+                suggestion = self.file_order_suggestion(
+                    upper_line, lower_line, higher_priority_is_upper, action_kind)
+            result = {
                 'upper_rule': upper_rule,
                 'lower_rule': lower_rule,
                 'upper_line': upper_line,
@@ -1650,14 +2408,18 @@ class RuleAnalyzer:
         
         elif (higher_priority_rule.action in ['drop', 'reject'] and 
               lower_priority_rule.action == 'alert'):
-            
-            issue = (f"{higher_type_name} rule at line {higher_line} ({higher_type_label}) "
-                    f"will be processed before {lower_type_name} rule at line {lower_line_num} due to protocol layering, "
-                    f"preventing alerts from being generated")
-            
-            suggestion = f"Move line {lower_line_num} above line {higher_line} or add flow keywords to line {higher_line} to make it more specific"
-            
-            return {
+            action_kind = 'block_alert'
+            if informational:
+                issue = _informational_issue(
+                    "traffic the higher-priority rule is scoped to block")
+                suggestion = _reframed_suggestion()
+            else:
+                issue = (f"{higher_type_name} rule at line {higher_line} ({higher_type_label}) "
+                        f"will be processed before {lower_type_name} rule at line {lower_line_num} due to protocol layering, "
+                        f"preventing alerts from being generated")
+                suggestion = self.file_order_suggestion(
+                    upper_line, lower_line, higher_priority_is_upper, action_kind)
+            result = {
                 'upper_rule': upper_rule,
                 'lower_rule': lower_rule,
                 'upper_line': upper_line,
@@ -1669,14 +2431,18 @@ class RuleAnalyzer:
         
         elif (higher_priority_rule.action in ['drop', 'reject'] and 
               lower_priority_rule.action in ['drop', 'reject']):
-            
-            issue = (f"{higher_type_name} rule at line {higher_line} ({higher_type_label}) "
-                    f"will be processed before {lower_type_name} rule at line {lower_line_num} due to protocol layering, "
-                    f"making the lower rule redundant")
-            
-            suggestion = f"Consider removing line {lower_line_num} (unreachable) or move it above line {higher_line}"
-            
-            return {
+            action_kind = 'redundant'
+            if informational:
+                issue = _informational_issue(
+                    "traffic the higher-priority rule is scoped to block")
+                suggestion = _reframed_suggestion()
+            else:
+                issue = (f"{higher_type_name} rule at line {higher_line} ({higher_type_label}) "
+                        f"will be processed before {lower_type_name} rule at line {lower_line_num} due to protocol layering, "
+                        f"making the lower rule redundant")
+                suggestion = self.file_order_suggestion(
+                    upper_line, lower_line, higher_priority_is_upper, action_kind)
+            result = {
                 'upper_rule': upper_rule,
                 'lower_rule': lower_rule,
                 'upper_line': upper_line,
@@ -1686,7 +2452,13 @@ class RuleAnalyzer:
                 'suggestion': suggestion
             }
         
-        return None
+        if result is None:
+            return None
+        
+        # Category is always Protocol_Layering; Severity is Informational for the
+        # reframe cases, Warning by default (Requirements 6.1-6.3).
+        sev = Severity.INFORMATIONAL if informational else Severity.WARNING
+        return tag_finding(result, Category.PROTOCOL_LAYERING, sev)
     
     def rules_could_match_same_traffic(self, rule1: SuricataRule, rule2: SuricataRule, variables: Dict[str, str]) -> bool:
         """Check if two rules could potentially match the same traffic"""
@@ -2015,6 +2787,53 @@ class RuleAnalyzer:
         
         return True
     
+    def _provably_disjoint_concrete_vs_negation(self, a: str, b: str, variables: Dict[str, str]) -> bool:
+        """Return ``True`` ONLY when non-overlap of ``a`` and ``b`` is PROVABLE.
+
+        Security-sensitive. Proves disjointness only when one side is a clean
+        concrete CIDR / union of concrete CIDRs and the other side is a
+        Simple_Negation ``!S`` of a fully-resolvable set, AND every concrete
+        CIDR is WHOLLY CONTAINED in some network of ``S`` (so it lies entirely
+        outside ``!S``). Every uncertainty — unresolved variable, non-fully-
+        resolvable negated set, partial containment, compound/mixed/bracketed
+        negation, non-concrete other side, or ANY exception — returns ``False``
+        (not proven), so the caller falls through to its conservative logic.
+
+        The entire body is wrapped so it can NEVER raise and can NEVER
+        accidentally prove disjointness on an error (degrades to ``False``).
+        """
+        try:
+            def _proves(neg_side, concrete_side):
+                negated = self._resolve_negated_set(neg_side, variables)
+                if negated is None:
+                    return False
+                concrete = self._resolve_concrete_cidrs(concrete_side, variables)
+                if concrete is None:
+                    return False
+                # Full_Containment: every concrete CIDR must be wholly inside
+                # some network of the negated set.
+                for cn in concrete:
+                    contained = False
+                    for sn in negated:
+                        if cn == sn:
+                            contained = True
+                            break
+                        try:
+                            if cn.subnet_of(sn):
+                                contained = True
+                                break
+                        except TypeError:
+                            # Cross-version (IPv4 vs IPv6) comparison: not
+                            # contained; do NOT prove disjointness.
+                            continue
+                    if not contained:
+                        return False
+                return True
+
+            return _proves(a, b) or _proves(b, a)
+        except Exception:
+            return False
+
     def networks_overlap_loose(self, net1: str, net2: str, variables: Dict[str, str]) -> bool:
         """Check if two networks overlap (looser check than exact shadowing)
         
@@ -2024,7 +2843,17 @@ class RuleAnalyzer:
             return True
         if net1 == 'any' or net2 == 'any':
             return True
-        
+
+        # --- additive provable-disjointness pre-check (Part 1) ---
+        # Returns False ONLY when non-overlap is provable with certainty: one
+        # side is a concrete CIDR / clean union and the other is a simple
+        # negation !S of a fully-resolvable set with every concrete CIDR wholly
+        # contained in S. Any uncertainty falls through to the conservative
+        # logic below (unchanged).
+        if self._provably_disjoint_concrete_vs_negation(net1, net2, variables):
+            return False
+        # --- end pre-check; existing behavior unchanged from here down ---
+
         # Parse both network specifications
         parsed_net1 = self._parse_network_specification(net1, variables)
         parsed_net2 = self._parse_network_specification(net2, variables)
@@ -3276,6 +4105,52 @@ class RuleAnalyzer:
         
         return forward_match
     
+    def _is_concrete_port(self, port: str) -> bool:
+        """Return True when ``port`` is a concrete port constraint.
+
+        A field is concrete when, after stripping, it is non-empty and not
+        case-insensitively ``any``. Unlike ``check_port_protocol_mismatch``,
+        this does NOT skip ``$``/``@``/``[`` tokens: a variable, namespaced, or
+        list port counts as concrete (only empty/``any`` are non-concrete).
+        """
+        p = (port or '').strip()
+        return bool(p) and p.lower() != 'any'
+
+    def check_port_on_portless_protocol(self, rules: List[SuricataRule]) -> List[Dict]:
+        """Flag ip/icmp rules carrying a concrete port (INFORMATIONAL).
+
+        The ``ip`` and ``icmp`` protocols match at the network layer, which has
+        no port concept, so Suricata ignores any port on such a rule. Emits
+        exactly one Informational finding per ip/icmp rule that has a concrete
+        src OR dst port (the ``or`` short-circuits into a single append).
+        """
+        issues = []
+
+        # Filter out comments and blank lines
+        actual_rules = [r for r in rules if not getattr(r, 'is_comment', False) and not getattr(r, 'is_blank', False)]
+
+        for rule in actual_rules:
+            line_num = rules.index(rule) + 1
+            protocol = rule.protocol.lower()
+            if protocol in ('ip', 'icmp') and (
+                    self._is_concrete_port(rule.src_port)
+                    or self._is_concrete_port(rule.dst_port)):
+                issue = {
+                    'line': line_num,
+                    'rule': rule,
+                    'issue': ("The '%s' protocol matches at the network layer, which has no "
+                              "port concept, so Suricata ignores the port on this rule. The "
+                              "rule actually matches ALL traffic to/from the specified "
+                              "networks regardless of port." % protocol),
+                    'suggestion': ("If port scoping was intended, use a port-bearing protocol "
+                                   "(tcp/udp/dns/etc.). Otherwise set the port to 'any' to "
+                                   "reflect what the rule actually matches."),
+                    'severity': 'informational',
+                }
+                issues.append(issue)
+
+        return issues
+
     def check_reject_on_ip_protocol(self, rules: List[SuricataRule]) -> List[Dict]:
         """Check for reject actions on IP protocol rules (AWS Network Firewall restriction)
         
@@ -3633,15 +4508,42 @@ class RuleAnalyzer:
     def _cross_group_suggestion(self, conflict, attr_data) -> str:
         """Build group-aware action text for a cross-group finding (Req 7.8).
 
-        Uses the upper (earlier-evaluated) and lower rules' source groups to
-        tell the user to ensure the group that must take effect is evaluated
-        first (move it higher in the list), or to move the rule between groups.
+        Two cases, because the correct remedy differs:
+
+        * Cross-group SHADOWING (same rule-type; one group's rule genuinely
+          overrides another's because its group evaluates first): reordering the
+          GROUPS does change which rule wins, so advise ensuring the group that
+          must take effect is evaluated first (move it higher in the list), or
+          moving the rule between groups. This is today's text and is correct
+          for shadowing findings.
+        * Cross-group PROTOCOL LAYERING (inter-type: an IP-only / lower-level
+          rule is processed before an app-layer rule REGARDLESS of file or group
+          order): reordering the groups does NOT help, because Suricata's
+          processing order is determined by rule TYPE, not position. So for a
+          protocol-layering finding we must NOT advise a group move; instead
+          advise constraining the earlier-processed (higher-priority) rule so it
+          is no longer processed ahead of the app-layer rule. This mirrors the
+          intra-file ``file_order_suggestion`` fix, which likewise never advises
+          a (futile) reorder for inter-type findings.
         """
         refs = attr_data.get("refs", {}) if isinstance(attr_data, dict) else {}
         upper_attr = (refs.get("upper_line") or refs.get("line1") or {}).get("attribution")
         lower_attr = (refs.get("lower_line") or refs.get("line2") or {}).get("attribution")
         upper_name = upper_attr.group_name if upper_attr is not None else "the earlier group"
         lower_name = lower_attr.group_name if lower_attr is not None else "the later group"
+
+        # Protocol-layering findings are inter-type; a group reorder cannot
+        # change type-based processing order, so advise constraining the
+        # higher-priority (earlier-processed) rule instead.
+        if conflict.get("severity") == "protocol_layering":
+            return (
+                f"Reordering the rule groups will not change this (Suricata "
+                f"processes rules by type, not group or file position); "
+                f"constrain the higher-priority rule in {upper_name} (add flow "
+                f"keywords, tighten its scope, or use a port-bearing protocol so "
+                f"it is no longer processed as IP-only ahead of the rule in "
+                f"{lower_name}), or leave as-is if the pre-emption is intended."
+            )
         return (
             f"Ensure {lower_name} is evaluated before {upper_name} "
             f"(move it higher in the list), or move the affected rule into an "
@@ -3760,8 +4662,8 @@ class RuleAnalyzer:
             for i, conflict in enumerate(conflicts['protocol_layering'], 1):
                 report += f"{i}. {self._line_ref_for_field(conflict, 'upper_line', attribution)} vs {self._line_ref_for_field(conflict, 'lower_line', attribution)}\n"
                 report += f"   Issue: {conflict['issue']}\n"
-                report += f"   Upper: {conflict['upper_rule'].to_string()[:80]}...\n"
-                report += f"   Lower: {conflict['lower_rule'].to_string()[:80]}...\n"
+                report += f"   Upper: {self._export_rule_text(conflict['upper_rule'])}\n"
+                report += f"   Lower: {self._export_rule_text(conflict['lower_rule'])}\n"
                 report += f"   Action: {self._suggestion_text(conflict, attribution)}\n\n"
         
         # Critical issues (displayed second)
@@ -3771,8 +4673,8 @@ class RuleAnalyzer:
             for i, conflict in enumerate(conflicts['critical'], 1):
                 report += f"{i}. {self._line_ref_for_field(conflict, 'upper_line', attribution)} shadows {self._line_ref_for_field(conflict, 'lower_line', attribution)}\n"
                 report += f"   Issue: {conflict['issue']}\n"
-                report += f"   Upper: {conflict['upper_rule'].to_string()[:80]}...\n"
-                report += f"   Lower: {conflict['lower_rule'].to_string()[:80]}...\n"
+                report += f"   Upper: {self._export_rule_text(conflict['upper_rule'])}\n"
+                report += f"   Lower: {self._export_rule_text(conflict['lower_rule'])}\n"
                 report += f"   Action: {self._suggestion_text(conflict, attribution)}\n\n"
         
         # Warning issues
@@ -3782,8 +4684,8 @@ class RuleAnalyzer:
             for i, conflict in enumerate(conflicts['warning'], 1):
                 report += f"{i}. {self._line_ref_for_field(conflict, 'upper_line', attribution)} shadows {self._line_ref_for_field(conflict, 'lower_line', attribution)}\n"
                 report += f"   Issue: {conflict['issue']}\n"
-                report += f"   Upper: {conflict['upper_rule'].to_string()[:80]}...\n"
-                report += f"   Lower: {conflict['lower_rule'].to_string()[:80]}...\n"
+                report += f"   Upper: {self._export_rule_text(conflict['upper_rule'])}\n"
+                report += f"   Lower: {self._export_rule_text(conflict['lower_rule'])}\n"
                 report += f"   Action: {self._suggestion_text(conflict, attribution)}\n\n"
         
         # Info issues
@@ -3793,8 +4695,8 @@ class RuleAnalyzer:
             for i, conflict in enumerate(conflicts['info'], 1):
                 report += f"{i}. {self._line_ref_for_field(conflict, 'upper_line', attribution)} shadows {self._line_ref_for_field(conflict, 'lower_line', attribution)}\n"
                 report += f"   Issue: {conflict['issue']}\n"
-                report += f"   Upper: {conflict['upper_rule'].to_string()[:80]}...\n"
-                report += f"   Lower: {conflict['lower_rule'].to_string()[:80]}...\n"
+                report += f"   Upper: {self._export_rule_text(conflict['upper_rule'])}\n"
+                report += f"   Lower: {self._export_rule_text(conflict['lower_rule'])}\n"
                 report += f"   Action: {self._suggestion_text(conflict, attribution)}\n\n"
         
         # Sticky buffer ordering issues
@@ -3804,7 +4706,7 @@ class RuleAnalyzer:
             for i, issue in enumerate(conflicts['sticky_buffer_order'], 1):
                 report += f"{i}. {self._line_ref_for_field(issue, 'line', attribution)}\n"
                 report += f"   Issue: {issue['issue']}\n"
-                report += f"   Rule: {issue['rule'].to_string()[:80]}...\n"
+                report += f"   Rule: {self._export_rule_text(issue['rule'])}\n"
                 report += f"   Action: {issue['suggestion']}\n\n"
         
         # UDP flow:established issues
@@ -3814,7 +4716,7 @@ class RuleAnalyzer:
             for i, issue in enumerate(conflicts['udp_flow_established'], 1):
                 report += f"{i}. {self._line_ref_for_field(issue, 'line', attribution)} - {issue['protocol']} {issue['action']} rule\n"
                 report += f"   Issue: {issue['issue']}\n"
-                report += f"   Rule: {issue['rule'].to_string()[:80]}...\n"
+                report += f"   Rule: {self._export_rule_text(issue['rule'])}\n"
                 report += f"   Action: {issue['suggestion']}\n\n"
         
         # Protocol/keyword mismatch issues (can contain both WARNING and INFO severity)
@@ -3831,7 +4733,7 @@ class RuleAnalyzer:
                 severity_icon = "⚠️" if issue['severity'] == 'warning' else "ℹ️"
                 report += f"{i}. {severity_icon} {self._line_ref_for_field(issue, 'line', attribution)}\n"
                 report += f"   Issue: {issue['issue']}\n"
-                report += f"   Rule: {issue['rule'].to_string()[:80]}...\n"
+                report += f"   Rule: {self._export_rule_text(issue['rule'])}\n"
                 report += f"   Suggestion: {issue['suggestion']}\n\n"
         
         # Port/protocol mismatch issues
@@ -3841,7 +4743,17 @@ class RuleAnalyzer:
             for i, issue in enumerate(conflicts['port_protocol_mismatch'], 1):
                 report += f"{i}. {self._line_ref_for_field(issue, 'line', attribution)}\n"
                 report += f"   Issue: {issue['issue']}\n"
-                report += f"   Rule: {issue['rule'].to_string()[:80]}...\n"
+                report += f"   Rule: {self._export_rule_text(issue['rule'])}\n"
+                report += f"   Suggestion: {issue['suggestion']}\n\n"
+        
+        # Port on portless (ip/icmp) protocol issues
+        if conflicts.get('port_on_portless_protocol'):
+            report += f"ℹ️ PORT ON PORTLESS PROTOCOL (INFO) ({len(conflicts['port_on_portless_protocol'])})\n"
+            report += f"-" * 30 + "\n"
+            for i, issue in enumerate(conflicts['port_on_portless_protocol'], 1):
+                report += f"{i}. {self._line_ref_for_field(issue, 'line', attribution)}\n"
+                report += f"   Issue: {issue['issue']}\n"
+                report += f"   Rule: {self._export_rule_text(issue['rule'])}\n"
                 report += f"   Suggestion: {issue['suggestion']}\n\n"
         
         # Contradictory flow keywords
@@ -3851,7 +4763,7 @@ class RuleAnalyzer:
             for i, issue in enumerate(conflicts['contradictory_flow'], 1):
                 report += f"{i}. {self._line_ref_for_field(issue, 'line', attribution)}\n"
                 report += f"   Issue: {issue['issue']}\n"
-                report += f"   Rule: {issue['rule'].to_string()[:80]}...\n"
+                report += f"   Rule: {self._export_rule_text(issue['rule'])}\n"
                 report += f"   Suggestion: {issue['suggestion']}\n\n"
         
         # Packet-scope DROP/REJECT vs flow-scope PASS conflicts
@@ -3861,8 +4773,8 @@ class RuleAnalyzer:
             for i, issue in enumerate(conflicts['packet_drop_flow_pass'], 1):
                 report += f"{i}. {self._line_ref_for_field(issue, 'line1', attribution)} vs {self._line_ref_for_field(issue, 'line2', attribution)}\n"
                 report += f"   Issue: {issue['issue']}\n"
-                report += f"   Upper: {issue['rule1'].to_string()[:80]}...\n"
-                report += f"   Lower: {issue['rule2'].to_string()[:80]}...\n"
+                report += f"   Upper: {self._export_rule_text(issue['rule1'])}\n"
+                report += f"   Lower: {self._export_rule_text(issue['rule2'])}\n"
                 report += f"   Suggestion: {self._suggestion_text(issue, attribution)}\n\n"
         
         # Asymmetric flow policy issues (both CRITICAL and WARNING severities)
@@ -3900,7 +4812,7 @@ class RuleAnalyzer:
             for i, issue in enumerate(conflicts['reject_ip_protocol'], 1):
                 report += f"{i}. {self._line_ref_for_field(issue, 'line', attribution)}\n"
                 report += f"   Issue: {issue['issue']}\n"
-                report += f"   Rule: {issue['rule'].to_string()[:80]}...\n"
+                report += f"   Rule: {self._export_rule_text(issue['rule'])}\n"
                 report += f"   Suggestion: {issue['suggestion']}\n\n"
         
         # Reject on QUIC protocol issues (AWS Network Firewall restriction)
@@ -3910,7 +4822,7 @@ class RuleAnalyzer:
             for i, issue in enumerate(conflicts['reject_quic_protocol'], 1):
                 report += f"{i}. {self._line_ref_for_field(issue, 'line', attribution)}\n"
                 report += f"   Issue: {issue['issue']}\n"
-                report += f"   Rule: {issue['rule'].to_string()[:80]}...\n"
+                report += f"   Rule: {self._export_rule_text(issue['rule'])}\n"
                 report += f"   Suggestion: {issue['suggestion']}\n\n"
         
         # AWS Network Firewall: Unsupported keywords (CRITICAL)
@@ -3920,7 +4832,7 @@ class RuleAnalyzer:
             for i, issue in enumerate(conflicts['unsupported_keywords'], 1):
                 report += f"{i}. {self._line_ref_for_field(issue, 'line', attribution)} - Keyword: '{issue['keyword']}'\n"
                 report += f"   Issue: {issue['issue']}\n"
-                report += f"   Rule: {issue['rule'].to_string()[:80]}...\n"
+                report += f"   Rule: {self._export_rule_text(issue['rule'])}\n"
                 report += f"   Suggestion: {issue['suggestion']}\n\n"
         
         # AWS Network Firewall: PCRE restrictions (CRITICAL)
@@ -3930,7 +4842,7 @@ class RuleAnalyzer:
             for i, issue in enumerate(conflicts['pcre_restrictions'], 1):
                 report += f"{i}. {self._line_ref_for_field(issue, 'line', attribution)}\n"
                 report += f"   Issue: {issue['issue']}\n"
-                report += f"   Rule: {issue['rule'].to_string()[:80]}...\n"
+                report += f"   Rule: {self._export_rule_text(issue['rule'])}\n"
                 report += f"   Suggestion: {issue['suggestion']}\n\n"
         
         # AWS Network Firewall: Threshold keyword (limited support - WARNING)
@@ -3940,7 +4852,7 @@ class RuleAnalyzer:
             for i, issue in enumerate(conflicts['threshold_limited'], 1):
                 report += f"{i}. {self._line_ref_for_field(issue, 'line', attribution)}\n"
                 report += f"   Issue: {issue['issue']}\n"
-                report += f"   Rule: {issue['rule'].to_string()[:80]}...\n"
+                report += f"   Rule: {self._export_rule_text(issue['rule'])}\n"
                 report += f"   Suggestion: {issue['suggestion']}\n\n"
         
         # AWS Network Firewall: Priority keyword in strict order (WARNING)
@@ -3950,7 +4862,7 @@ class RuleAnalyzer:
             for i, issue in enumerate(conflicts['priority_strict_order'], 1):
                 report += f"{i}. {self._line_ref_for_field(issue, 'line', attribution)}\n"
                 report += f"   Issue: {issue['issue']}\n"
-                report += f"   Rule: {issue['rule'].to_string()[:80]}...\n"
+                report += f"   Rule: {self._export_rule_text(issue['rule'])}\n"
                 report += f"   Suggestion: {issue['suggestion']}\n\n"
         
         report += "\nRECOMMENDATIONS:\n"
@@ -3986,6 +4898,14 @@ class RuleAnalyzer:
         elif home_net:
             html += f"<strong>Policy $HOME_NET:</strong> {home_net}"
         return html
+
+    def _export_rule_text(self, rule):
+        # type: (...) -> str
+        """Render a rule for the text/HTML/PDF export using the un-namespaced
+        source rule, so user-authored variables (e.g. ``$HOME_NET``) are shown
+        rather than the internal ``$g<idx>__NAME`` form, and showing the full
+        rule text (no truncation)."""
+        return self._source_rule(rule).to_string()
 
     def generate_html_report(self, conflicts: Dict[str, List[Dict]], 
                            total_rules: int, current_file: str = None, 
@@ -4074,8 +4994,8 @@ class RuleAnalyzer:
                     html += f'<strong>{i}. {self._line_ref_for_field(conflict, "upper_line", attribution)} vs {self._line_ref_for_field(conflict, "lower_line", attribution)}</strong><br>'
                     html += f'<strong>Issue:</strong> {conflict["issue"]}<br>'
                     html += f'<strong>Action:</strong> {self._suggestion_text(conflict, attribution)}<br>'
-                    html += f'<div class="rule-text">Upper: {conflict["upper_rule"].to_string()[:100]}...</div>'
-                    html += f'<div class="rule-text">Lower: {conflict["lower_rule"].to_string()[:100]}...</div>'
+                    html += f'<div class="rule-text">Upper: {self._export_rule_text(conflict["upper_rule"])}</div>'
+                    html += f'<div class="rule-text">Lower: {self._export_rule_text(conflict["lower_rule"])}</div>'
                     html += '</div>'
             
             # Critical issues (displayed second)
@@ -4086,8 +5006,8 @@ class RuleAnalyzer:
                     html += f'<strong>{i}. {self._line_ref_for_field(conflict, "upper_line", attribution)} shadows {self._line_ref_for_field(conflict, "lower_line", attribution)}</strong><br>'
                     html += f'<strong>Issue:</strong> {conflict["issue"]}<br>'
                     html += f'<strong>Action:</strong> {self._suggestion_text(conflict, attribution)}<br>'
-                    html += f'<div class="rule-text">Upper: {conflict["upper_rule"].to_string()[:100]}...</div>'
-                    html += f'<div class="rule-text">Lower: {conflict["lower_rule"].to_string()[:100]}...</div>'
+                    html += f'<div class="rule-text">Upper: {self._export_rule_text(conflict["upper_rule"])}</div>'
+                    html += f'<div class="rule-text">Lower: {self._export_rule_text(conflict["lower_rule"])}</div>'
                     html += '</div>'
             
             # Warning issues
@@ -4098,8 +5018,8 @@ class RuleAnalyzer:
                     html += f'<strong>{i}. {self._line_ref_for_field(conflict, "upper_line", attribution)} shadows {self._line_ref_for_field(conflict, "lower_line", attribution)}</strong><br>'
                     html += f'<strong>Issue:</strong> {conflict["issue"]}<br>'
                     html += f'<strong>Action:</strong> {self._suggestion_text(conflict, attribution)}<br>'
-                    html += f'<div class="rule-text">Upper: {conflict["upper_rule"].to_string()[:100]}...</div>'
-                    html += f'<div class="rule-text">Lower: {conflict["lower_rule"].to_string()[:100]}...</div>'
+                    html += f'<div class="rule-text">Upper: {self._export_rule_text(conflict["upper_rule"])}</div>'
+                    html += f'<div class="rule-text">Lower: {self._export_rule_text(conflict["lower_rule"])}</div>'
                     html += '</div>'
             
             # Info issues
@@ -4110,8 +5030,8 @@ class RuleAnalyzer:
                     html += f'<strong>{i}. {self._line_ref_for_field(conflict, "upper_line", attribution)} shadows {self._line_ref_for_field(conflict, "lower_line", attribution)}</strong><br>'
                     html += f'<strong>Issue:</strong> {conflict["issue"]}<br>'
                     html += f'<strong>Action:</strong> {self._suggestion_text(conflict, attribution)}<br>'
-                    html += f'<div class="rule-text">Upper: {conflict["upper_rule"].to_string()[:100]}...</div>'
-                    html += f'<div class="rule-text">Lower: {conflict["lower_rule"].to_string()[:100]}...</div>'
+                    html += f'<div class="rule-text">Upper: {self._export_rule_text(conflict["upper_rule"])}</div>'
+                    html += f'<div class="rule-text">Lower: {self._export_rule_text(conflict["lower_rule"])}</div>'
                     html += '</div>'
             
             # Sticky buffer ordering issues
@@ -4122,7 +5042,7 @@ class RuleAnalyzer:
                     html += f'<strong>{i}. {self._line_ref_for_field(issue, "line", attribution)}</strong><br>'
                     html += f'<strong>Issue:</strong> {issue["issue"]}<br>'
                     html += f'<strong>Action:</strong> {issue["suggestion"]}<br>'
-                    html += f'<div class="rule-text">Rule: {issue["rule"].to_string()[:100]}...</div>'
+                    html += f'<div class="rule-text">Rule: {self._export_rule_text(issue["rule"])}</div>'
                     html += '</div>'
             
             # UDP flow:established issues
@@ -4133,7 +5053,7 @@ class RuleAnalyzer:
                     html += f'<strong>{i}. {self._line_ref_for_field(issue, "line", attribution)} - {issue["protocol"]} {issue["action"]} rule</strong><br>'
                     html += f'<strong>Issue:</strong> {issue["issue"]}<br>'
                     html += f'<strong>Action:</strong> {issue["suggestion"]}<br>'
-                    html += f'<div class="rule-text">Rule: {issue["rule"].to_string()[:100]}...</div>'
+                    html += f'<div class="rule-text">Rule: {self._export_rule_text(issue["rule"])}</div>'
                     html += '</div>'
             
             # Protocol/keyword mismatch issues (can contain both WARNING and INFO severity)
@@ -4155,7 +5075,7 @@ class RuleAnalyzer:
                     html += f'<strong>{i}. {severity_icon} {self._line_ref_for_field(issue, "line", attribution)}</strong><br>'
                     html += f'<strong>Issue:</strong> {issue["issue"]}<br>'
                     html += f'<strong>Suggestion:</strong> {issue["suggestion"]}<br>'
-                    html += f'<div class="rule-text">Rule: {issue["rule"].to_string()[:100]}...</div>'
+                    html += f'<div class="rule-text">Rule: {self._export_rule_text(issue["rule"])}</div>'
                     html += '</div>'
             
             # Port/protocol mismatch issues
@@ -4166,7 +5086,18 @@ class RuleAnalyzer:
                     html += f'<strong>{i}. {self._line_ref_for_field(issue, "line", attribution)}</strong><br>'
                     html += f'<strong>Issue:</strong> {issue["issue"]}<br>'
                     html += f'<strong>Suggestion:</strong> {issue["suggestion"]}<br>'
-                    html += f'<div class="rule-text">Rule: {issue["rule"].to_string()[:100]}...</div>'
+                    html += f'<div class="rule-text">Rule: {self._export_rule_text(issue["rule"])}</div>'
+                    html += '</div>'
+            
+            # Port on portless (ip/icmp) protocol issues
+            if conflicts.get('port_on_portless_protocol'):
+                html += f'<h2 class="info">ℹ️ PORT ON PORTLESS PROTOCOL (INFO) ({len(conflicts["port_on_portless_protocol"])})</h2>'
+                for i, issue in enumerate(conflicts['port_on_portless_protocol'], 1):
+                    html += f'<div class="conflict conflict-info">'
+                    html += f'<strong>{i}. {self._line_ref_for_field(issue, "line", attribution)}</strong><br>'
+                    html += f'<strong>Issue:</strong> {issue["issue"]}<br>'
+                    html += f'<strong>Suggestion:</strong> {issue["suggestion"]}<br>'
+                    html += f'<div class="rule-text">Rule: {self._export_rule_text(issue["rule"])}</div>'
                     html += '</div>'
             
             # Contradictory flow keywords
@@ -4177,7 +5108,7 @@ class RuleAnalyzer:
                     html += f'<strong>{i}. {self._line_ref_for_field(issue, "line", attribution)}</strong><br>'
                     html += f'<strong>Issue:</strong> {issue["issue"]}<br>'
                     html += f'<strong>Suggestion:</strong> {issue["suggestion"]}<br>'
-                    html += f'<div class="rule-text">Rule: {issue["rule"].to_string()[:100]}...</div>'
+                    html += f'<div class="rule-text">Rule: {self._export_rule_text(issue["rule"])}</div>'
                     html += '</div>'
             
             # Packet-scope DROP/REJECT vs flow-scope PASS conflicts
@@ -4188,8 +5119,8 @@ class RuleAnalyzer:
                     html += f'<strong>{i}. {self._line_ref_for_field(issue, "line1", attribution)} vs {self._line_ref_for_field(issue, "line2", attribution)}</strong><br>'
                     html += f'<strong>Issue:</strong> {issue["issue"]}<br>'
                     html += f'<strong>Suggestion:</strong> {self._suggestion_text(issue, attribution)}<br>'
-                    html += f'<div class="rule-text">Upper: {issue["rule1"].to_string()[:100]}...</div>'
-                    html += f'<div class="rule-text">Lower: {issue["rule2"].to_string()[:100]}...</div>'
+                    html += f'<div class="rule-text">Upper: {self._export_rule_text(issue["rule1"])}</div>'
+                    html += f'<div class="rule-text">Lower: {self._export_rule_text(issue["rule2"])}</div>'
                     html += '</div>'
             
             # Asymmetric flow policy issues (both CRITICAL and WARNING severities)
@@ -4229,7 +5160,7 @@ class RuleAnalyzer:
                     html += f'<strong>{i}. {self._line_ref_for_field(issue, "line", attribution)}</strong><br>'
                     html += f'<strong>Issue:</strong> {issue["issue"]}<br>'
                     html += f'<strong>Suggestion:</strong> {issue["suggestion"]}<br>'
-                    html += f'<div class="rule-text">Rule: {issue["rule"].to_string()[:100]}...</div>'
+                    html += f'<div class="rule-text">Rule: {self._export_rule_text(issue["rule"])}</div>'
                     html += '</div>'
             
             # Reject on QUIC protocol issues (AWS Network Firewall restriction)
@@ -4240,7 +5171,7 @@ class RuleAnalyzer:
                     html += f'<strong>{i}. {self._line_ref_for_field(issue, "line", attribution)}</strong><br>'
                     html += f'<strong>Issue:</strong> {issue["issue"]}<br>'
                     html += f'<strong>Suggestion:</strong> {issue["suggestion"]}<br>'
-                    html += f'<div class="rule-text">Rule: {issue["rule"].to_string()[:100]}...</div>'
+                    html += f'<div class="rule-text">Rule: {self._export_rule_text(issue["rule"])}</div>'
                     html += '</div>'
             
             # AWS Network Firewall: Unsupported keywords (CRITICAL)
@@ -4251,7 +5182,7 @@ class RuleAnalyzer:
                     html += f'<strong>{i}. {self._line_ref_for_field(issue, "line", attribution)} - Keyword: \'{issue["keyword"]}\'</strong><br>'
                     html += f'<strong>Issue:</strong> {issue["issue"]}<br>'
                     html += f'<strong>Suggestion:</strong> {issue["suggestion"]}<br>'
-                    html += f'<div class="rule-text">Rule: {issue["rule"].to_string()[:100]}...</div>'
+                    html += f'<div class="rule-text">Rule: {self._export_rule_text(issue["rule"])}</div>'
                     html += '</div>'
             
             # AWS Network Firewall: PCRE restrictions (CRITICAL)
@@ -4262,7 +5193,7 @@ class RuleAnalyzer:
                     html += f'<strong>{i}. {self._line_ref_for_field(issue, "line", attribution)}</strong><br>'
                     html += f'<strong>Issue:</strong> {issue["issue"]}<br>'
                     html += f'<strong>Suggestion:</strong> {issue["suggestion"]}<br>'
-                    html += f'<div class="rule-text">Rule: {issue["rule"].to_string()[:100]}...</div>'
+                    html += f'<div class="rule-text">Rule: {self._export_rule_text(issue["rule"])}</div>'
                     html += '</div>'
             
             # AWS Network Firewall: Threshold keyword (limited support - WARNING)
@@ -4273,7 +5204,7 @@ class RuleAnalyzer:
                     html += f'<strong>{i}. {self._line_ref_for_field(issue, "line", attribution)}</strong><br>'
                     html += f'<strong>Issue:</strong> {issue["issue"]}<br>'
                     html += f'<strong>Suggestion:</strong> {issue["suggestion"]}<br>'
-                    html += f'<div class="rule-text">Rule: {issue["rule"].to_string()[:100]}...</div>'
+                    html += f'<div class="rule-text">Rule: {self._export_rule_text(issue["rule"])}</div>'
                     html += '</div>'
             
             # AWS Network Firewall: Priority keyword in strict order (WARNING)
@@ -4284,7 +5215,7 @@ class RuleAnalyzer:
                     html += f'<strong>{i}. {self._line_ref_for_field(issue, "line", attribution)}</strong><br>'
                     html += f'<strong>Issue:</strong> {issue["issue"]}<br>'
                     html += f'<strong>Suggestion:</strong> {issue["suggestion"]}<br>'
-                    html += f'<div class="rule-text">Rule: {issue["rule"].to_string()[:100]}...</div>'
+                    html += f'<div class="rule-text">Rule: {self._export_rule_text(issue["rule"])}</div>'
                     html += '</div>'
         
         html += '''

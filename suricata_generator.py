@@ -2430,93 +2430,232 @@ class SuricataRuleGenerator:
         )
         
         if filename:
-            # Clear pending history from previous file
-            self.pending_history.clear()
-            
-            # Reset the session SID override anchor for the new file context
-            self.reset_sid_anchor()
-            
-            # Reset file session flag for upgrade prompt
-            if hasattr(self, '_file_upgrade_prompted'):
-                delattr(self, '_file_upgrade_prompted')
+            self._load_file_into_editor(filename)
 
-            # Reset AI Rule Assistant history for the new file context
-            if self.ai_panel is not None:
-                self.ai_panel.reset_session()
+    def _load_file_into_editor(self, filename):
+        """Load ``filename`` into the main editor (shared by File ▸ Open and the
+        jump-to-finding-rule different-file jump).
+
+        This is the VERBATIM post-``askopenfilename`` body ``open_file`` used to
+        run, factored out so both callers open files identically. It preserves
+        every step in order, including the v1.0 ``.var`` upgrade path that
+        legitimately sets ``modified = True`` — it is NOT an unconditional
+        ``modified = False``. The caller must select any target row only AFTER
+        this returns, since it finishes with
+        ``refresh_table(preserve_selection=False)``.
+        """
+        # Clear pending history from previous file
+        self.pending_history.clear()
+        
+        # Reset the session SID override anchor for the new file context
+        self.reset_sid_anchor()
+        
+        # Reset file session flag for upgrade prompt
+        if hasattr(self, '_file_upgrade_prompted'):
+            delattr(self, '_file_upgrade_prompted')
+
+        # Reset AI Rule Assistant history for the new file context
+        if self.ai_panel is not None:
+            self.ai_panel.reset_session()
+        
+        self.load_rules_from_file(filename)
+        self.current_file = filename
+        self.modified = False
+        self.selected_rule_index = None
+        
+        # Load tags from .var file and detect if upgrading from v1.0
+        var_filename = filename.replace('.suricata', '.var')
+        if not var_filename.endswith('.var'):
+            var_filename += '.var'
+        
+        # Detect .var file format before loading
+        was_v1_format = False
+        if os.path.exists(var_filename):
+            try:
+                with open(var_filename, 'r', encoding='utf-8') as f:
+                    import json
+                    raw_data = json.load(f)
+                # Use file_manager's format detection
+                format_version = self.file_manager.detect_var_format(raw_data)
+                was_v1_format = (format_version == '1.0')
+            except:
+                pass  # If can't read/parse, assume v2.0 or missing
+        
+        # Load tags from .var file
+        _, self.tags = self.file_manager.load_variables_file(filename)
+        
+        # If upgrading from v1.0 format, add default ManagedBy tag
+        if was_v1_format and 'ManagedBy' not in self.tags:
+            self.tags['ManagedBy'] = 'SuricataGenerator'
+            # Mark as modified so user knows to save the upgrade
+            self.modified = True
+        
+        # Refresh tags table to display loaded tags
+        self.refresh_tags_table()
+        
+        # Check for existing history file and auto-enable tracking
+        self.check_and_enable_existing_tracking()
+        
+        # Load GUIDs from history if tracking enabled
+        if self.tracking_enabled:
+            history_filename = self.current_file.replace('.suricata', '.history')
+            if not history_filename.endswith('.history'):
+                history_filename += '.history'
             
-            self.load_rules_from_file(filename)
-            self.current_file = filename
-            self.modified = False
-            self.selected_rule_index = None
+            if os.path.exists(history_filename):
+                from src.managers.revision_manager import RevisionManager
+                revision_manager = RevisionManager(history_filename)
+                self.rule_guids = revision_manager.extract_rule_guids()
+        
+        # Check if upgrade needed for revision tracking (only show once per file session)
+        if self.tracking_enabled:
+            history_filename = self.current_file.replace('.suricata', '.history')
+            if not history_filename.endswith('.history'):
+                history_filename += '.history'
             
-            # Load tags from .var file and detect if upgrading from v1.0
-            var_filename = filename.replace('.suricata', '.var')
-            if not var_filename.endswith('.var'):
-                var_filename += '.var'
-            
-            # Detect .var file format before loading
-            was_v1_format = False
-            if os.path.exists(var_filename):
-                try:
-                    with open(var_filename, 'r', encoding='utf-8') as f:
-                        import json
-                        raw_data = json.load(f)
-                    # Use file_manager's format detection
-                    format_version = self.file_manager.detect_var_format(raw_data)
-                    was_v1_format = (format_version == '1.0')
-                except:
-                    pass  # If can't read/parse, assume v2.0 or missing
-            
-            # Load tags from .var file
-            _, self.tags = self.file_manager.load_variables_file(filename)
-            
-            # If upgrading from v1.0 format, add default ManagedBy tag
-            if was_v1_format and 'ManagedBy' not in self.tags:
-                self.tags['ManagedBy'] = 'SuricataGenerator'
-                # Mark as modified so user knows to save the upgrade
-                self.modified = True
-            
-            # Refresh tags table to display loaded tags
-            self.refresh_tags_table()
-            
-            # Check for existing history file and auto-enable tracking
-            self.check_and_enable_existing_tracking()
-            
-            # Load GUIDs from history if tracking enabled
-            if self.tracking_enabled:
-                history_filename = self.current_file.replace('.suricata', '.history')
-                if not history_filename.endswith('.history'):
-                    history_filename += '.history'
+            if os.path.exists(history_filename):
+                from src.managers.revision_manager import RevisionManager
+                revision_manager = RevisionManager(history_filename)
+                needs_upgrade, version = revision_manager.detect_format_and_upgrade_needed()
                 
-                if os.path.exists(history_filename):
-                    from src.managers.revision_manager import RevisionManager
-                    revision_manager = RevisionManager(history_filename)
-                    self.rule_guids = revision_manager.extract_rule_guids()
-            
-            # Check if upgrade needed for revision tracking (only show once per file session)
-            if self.tracking_enabled:
-                history_filename = self.current_file.replace('.suricata', '.history')
-                if not history_filename.endswith('.history'):
-                    history_filename += '.history'
-                
-                if os.path.exists(history_filename):
-                    from src.managers.revision_manager import RevisionManager
-                    revision_manager = RevisionManager(history_filename)
-                    needs_upgrade, version = revision_manager.detect_format_and_upgrade_needed()
-                    
-                    # Show upgrade prompt once per file session
-                    if needs_upgrade and not getattr(self, '_file_upgrade_prompted', False):
-                        self._file_upgrade_prompted = True
-                        self.show_history_upgrade_prompt(revision_manager)
-            
-            self.update_status_bar()
-            # Refresh table without preserving selection to enable click-to-insert
-            self.refresh_table(preserve_selection=False)
-            self.root.title(f"Suricata Rule Generator - {os.path.basename(filename)}")
-            # Set up rule editor for new rule insertion
-            self.ui_manager.show_rule_editor()
-            self.set_default_editor_values()
-    
+                # Show upgrade prompt once per file session
+                if needs_upgrade and not getattr(self, '_file_upgrade_prompted', False):
+                    self._file_upgrade_prompted = True
+                    self.show_history_upgrade_prompt(revision_manager)
+        
+        self.update_status_bar()
+        # Refresh table without preserving selection to enable click-to-insert
+        self.refresh_table(preserve_selection=False)
+        self.root.title(f"Suricata Rule Generator - {os.path.basename(filename)}")
+        # Set up rule editor for new rule insertion
+        self.ui_manager.show_rule_editor()
+        self.set_default_editor_values()
+
+    def _select_rule_row(self, in_group_line):
+        """Select/scroll the main rules-table row for a 1-based ``in_group_line``.
+
+        Reuses ``show_jump_to_line_dialog``'s selection/scroll pattern: the
+        0-based child index ``in_group_line - 1`` into ``tree.get_children()``;
+        when out of range, fall back to ``self.placeholder_item`` if present,
+        else the last item, else do nothing (empty tree). (jump-to-finding-rule)
+        """
+        index = in_group_line - 1
+        all_items = self.tree.get_children()
+        if 0 <= index < len(all_items):
+            target_item = all_items[index]
+            self.tree.selection_set(target_item)
+            self.tree.focus(target_item)
+            self.tree.see(target_item)
+            return
+        # Out of range — placeholder first, then last item, else nothing.
+        if self.placeholder_item:
+            self.tree.selection_set(self.placeholder_item)
+            self.tree.focus(self.placeholder_item)
+            self.tree.see(self.placeholder_item)
+        elif all_items:
+            last_item = all_items[-1]
+            self.tree.selection_set(last_item)
+            self.tree.focus(last_item)
+            self.tree.see(last_item)
+
+    def _select_rule_by_sid(self, expected_sid):
+        """Select the rules-table row whose real rule has ``expected_sid``.
+
+        ``self.rules`` is index-aligned with ``self.tree`` children (refresh_table
+        inserts one row per entry in order, including comment/blank rows), so the
+        matching rule's list index is also its tree-row index. Comment and blank
+        entries are skipped (a comment/blank ``SuricataRule`` defaults ``sid`` to
+        1 and must never be matched). Returns True when a unique real rule with
+        that SID was found and selected, False otherwise (no SID given, no match,
+        or a defensive error) so the caller can fall back to line navigation.
+        (jump-to-finding-rule feature.)
+        """
+        if expected_sid is None:
+            return False
+        try:
+            items = self.tree.get_children()
+            for index, rule in enumerate(self.rules):
+                if getattr(rule, 'is_comment', False) or getattr(rule, 'is_blank', False):
+                    continue
+                if getattr(rule, 'sid', None) != expected_sid:
+                    continue
+                if index >= len(items):
+                    return False
+                target_item = items[index]
+                self.tree.selection_set(target_item)
+                self.tree.focus(target_item)
+                self.tree.see(target_item)
+                return True
+        except (tk.TclError, AttributeError):
+            return False
+        return False
+
+    def jump_to_finding_rule(self, file_path, in_group_line, expected_sid,
+                             report_window):
+        """Jump from a report finding to its referenced rule in the main editor.
+
+        Same-file: select the row only (no prompt, no reload). Different-file:
+        guard the file's existence, run File ▸ Open's full save gate (both
+        ``ask_save_changes`` and ``ask_save_pending_changes``) — a Cancel at
+        either gate, a failed save, or a missing/unloadable file aborts cleanly
+        (report stays open, no file switched). On proceed, load the file via
+        ``_load_file_into_editor``, then SID-verify and select the row, then
+        close THIS report window and raise the main window. Scoped to the main
+        rules-table editor only (jump-to-finding-rule feature).
+        """
+        # 1. Classify same-file vs different-file by normalized absolute path.
+        same = False
+        if self.current_file:
+            try:
+                same = (os.path.normcase(os.path.abspath(file_path))
+                        == os.path.normcase(os.path.abspath(self.current_file)))
+            except (TypeError, ValueError):
+                same = False
+
+        if not same:
+            # 3a. Missing file -> non-fatal, abort, leave report open (Req 8.1).
+            if not os.path.exists(file_path):
+                messagebox.showerror(
+                    "File Not Found",
+                    "The rule group file could not be found:\n{path}".format(
+                        path=file_path))
+                return
+            # 3b. Full save gate, exactly like open_file. Cancel at either gate
+            # (or a failed save) is a clean abort (Req 6.6, 7).
+            if self.modified and not self.ask_save_changes():
+                return
+            if (self.tracking_enabled and self.pending_history
+                    and not self.ask_save_pending_changes()):
+                return
+            # 4. Open the target file. A load error surfaces its own messagebox;
+            # abort without closing the report (Req 8.2).
+            try:
+                self._load_file_into_editor(file_path)
+            except Exception:
+                return
+
+        # 5. Select the referenced rule. Prefer matching the finding's SID in
+        # the now-loaded group: the analyzer's in_group_line counts file lines
+        # (including comments/blank lines), which does NOT reliably equal the
+        # rules-table row index, so a SID match lands on the exact rule
+        # regardless of that skew. Fall back to line-based navigation only when
+        # no real rule carries the expected SID (truly stale/changed file) or
+        # the finding carried no SID.
+        if not self._select_rule_by_sid(expected_sid):
+            self._select_rule_row(in_group_line)
+
+        # 6. Close ONLY this report window, then raise the main window.
+        try:
+            if report_window is not None and report_window.winfo_exists():
+                report_window.destroy()
+        except tk.TclError:
+            pass
+        try:
+            self.root.lift()
+            self.root.focus_force()
+        except tk.TclError:
+            pass
+
     def save_file(self):
         """Save the current file"""
         if not self.current_file:
@@ -3254,40 +3393,17 @@ class SuricataRuleGenerator:
             if cancel_requested[0]:
                 return
             
-            # Count conflicts by severity (conflicts is a dict with categories)
-            critical_count = len(conflicts.get('critical', []))
-            warning_count = len(conflicts.get('warning', []))
-            info_count = len(conflicts.get('info', []))
-            
-            # Add other categories to warning/info counts
-            warning_count += len(conflicts.get('protocol_layering', []))
-            warning_count += len(conflicts.get('sticky_buffer_order', []))
-            warning_count += len(conflicts.get('udp_flow_established', []))
-            warning_count += len(conflicts.get('contradictory_flow', []))
-            warning_count += len(conflicts.get('packet_drop_flow_pass', []))
-            warning_count += len(conflicts.get('priority_strict_order', []))
-            
-            # Add AWS-specific critical issues
-            critical_count += len(conflicts.get('reject_ip_protocol', []))
-            critical_count += len(conflicts.get('unsupported_keywords', []))
-            critical_count += len(conflicts.get('pcre_restrictions', []))
-            
-            # Add asymmetric flow issues to appropriate severity
-            for issue in conflicts.get('asymmetric_flow', []):
-                if issue.get('severity') == 'critical':
-                    critical_count += 1
-                else:
-                    warning_count += 1
-            
-            # Add protocol keyword mismatches to appropriate severity
-            for issue in conflicts.get('protocol_keyword_mismatch', []):
-                if issue.get('severity') == 'warning':
-                    warning_count += 1
-                else:
-                    info_count += 1
-            
-            # Port/protocol mismatches go to info
-            info_count += len(conflicts.get('port_protocol_mismatch', []))
+            # Count conflicts by severity through the SAME helper the report
+            # status bar uses, so the pre-export summary dialog and the report
+            # window agree exactly (two-axis Category/Severity model). This
+            # reads each finding's per-item severity (incl. the Informational
+            # protocol-layering reframe) and counts every category, instead of
+            # the former hand-maintained bucketing that mis-filed all
+            # protocol-layering as warning and omitted some AWS categories.
+            summary_counts = self._summarize_conflict_counts(conflicts)
+            critical_count = summary_counts['critical']
+            warning_count = summary_counts['warning']
+            info_count = summary_counts['info']
             
             # Show summary dialog with categorized counts
             choice = self.show_export_analysis_summary(critical_count, warning_count, info_count, conflicts)
@@ -7805,65 +7921,50 @@ class SuricataRuleGenerator:
 
     @staticmethod
     def _summarize_conflict_counts(conflicts):
-        """Return summary finding counts for the analysis status bar.
+        """Return severity-only finding counts for the analysis status bar.
 
-        Buckets every finding category in the ``conflicts`` dict into the
-        four headline counts shown in the report status bar, plus the grand
-        total. The bucketing mirrors how the report body groups sections:
+        Sums each Finding's per-Finding Severity (``sev``) across ALL
+        categories into three headline counts plus the grand total
+        (the Badge_Verifiability_Invariant, Requirement 3.2):
 
-          * critical           = len(conflicts['critical'])
-          * protocol_layering  = len(conflicts['protocol_layering'])
-          * warning            = summation of ALL warning-type categories
-                                 (the pairwise 'warning' list plus the
-                                 AWS/compliance and flow categories the
-                                 report renders under warning headers), and
-                                 the warning-severity items inside the mixed
-                                 'protocol_keyword_mismatch' category.
-          * info               = len(conflicts['info']) plus the info-only
-                                 categories and the info-severity items
-                                 inside 'protocol_keyword_mismatch'.
-          * total              = every finding across every category.
+          * critical = Findings whose Severity is Critical, across every category
+          * warning  = Findings whose Severity is Warning, across every category
+          * info     = Findings whose Severity is Informational, across every
+                       category (an Informational Protocol_Layering finding
+                       counts here, Requirement 3.7)
+          * total    = critical + warning + info = every Finding across all
+                       categories
 
-        Returns a dict with keys: total, critical, protocol_layering,
-        warning, info. Missing categories are treated as empty, so this is
-        safe for a partial/cancelled conflicts dict too.
+        There is NO ``protocol_layering`` badge: Protocol Layering is a Category
+        value only (Requirement 3.1). The Severity is read from each Finding's
+        ``sev`` (a ``Severity`` enum, whose ``.value`` is
+        ``critical``/``warning``/``informational``); if ``sev`` is absent the
+        legacy ``severity`` string is used, then an Informational default, so a
+        finding is never dropped from the total.
+
+        Returns a dict with keys: total, critical, warning, info. Missing
+        categories are treated as empty, so this is safe for a partial/cancelled
+        conflicts dict too.
         """
-        def _len(key):
-            value = conflicts.get(key) if hasattr(conflicts, 'get') else None
-            return len(value) if value else 0
-
-        # Categories the report renders under a WARNING-style header.
-        warning_categories = (
-            'warning', 'sticky_buffer_order', 'udp_flow_established',
-            'contradictory_flow', 'packet_drop_flow_pass',
-            'unsupported_keywords', 'pcre_restrictions',
-            'threshold_limited', 'priority_strict_order',
-        )
-        # Categories the report renders under an INFO-style header.
-        info_categories = ('info', 'port_protocol_mismatch')
-
-        warning = sum(_len(k) for k in warning_categories)
-        info = sum(_len(k) for k in info_categories)
-
-        # 'protocol_keyword_mismatch' is mixed-severity: split it per item.
-        pkm = conflicts.get('protocol_keyword_mismatch') if hasattr(conflicts, 'get') else None
-        if pkm:
-            for issue in pkm:
-                if issue.get('severity') == 'warning':
-                    warning += 1
+        counts = {'total': 0, 'critical': 0, 'warning': 0, 'info': 0}
+        items_iter = conflicts.items() if hasattr(conflicts, 'items') else []
+        for _key, items in items_iter:
+            for finding in (items or []):
+                getter = getattr(finding, 'get', None)
+                sev = getter('sev') if getter else None
+                # Normalize to one of critical/warning/info.
+                value = getattr(sev, 'value', None)
+                if value is None and getter:
+                    value = finding.get('severity')
+                if value in ('critical', 'warning'):
+                    bucket = value
                 else:
-                    info += 1
-
-        critical = _len('critical')
-        protocol_layering = _len('protocol_layering')
-        total = critical + protocol_layering + warning + info
-        return {
-            'total': total,
-            'critical': critical,
-            'protocol_layering': protocol_layering,
-            'warning': warning,
-            'info': info,
-        }
+                    # 'info', 'informational', a category-name literal (e.g.
+                    # 'protocol_layering'), or None all fall to info.
+                    bucket = 'info'
+                counts[bucket] += 1
+                counts['total'] += 1
+        return counts
 
     @staticmethod
     def _fold_policy_findings_into_counts(counts, policy_findings):
@@ -7953,7 +8054,7 @@ class SuricataRuleGenerator:
         """Populate the left side of the Static Analysis status bar.
 
         Lays out, left-aligned on the shared bottom bar:
-            Rules: N  |  Findings: N   🚨 C   🔄 P   ⚠️ W   ℹ️ I  [ |  Policy: G groups ]
+            Rules: N  |  Findings: N   🚨 C   ⚠️ W   ℹ️ I  [ |  Policy: G groups ]
         The severity counts are color-coded (dark-mode aware). The
         ``Policy: G groups`` segment is shown only for a multi-group review
         (``policy_set`` provided); it is omitted for a single-group review.
@@ -7972,6 +8073,15 @@ class SuricataRuleGenerator:
             if not getattr(r, 'is_comment', False)
             and not getattr(r, 'is_blank', False)
         ])
+
+        # The segments live inside a dedicated left-aligned sub-frame so the
+        # IgnorableReportView can clear and rebuild just the counts on every
+        # ignore-set change (Req 6.6) without disturbing the action buttons on
+        # the same bottom bar. ``status_bar`` is the shared bar; ``info_frame``
+        # owns only the left info labels.
+        info_frame = tk.Frame(status_bar)
+        info_frame.pack(side=tk.LEFT)
+        status_bar = info_frame
 
         # Dark-mode aware palette (ui-conventions.md pattern).
         import platform as _plat
@@ -8008,8 +8118,6 @@ class SuricataRuleGenerator:
              tooltip="Total findings across all categories")
         _seg(f"🚨 {counts['critical']}", fg=c_crit, padx=(10, 0),
              tooltip="Critical")
-        _seg(f"🔄 {counts['protocol_layering']}", fg=c_proto,
-             tooltip="Protocol Layering")
         _seg(f"⚠️ {counts['warning']}", fg=c_warn,
              tooltip="Warning")
         _seg(f"ℹ️ {counts['info']}", fg=c_info,
@@ -8024,6 +8132,11 @@ class SuricataRuleGenerator:
             if group_count:
                 _seg("|", fg=c_muted, padx=(10, 0))
                 _seg(f"Policy: {group_count} groups")
+
+        # Return the info sub-frame so the caller (the IgnorableReportView
+        # on_counts_changed callback) can destroy + rebuild just the counts
+        # on every ignore-set change.
+        return info_frame
 
     def show_analysis_report(self, conflicts, *, attribution=None,
                              policy_set=None, policy_set_header=None,
@@ -8081,7 +8194,22 @@ class SuricataRuleGenerator:
 
         report_window = tk.Toplevel(self.root)
         report_window.title("Rule Analysis Report")
-        report_window.geometry("900x600")
+        # Open the report window at the same height as the main program window
+        # so the (now taller) header + findings areas get the same vertical real
+        # estate without the user having to resize. Use the main window's live
+        # height when it is realized, falling back to its configured height, so
+        # a user who resized the main window carries that height over. Width
+        # keeps the report's own default.
+        try:
+            self.root.update_idletasks()
+            main_height = self.root.winfo_height()
+            if main_height <= 1:
+                # Not yet realized — fall back to the configured main height.
+                main_height = self.root.winfo_reqheight()
+        except tk.TclError:
+            main_height = 900
+        report_height = main_height if main_height > 1 else 900
+        report_window.geometry("900x{height}".format(height=report_height))
         report_window.minsize(800, 500)
         # NOTE: no transient() call — per Req 20.3 / ui-conventions.md rule 3
 
@@ -8123,9 +8251,26 @@ class SuricataRuleGenerator:
             except tk.TclError:
                 pass
 
+        # Holder for the IgnorableReportView (built below into the Static tab).
+        # The Save buttons route the view's filtered_findings() so exports
+        # exclude currently-ignored findings; when the ignore set is empty the
+        # view returns the SAME conflicts object so single-group exports stay
+        # byte-for-byte identical (Req 6.1, 6.2, 8.1, 8.2). Falls back to the
+        # original ``conflicts`` if the view was not built.
+        report_view_holder = {'view': None}
+
+        def _export_conflicts():
+            view = report_view_holder['view']
+            if view is not None:
+                try:
+                    return view.filtered_findings()
+                except Exception:
+                    return conflicts
+            return conflicts
+
         def _on_save_pdf():
             self.save_report_pdf(
-                conflicts, attribution=attribution,
+                _export_conflicts(), attribution=attribution,
                 policy_set_header=policy_set_header,
                 policy_facts=policy_facts,
                 policy_findings=policy_findings)
@@ -8133,7 +8278,7 @@ class SuricataRuleGenerator:
 
         def _on_save_html():
             self.save_report_html(
-                conflicts, attribution=attribution,
+                _export_conflicts(), attribution=attribution,
                 policy_set_header=policy_set_header,
                 policy_facts=policy_facts,
                 policy_findings=policy_findings)
@@ -8149,8 +8294,31 @@ class SuricataRuleGenerator:
         # stay consistent with the report body. ``policy_findings`` (Review
         # Firewall Policy) is folded into the severity counts; it is None for
         # every other review, leaving the counts unchanged.
-        self._build_static_status_info(status_bar, conflicts, policy_set,
-                                       policy_findings=policy_findings)
+        #
+        # The helper returns the left info sub-frame; a mutable holder lets the
+        # IgnorableReportView's on_counts_changed callback destroy + rebuild
+        # just the counts from the VISIBLE findings on every ignore-set change
+        # (Req 6.3-6.6). Policy findings are always folded back in so they stay
+        # counted in every ignore state (Req 6.4).
+        status_info_holder = {
+            'frame': self._build_static_status_info(
+                status_bar, conflicts, policy_set,
+                policy_findings=policy_findings)
+        }
+
+        def _refresh_status_counts(filtered_findings):
+            old = status_info_holder.get('frame')
+            if old is not None:
+                try:
+                    old.destroy()
+                except tk.TclError:
+                    pass
+            try:
+                status_info_holder['frame'] = self._build_static_status_info(
+                    status_bar, filtered_findings, policy_set,
+                    policy_findings=policy_findings)
+            except tk.TclError:
+                status_info_holder['frame'] = None
 
         # ── Notebook ─────────────────────────────────────────────────
         notebook = ttk.Notebook(report_window)
@@ -8160,93 +8328,70 @@ class SuricataRuleGenerator:
         static_tab = ttk.Frame(notebook)
         notebook.add(static_tab, text="Static Analysis")
 
-        # Create text widget with scrollbar. expand=True so the report
-        # stretches to fill the window; safe because the status bar (with
-        # the action buttons) is packed side=tk.BOTTOM FIRST above, so its
-        # strip is reserved and the buttons cannot be pushed off-screen on
-        # macOS (the concern behind ui-conventions rule 1 does not apply
-        # here because the buttons own a reserved bottom bar).
-        text_frame = ttk.Frame(static_tab)
-        text_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+        # The former read-only tk.Text block is replaced by an
+        # IgnorableReportView (master-detail table + detail pane) that owns the
+        # per-window session-only ignore set. Every hiding decision routes
+        # through the UI-free src.analysis.finding_filter; the analyzer is never
+        # re-run and the AI tab (below) still receives the FULL unfiltered
+        # findings (Req 7). The view calls on_counts_changed on construction and
+        # on every ignore-set change so the status bar tracks the VISIBLE
+        # findings (Req 6.3-6.6).
+        from src.gui.ignorable_report_view import IgnorableReportView
 
-        text_widget = tk.Text(text_frame, wrap=tk.WORD, font=("Consolas", 10))
-        scrollbar = ttk.Scrollbar(text_frame, orient=tk.VERTICAL, command=text_widget.yview)
-        text_widget.configure(yscrollcommand=scrollbar.set)
+        # Report_Header text = ONLY the header portion of today's generator
+        # output (title, generated/version, file-or-policy-set header,
+        # disclaimer, and the Total Rules / Total Conflicts summary). The
+        # per-finding body is presented as table rows + the detail pane, so the
+        # header region must NOT include it, otherwise the full report would be
+        # duplicated above the table. The generator's header block always ends
+        # with the "Total Conflicts Found: N" line followed by a blank line;
+        # everything after that is the per-finding body, which we drop here.
+        _full_report = self.generate_analysis_report(
+            conflicts, attribution=attribution,
+            policy_set_header=policy_set_header)
+        report_header_text = self._extract_report_header(_full_report)
 
-        text_widget.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
-
-        # Generate report content. Route through generate_analysis_report so
-        # the Static tab and the Save buttons reuse the same values; the kwargs
-        # default to None → today's exact single-group report.
-        report = self.generate_analysis_report(
-            conflicts, attribution=attribution, policy_set_header=policy_set_header)
-        # Review Firewall Policy path: prepend the policy-level region (overview
-        # + findings) ABOVE the unchanged rule-group report. The report string
-        # itself is left exactly as generate_analysis_report produced it, so
-        # when policy_facts is None this block is skipped and the Static tab is
-        # byte-for-byte identical to today (Req 7.6, 7.10).
+        # Policy region (Review Firewall Policy path only): rendered above the
+        # table by the view, never filtered (Req 14.3, 14.5). None for every
+        # other review.
+        policy_overview_text = None
+        policy_findings_text = None
         if policy_facts is not None:
             from src.gui.policy_findings_render import (
                 format_policy_overview_text, format_policy_findings_text)
-            separator = "=" * 70
-            report = (
-                format_policy_overview_text(policy_facts) + "\n\n"
-                + format_policy_findings_text(policy_findings) + "\n\n"
-                + separator + "\n\n"
-                + report)
-        text_widget.insert(tk.END, report)
+            policy_overview_text = format_policy_overview_text(policy_facts)
+            policy_findings_text = format_policy_findings_text(policy_findings)
 
-        # Make read-only but allow selection and copying
-        text_widget.config(state=tk.NORMAL)
-        text_widget.bind("<Key>", lambda e: "break")  # Prevent typing
-        text_widget.bind("<Button-1>", lambda e: text_widget.focus_set())  # Allow selection
-
-        # Add right-click context menu for copying
-        def show_context_menu(event):
-            context_menu = tk.Menu(report_window, tearoff=0)
-            context_menu.add_command(label="Copy", command=lambda: copy_selection())
-            context_menu.add_command(label="Select All", command=lambda: text_widget.tag_add(tk.SEL, "1.0", tk.END))
-            try:
-                context_menu.tk_popup(event.x_root, event.y_root)
-            finally:
-                context_menu.grab_release()
-
-        def copy_selection():
-            try:
-                selected_text = text_widget.selection_get()
-                report_window.clipboard_clear()
-                report_window.clipboard_append(selected_text)
-            except tk.TclError:
-                pass  # No selection
-
-        text_widget.bind("<Button-3>", show_context_menu)  # Right-click
-
-        # Cross-platform copy bindings (ui-conventions.md)
-        def _copy_sel(event=None):
-            try:
-                sel = text_widget.get(tk.SEL_FIRST, tk.SEL_LAST)
-                report_window.clipboard_clear()
-                report_window.clipboard_append(sel)
-            except tk.TclError:
-                pass
-            return "break"
-
-        text_widget.bind("<Control-c>", _copy_sel)
-        text_widget.bind("<Command-c>", _copy_sel)
-
-        # Cross-platform mouse scroll wheel (ui-conventions.md)
-        def _on_mousewheel(event):
-            if event.num == 4:
-                text_widget.yview_scroll(-3, "units")
-            elif event.num == 5:
-                text_widget.yview_scroll(3, "units")
+        # Single-group identity fallback group name (used only when findings
+        # carry no _attribution, i.e. attribution is falsy). Derived from the
+        # current file basename so the ignored-rules list / context menu read
+        # naturally; display-only .suricata stripping happens in the view.
+        single_group_name = None
+        if not attribution:
+            import os as _os
+            if self.current_file:
+                single_group_name = _os.path.basename(self.current_file)
             else:
-                text_widget.yview_scroll(int(-1 * (event.delta / 120)), "units")
+                single_group_name = "current file"
 
-        text_widget.bind("<MouseWheel>", _on_mousewheel)
-        text_widget.bind("<Button-4>", _on_mousewheel)
-        text_widget.bind("<Button-5>", _on_mousewheel)
+        # Group_Name -> File_Path map for the jump-to-finding-rule Edit items.
+        # Pure path lookup computed once here so it covers all four callers
+        # uniformly (single-group, multi-group, firewall, Export ▸ View Report).
+        from src.analysis.finding_filter import resolve_group_files
+        group_files = resolve_group_files(
+            single_group_name, self.current_file, policy_set)
+
+        report_view_holder['view'] = IgnorableReportView(
+            static_tab, self, conflicts,
+            attribution=attribution,
+            single_group_name=single_group_name,
+            report_header_text=report_header_text,
+            policy_overview_text=policy_overview_text,
+            policy_findings_text=policy_findings_text,
+            policy_findings=policy_findings,
+            on_counts_changed=_refresh_status_counts,
+            group_files=group_files,
+            report_window=report_window)
 
         # ── Tab 2: AI Analysis ───────────────────────────────────────
         # When multi-group context is provided, feed the AI tab the combined
@@ -8280,7 +8425,33 @@ class SuricataRuleGenerator:
         return self.rule_analyzer.generate_analysis_report(
             conflicts, total_rules, self.current_file, self.get_version_number(),
             attribution=attribution, policy_set_header=policy_set_header)
-    
+
+    @staticmethod
+    def _extract_report_header(full_report):
+        """Return only the header portion of a generated analysis report.
+
+        The analyzer's report is a header block followed by the per-finding
+        body. The header always ends with the ``Total Conflicts Found: N`` line;
+        the Report_Header region of the IgnorableReportView shows only that
+        block (the per-finding body is rendered as table rows + the detail
+        pane). We keep everything up to and including the ``Total Conflicts
+        Found`` line and drop the rest. If that marker is ever absent (defensive
+        — e.g. a future format change), the full report is returned unchanged so
+        no header information is lost.
+        """
+        if not full_report:
+            return full_report or ""
+        marker = "Total Conflicts Found:"
+        idx = full_report.find(marker)
+        if idx == -1:
+            return full_report
+        # Extend to the end of the marker's line so "Total Conflicts Found: N"
+        # is kept whole.
+        line_end = full_report.find("\n", idx)
+        if line_end == -1:
+            return full_report
+        return full_report[:line_end]
+
     def save_report_html(self, conflicts, *, attribution=None,
                          policy_set_header=None, policy_facts=None,
                          policy_findings=None):

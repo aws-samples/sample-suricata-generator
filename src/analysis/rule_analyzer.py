@@ -37,7 +37,7 @@ class RuleAnalyzer:
         Returns:
             Dictionary with conflict categories: {'critical': [], 'warning': [], 'info': [], 'protocol_layering': [], 'sticky_buffer_order': [], 'udp_flow_established': [], 'protocol_keyword_mismatch': []}
         """
-        conflicts = {'critical': [], 'warning': [], 'info': [], 'protocol_layering': [], 'sticky_buffer_order': [], 'udp_flow_established': [], 'protocol_keyword_mismatch': [], 'asymmetric_flow': [], 'reject_ip_protocol': [], 'reject_quic_protocol': [], 'unsupported_keywords': [], 'pcre_restrictions': [], 'priority_strict_order': [], 'port_on_portless_protocol': []}
+        conflicts = {'critical': [], 'warning': [], 'info': [], 'protocol_layering': [], 'sticky_buffer_order': [], 'udp_flow_established': [], 'protocol_keyword_mismatch': [], 'asymmetric_flow': [], 'reject_ip_protocol': [], 'reject_quic_protocol': [], 'unsupported_keywords': [], 'pcre_restrictions': [], 'priority_strict_order': []}
         
         # Filter out comments and blank lines for analysis
         actual_rules = [r for r in rules if not getattr(r, 'is_comment', False) and not getattr(r, 'is_blank', False)]
@@ -140,9 +140,6 @@ class RuleAnalyzer:
         reject_ip_issues = self.check_reject_on_ip_protocol(rules)
         conflicts['reject_ip_protocol'] = reject_ip_issues
         
-        # Check for concrete ports on portless (ip/icmp) protocol rules (informational)
-        conflicts['port_on_portless_protocol'] = self.check_port_on_portless_protocol(rules)
-        
         # Check for reject actions on QUIC protocol rules (AWS Network Firewall restriction)
         reject_quic_issues = self.check_reject_on_quic_protocol(rules)
         conflicts['reject_quic_protocol'] = reject_quic_issues
@@ -185,7 +182,6 @@ class RuleAnalyzer:
             'sticky_buffer_order': Severity.WARNING,
             'udp_flow_established': Severity.WARNING,
             'port_protocol_mismatch': Severity.INFORMATIONAL,
-            'port_on_portless_protocol': Severity.INFORMATIONAL,
             'contradictory_flow': Severity.WARNING,
             'packet_drop_flow_pass': Severity.WARNING,
             'reject_ip_protocol': Severity.CRITICAL,
@@ -4105,52 +4101,6 @@ class RuleAnalyzer:
         
         return forward_match
     
-    def _is_concrete_port(self, port: str) -> bool:
-        """Return True when ``port`` is a concrete port constraint.
-
-        A field is concrete when, after stripping, it is non-empty and not
-        case-insensitively ``any``. Unlike ``check_port_protocol_mismatch``,
-        this does NOT skip ``$``/``@``/``[`` tokens: a variable, namespaced, or
-        list port counts as concrete (only empty/``any`` are non-concrete).
-        """
-        p = (port or '').strip()
-        return bool(p) and p.lower() != 'any'
-
-    def check_port_on_portless_protocol(self, rules: List[SuricataRule]) -> List[Dict]:
-        """Flag ip/icmp rules carrying a concrete port (INFORMATIONAL).
-
-        The ``ip`` and ``icmp`` protocols match at the network layer, which has
-        no port concept, so Suricata ignores any port on such a rule. Emits
-        exactly one Informational finding per ip/icmp rule that has a concrete
-        src OR dst port (the ``or`` short-circuits into a single append).
-        """
-        issues = []
-
-        # Filter out comments and blank lines
-        actual_rules = [r for r in rules if not getattr(r, 'is_comment', False) and not getattr(r, 'is_blank', False)]
-
-        for rule in actual_rules:
-            line_num = rules.index(rule) + 1
-            protocol = rule.protocol.lower()
-            if protocol in ('ip', 'icmp') and (
-                    self._is_concrete_port(rule.src_port)
-                    or self._is_concrete_port(rule.dst_port)):
-                issue = {
-                    'line': line_num,
-                    'rule': rule,
-                    'issue': ("The '%s' protocol matches at the network layer, which has no "
-                              "port concept, so Suricata ignores the port on this rule. The "
-                              "rule actually matches ALL traffic to/from the specified "
-                              "networks regardless of port." % protocol),
-                    'suggestion': ("If port scoping was intended, use a port-bearing protocol "
-                                   "(tcp/udp/dns/etc.). Otherwise set the port to 'any' to "
-                                   "reflect what the rule actually matches."),
-                    'severity': 'informational',
-                }
-                issues.append(issue)
-
-        return issues
-
     def check_reject_on_ip_protocol(self, rules: List[SuricataRule]) -> List[Dict]:
         """Check for reject actions on IP protocol rules (AWS Network Firewall restriction)
         
@@ -4746,16 +4696,6 @@ class RuleAnalyzer:
                 report += f"   Rule: {self._export_rule_text(issue['rule'])}\n"
                 report += f"   Suggestion: {issue['suggestion']}\n\n"
         
-        # Port on portless (ip/icmp) protocol issues
-        if conflicts.get('port_on_portless_protocol'):
-            report += f"ℹ️ PORT ON PORTLESS PROTOCOL (INFO) ({len(conflicts['port_on_portless_protocol'])})\n"
-            report += f"-" * 30 + "\n"
-            for i, issue in enumerate(conflicts['port_on_portless_protocol'], 1):
-                report += f"{i}. {self._line_ref_for_field(issue, 'line', attribution)}\n"
-                report += f"   Issue: {issue['issue']}\n"
-                report += f"   Rule: {self._export_rule_text(issue['rule'])}\n"
-                report += f"   Suggestion: {issue['suggestion']}\n\n"
-        
         # Contradictory flow keywords
         if conflicts.get('contradictory_flow'):
             report += f"⚠️ CONTRADICTORY FLOW KEYWORDS ({len(conflicts['contradictory_flow'])})\n"
@@ -5082,17 +5022,6 @@ class RuleAnalyzer:
             if conflicts.get('port_protocol_mismatch'):
                 html += f'<h2 class="info">ℹ️ PORT/PROTOCOL MISMATCH (INFO) ({len(conflicts["port_protocol_mismatch"])})</h2>'
                 for i, issue in enumerate(conflicts['port_protocol_mismatch'], 1):
-                    html += f'<div class="conflict conflict-info">'
-                    html += f'<strong>{i}. {self._line_ref_for_field(issue, "line", attribution)}</strong><br>'
-                    html += f'<strong>Issue:</strong> {issue["issue"]}<br>'
-                    html += f'<strong>Suggestion:</strong> {issue["suggestion"]}<br>'
-                    html += f'<div class="rule-text">Rule: {self._export_rule_text(issue["rule"])}</div>'
-                    html += '</div>'
-            
-            # Port on portless (ip/icmp) protocol issues
-            if conflicts.get('port_on_portless_protocol'):
-                html += f'<h2 class="info">ℹ️ PORT ON PORTLESS PROTOCOL (INFO) ({len(conflicts["port_on_portless_protocol"])})</h2>'
-                for i, issue in enumerate(conflicts['port_on_portless_protocol'], 1):
                     html += f'<div class="conflict conflict-info">'
                     html += f'<strong>{i}. {self._line_ref_for_field(issue, "line", attribution)}</strong><br>'
                     html += f'<strong>Issue:</strong> {issue["issue"]}<br>'

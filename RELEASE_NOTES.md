@@ -1,5 +1,13 @@
 # Release Notes
 
+## Version 2.11.1 - October 19, 2026
+
+### Bug fix: removed an inaccurate "port on portless protocol" analyzer finding (Rule Analyzer v4.0.1)
+
+The rule analyzer previously emitted an informational finding claiming that a concrete port on an `ip` or `icmp` rule is ignored because those protocols match at the network layer. This finding was inaccurate and the destination port IS honored. The finding and its "Port on Portless Protocol" category have been removed. No other findings are affected.
+
+---
+
 ## Version 2.11.0 - October 18, 2026
 
 ### Interactive Static Analysis Report with Finding Ignore/Acknowledge, and a More Accurate Rule Analyzer (Rule Analyzer v4.0.0)
@@ -22,7 +30,6 @@ This release reworks the **Static Analysis** report into an interactive, master-
 - **Protocol-layering suggestions tell the truth about ordering**: For findings driven by Suricata's rule-type processing order (IP-only before packet before app-layer), the report no longer advises a reordering that cannot help — not "move line X above line Y" within a file, and not "evaluate this rule group before that one" across groups. Because processing order is determined by rule type, not file or group position, reordering changes nothing for these findings. The suggestion now advises constraining the higher-priority rule (add flow keywords, tighten scope, use a port-bearing protocol, or add a country qualifier) or leaving it as intended.
 - **Fewer false conflicts between rules that cannot overlap**: Two rules whose networks provably do not intersect are no longer reported as conflicting. In particular, a rule whose destination is an internal subnet no longer appears to conflict with a rule whose destination is a negated set that excludes that subnet (for example `!$HOME_NET`), once the variables resolve to their real values per rule group. This is a conservative, proof-based change: a pair is suppressed only when non-overlap is certain; anything the analyzer cannot fully resolve is still flagged, so genuine conflicts are never missed.
 - **Each protocol-layering interaction is reported once**: Inter-type findings are no longer double-counted.
-- **Meaningless port on a portless protocol**: An `ip` or `icmp` rule that specifies a source or destination port (other than `any`) now produces an informational finding explaining that these protocols match at the network layer, which has no port concept — Suricata ignores the port, so the rule actually matches all traffic to/from the specified networks. The suggestion recommends a port-bearing protocol (tcp/udp/dns/…) if port scoping was intended.
 - **Domain apex + subdomain consolidation**: When two `pass` rules together cover a domain's apex and its subdomains (TLS or HTTP), the analyzer recognizes they are not actually redundant and suggests consolidating them into a single, precise rule using the `dotprefix` transform — tailored to your own rule's variables and keywords when possible. This works whether the two rules live in the same rule group or in different groups of a multi-group / firewall-policy review.
 - **Catches an over-broad "apex" allowlist mistake**: If the apex rule is written with an unanchored `endswith` and no `startswith`, it silently also allows look-alike domains (for example, a rule meant for `box.com` also allows `notbox.com`). The analyzer now flags this as a **Warning** and suggests the precise `dotprefix` replacement.
 

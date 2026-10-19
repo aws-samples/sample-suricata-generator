@@ -22,7 +22,6 @@ _CATEGORY_MAP = {
     "udp_flow_established": ("keyword_mismatch", "warning"),
     "protocol_keyword_mismatch": ("keyword_mismatch", "warning"),
     "port_protocol_mismatch": ("keyword_mismatch", "warning"),
-    "port_on_portless_protocol": ("keyword_mismatch", "info"),
     "contradictory_flow": ("contradictory_flow", "error"),
     "packet_drop_flow_pass": ("contradictory_flow", "warning"),
     "asymmetric_flow": ("contradictory_flow", "warning"),

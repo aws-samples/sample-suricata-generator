@@ -53,7 +53,6 @@ class Category:
     UDP_FLOW_ESTABLISHED = "udp_flow_established"
     PROTOCOL_KEYWORD_MISMATCH = "protocol_keyword_mismatch"
     PORT_PROTOCOL_MISMATCH = "port_protocol_mismatch"
-    PORT_ON_PORTLESS_PROTOCOL = "port_on_portless_protocol"
     CONTRADICTORY_FLOW = "contradictory_flow"
     PACKET_DROP_FLOW_PASS = "packet_drop_flow_pass"
     ASYMMETRIC_FLOW = "asymmetric_flow"
@@ -77,7 +76,6 @@ ALLOWED_SEVERITIES = {
     Category.UDP_FLOW_ESTABLISHED: {Severity.WARNING},
     Category.PROTOCOL_KEYWORD_MISMATCH: {Severity.WARNING, Severity.INFORMATIONAL},
     Category.PORT_PROTOCOL_MISMATCH: {Severity.INFORMATIONAL},
-    Category.PORT_ON_PORTLESS_PROTOCOL: {Severity.INFORMATIONAL},
     Category.CONTRADICTORY_FLOW: {Severity.WARNING},
     Category.PACKET_DROP_FLOW_PASS: {Severity.WARNING},
     Category.ASYMMETRIC_FLOW: {Severity.CRITICAL, Severity.WARNING},

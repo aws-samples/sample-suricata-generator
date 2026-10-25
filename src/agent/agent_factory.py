@@ -5,6 +5,8 @@ Constructs and caches the full AgentLoop pipeline, wiring together all
 components. Isolates pipeline construction from the UI layer.
 """
 
+from __future__ import annotations
+
 import logging
 from typing import Optional
 

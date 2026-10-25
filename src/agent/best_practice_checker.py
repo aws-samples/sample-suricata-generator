@@ -10,8 +10,16 @@ Unlike the validator (which checks syntax/structure) and the analyzer
 are technically valid but suboptimal for production deployment.
 """
 
+from __future__ import annotations
+
 import re
 from dataclasses import dataclass, field
+
+from src.analysis.rule_validator import (
+    NON_APP_HEADER_PROTOCOLS,
+    keyword_sets_app_layer_protocol,
+    load_keywords_data,
+)
 
 
 def _split_options(options: str) -> list[str]:
@@ -478,6 +486,12 @@ class BestPracticeChecker:
 
         Without app-layer-protocol, stream_size matches ALL TCP traffic exceeding
         the threshold, not just the target protocol (e.g., SSH tunneling).
+
+        AWS Network Firewall (CreateRuleGroup DryRun, Oct 25 2026) rejects any
+        app-layer-protocol after an application-protocol header or after an
+        earlier protocol-setting keyword (e.g. tls.sni), so the suggestion is
+        only made on a tcp header with no protocol-setting keyword -- the
+        protocol is already scoped otherwise.
         """
         issues = []
         has_stream_size = "stream_size:" in options
@@ -491,6 +505,19 @@ class BestPracticeChecker:
         parts = header.split()
         protocol = parts[1].lower() if len(parts) > 1 else ""
 
+        # An app-protocol header already scopes the rule (and app-layer-protocol
+        # would be rejected there).
+        if protocol not in NON_APP_HEADER_PROTOCOLS:
+            return issues
+
+        # A protocol-setting keyword (data-driven, see
+        # keyword_sets_app_layer_protocol) already scopes the rule too.
+        data = load_keywords_data() or {}
+        defs = {kw.get('name', '').lower(): kw for kw in data.get('keywords', [])}
+        names = [p.split(':', 1)[0].strip().lower() for p in _split_options(options)]
+        if any(n in defs and keyword_sets_app_layer_protocol(defs[n]) for n in names):
+            return issues
+
         # If protocol is generic tcp and no app-layer-protocol, suggest adding one
         if protocol == "tcp" and not has_app_layer:
             issues.append(BestPracticeIssue(
@@ -503,7 +530,9 @@ class BestPracticeChecker:
                 ),
                 fix_hint=(
                     "Add 'app-layer-protocol:ssh' (or the relevant protocol) to scope "
-                    "the rule. Example: flow:established,to_server; "
+                    "the rule, placed before any protocol-specific keyword (AWS Network "
+                    "Firewall rejects app-layer-protocol after one, e.g. after tls.sni "
+                    "or http.host). Example: flow:established,to_server; "
                     "app-layer-protocol:ssh; stream_size:server,>,10485760;"
                 ),
             ))
@@ -532,8 +561,9 @@ class BestPracticeChecker:
                 ),
                 fix_hint=(
                     "Remove tls.cert_subject and keep ONLY tls.cert_issuer with a "
-                    "negative PCRE lookahead to exclude well-known CAs. Example: "
-                    "tls.cert_issuer; pcre:\"/^(?!.*(?:DigiCert|Let's Encrypt|Comodo|"
+                    "negative PCRE lookahead to exclude well-known CAs, anchored by a positive "
+                    "content match (AWS Network Firewall rejects pcre without content). Example: "
+                    "tls.cert_issuer; content:\"CN=\"; pcre:\"/^(?!.*(?:DigiCert|Let's Encrypt|Comodo|"
                     "GlobalSign|Sectigo|Amazon|Google Trust|Microsoft|IdenTrust))/i\";"
                 ),
             ))
@@ -564,7 +594,7 @@ class BestPracticeChecker:
                     fix_hint=(
                         f"Remove '{kw_name}' entirely. Suricata cannot check certificate "
                         "dates or validity periods in rules. Instead, detect certs from "
-                        "uncommon issuers using: tls.cert_issuer; pcre:\"/^(?!.*(?:DigiCert|"
+                        "uncommon issuers using: tls.cert_issuer; content:\"CN=\"; pcre:\"/^(?!.*(?:DigiCert|"
                         "Let's Encrypt|Comodo|GlobalSign|Sectigo|Amazon))/i\";"
                     ),
                 ))
@@ -620,7 +650,9 @@ class BestPracticeChecker:
                 fix_hint=(
                     "Add 'tls.ciphersuites' before the content/pcre match. "
                     "Example: ssl_state:client_hello; tls.ciphersuites; content:\"|00 00|\"; "
-                    "or: ssl_state:client_hello; tls.ciphersuites; pcre:\"/\\x00\\x00/\";"
+                    "or, for several ciphers: ssl_state:client_hello; tls.ciphersuites; "
+                    "content:\"|00|\"; pcre:\"/\\x00\\x00|\\x00\\x03/\"; (the content anchor is "
+                    "required: AWS Network Firewall rejects pcre without content)"
                 ),
             ))
         return issues

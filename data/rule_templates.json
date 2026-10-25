@@ -1,6 +1,6 @@
 {
-  "version": "1.2.1",
-  "last_updated": "2026-09-28",
+  "version": "1.2.2",
+  "last_updated": "2026-10-21",
   "description": "Rule Templates Library for Suricata Rule Generator",
   "templates": [
     {
@@ -2362,9 +2362,9 @@
     },
     {
       "id": "block_url_categories",
-      "name": "Block URL Categories",
+      "name": "Manage URL Categories",
       "category": "HTTP Security",
-      "description": "\u26a0\ufe0f WORKS BEST WITH TLS DECRYPTION: Block traffic based on URL categories (malware, phishing, social media, etc.). Without TLS decryption, this only inspects unencrypted HTTP traffic (~5% of modern web traffic) and will miss encrypted HTTPS requests.",
+      "description": "\u26a0\ufe0f WORKS BEST WITH TLS DECRYPTION: Manage traffic based on URL categories (malware, phishing, social media, etc.) using a pass, alert, drop, or reject action. Without TLS decryption, this only inspects unencrypted HTTP traffic (~5% of modern web traffic) and will miss encrypted HTTPS requests.",
       "icon": "\ud83d\udd17",
       "complexity": "beginner",
       "template_type": "parameterized",
@@ -2379,7 +2379,7 @@
           "dst_net": "any",
           "dst_port": "any",
           "content": "flow:to_server; aws_url_category:{CATEGORY}",
-          "message": "Block {CATEGORY_DISPLAY}"
+          "message": "{ACTION_VERB} {CATEGORY_DISPLAY}"
         }
       ],
       "parameters": [
@@ -2387,24 +2387,38 @@
           "name": "BLOCK_ACTION",
           "type": "radio",
           "required": true,
-          "description": "Select action for blocked traffic",
+          "description": "Select action for matched traffic",
           "options": [
+            {
+              "value": "pass",
+              "label": "Pass (allow traffic)",
+              "action": "pass",
+              "action_verb": "Allow"
+            },
+            {
+              "value": "alert",
+              "label": "Alert (log without blocking)",
+              "action": "alert",
+              "action_verb": "Alert on"
+            },
             {
               "value": "drop",
               "label": "Drop (silently discard)",
-              "action": "drop"
+              "action": "drop",
+              "action_verb": "Block"
             },
             {
               "value": "reject",
               "label": "Reject (actively refuse connection)",
-              "action": "reject"
+              "action": "reject",
+              "action_verb": "Block"
             }
           ]
         },
         {
           "name": "CATEGORIES",
           "type": "multi_select_category",
-          "description": "Select URL categories to block",
+          "description": "Select URL categories to manage",
           "required": true,
           "min_selections": 1,
           "options": [
@@ -2827,9 +2841,9 @@
     },
     {
       "id": "block_domain_categories",
-      "name": "Block Domain Categories",
+      "name": "Manage Domain Categories",
       "category": "Threat Protection",
-      "description": "Block traffic based on domain categories (malware, phishing, C2, etc.). Works with TLS SNI field and HTTP host headers. Functions without TLS decryption but more effective with it.",
+      "description": "Manage traffic based on domain categories (malware, phishing, C2, etc.) using a pass, alert, drop, or reject action. Works with TLS SNI field and HTTP host headers. Functions without TLS decryption but more effective with it.",
       "icon": "\ud83c\udf10",
       "complexity": "beginner",
       "template_type": "parameterized",
@@ -2844,7 +2858,7 @@
           "dst_net": "any",
           "dst_port": "any",
           "content": "flow:to_server; aws_domain_category:{CATEGORY}",
-          "message": "Block {CATEGORY_DISPLAY}"
+          "message": "{ACTION_VERB} {CATEGORY_DISPLAY}"
         }
       ],
       "parameters": [
@@ -2852,17 +2866,31 @@
           "name": "BLOCK_ACTION",
           "type": "radio",
           "required": true,
-          "description": "Select action for blocked traffic",
+          "description": "Select action for matched traffic",
           "options": [
+            {
+              "value": "pass",
+              "label": "Pass (allow traffic)",
+              "action": "pass",
+              "action_verb": "Allow"
+            },
+            {
+              "value": "alert",
+              "label": "Alert (log without blocking)",
+              "action": "alert",
+              "action_verb": "Alert on"
+            },
             {
               "value": "drop",
               "label": "Drop (silently discard)",
-              "action": "drop"
+              "action": "drop",
+              "action_verb": "Block"
             },
             {
               "value": "reject",
               "label": "Reject (actively refuse connection)",
-              "action": "reject"
+              "action": "reject",
+              "action_verb": "Block"
             }
           ]
         },
@@ -2887,7 +2915,7 @@
         {
           "name": "CATEGORIES",
           "type": "multi_select_category",
-          "description": "Select domain categories to block",
+          "description": "Select domain categories to manage",
           "required": true,
           "min_selections": 1,
           "options": [

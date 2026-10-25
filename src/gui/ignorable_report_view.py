@@ -84,8 +84,7 @@ _CATEGORY_ORDER = (
     ("contradictory_flow", "Contradictory Flow"),
     ("packet_drop_flow_pass", "Packet/Flow Action"),
     ("asymmetric_flow", "Asymmetric Flow"),
-    ("reject_ip_protocol", "Reject-on-IP"),
-    ("reject_quic_protocol", "Reject-on-QUIC"),
+    ("reject_unsupported_protocol", "Reject on Unsupported Protocol"),
     ("unsupported_keywords", "Unsupported Keywords"),
     ("pcre_restrictions", "PCRE Restrictions"),
     ("threshold_limited", "Threshold"),
@@ -109,8 +108,7 @@ _CATEGORY_SEV = {
     # fallback indicator is 🚨 so it agrees with the new Critical inventory for
     # a finding that lacks `sev` (harmless today only because _sev_indicator
     # reads `sev` first).
-    "reject_ip_protocol": "🚨",
-    "reject_quic_protocol": "🚨",
+    "reject_unsupported_protocol": "🚨",
     "unsupported_keywords": "🚨",
     "pcre_restrictions": "🚨",
     "threshold_limited": "⚠️",

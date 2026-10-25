@@ -25,10 +25,11 @@ _CATEGORY_MAP = {
     "contradictory_flow": ("contradictory_flow", "error"),
     "packet_drop_flow_pass": ("contradictory_flow", "warning"),
     "asymmetric_flow": ("contradictory_flow", "warning"),
-    "reject_ip_protocol": ("keyword_mismatch", "error"),
-    "reject_quic_protocol": ("keyword_mismatch", "error"),
+    "reject_unsupported_protocol": ("keyword_mismatch", "error"),
     "unsupported_keywords": ("keyword_mismatch", "error"),
-    "pcre_restrictions": ("keyword_mismatch", "warning"),
+    # AWS Network Firewall rejects these rules (CreateRuleGroup DryRun); the
+    # analyzer emits item severity "critical", which falls back to this default.
+    "pcre_restrictions": ("keyword_mismatch", "error"),
     "threshold_limited": ("keyword_mismatch", "warning"),
     "priority_strict_order": ("keyword_mismatch", "info"),
 }
@@ -82,9 +83,11 @@ class RuleAnalyzerWrapper:
                 issues.append(AnalysisIssue(
                     type=issue_type,
                     severity=severity,
-                    message=item.get("message", item.get("description", category)),
+                    message=(item.get("message") or item.get("description")
+                             or item.get("issue") or category),
                     affected_rules=affected,
-                    recommendation=item.get("recommendation", ""),
+                    recommendation=(item.get("recommendation")
+                                    or item.get("suggestion") or ""),
                 ))
 
         has_errors = any(i.severity == "error" for i in issues)

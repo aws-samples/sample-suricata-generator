@@ -66,7 +66,8 @@ class SecurityConstants:
     ]
     
     # Maximum lengths for various inputs
-    # AWS Network Firewall allows up to 8,192 characters per Suricata rule
+    # AWS Network Firewall allows up to 8,191 bytes (UTF-8) per Suricata rule
+    # (see RULE_MAX_BYTES / measure_rule_bytes in src/analysis/rule_validator.py)
     # Setting component limits to 8,000 to allow headroom for rule structure
     MAX_MESSAGE_LENGTH = 8000
     MAX_CONTENT_LENGTH = 8000

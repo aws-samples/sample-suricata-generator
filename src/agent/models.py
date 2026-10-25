@@ -5,6 +5,8 @@ All structured types used across the pipeline: detection intent, validation resu
 analysis results, generation results, PCAP test results, and deploy results.
 """
 
+from __future__ import annotations
+
 from dataclasses import dataclass, field
 from typing import Optional
 

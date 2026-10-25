@@ -17,10 +17,45 @@ from src.agent.rule_builder import RuleBuilder
 from src.agent.rule_validator import RuleValidator
 from src.agent.rule_analyzer_wrapper import RuleAnalyzerWrapper
 from src.agent.best_practice_checker import BestPracticeChecker
+from src.analysis.rule_validator import (
+    CATEGORY_KEYWORDS,
+    NON_APP_HEADER_PROTOCOLS,
+    RuleValidator as SharedRuleValidator,
+    keyword_sets_app_layer_protocol,
+    load_keywords_data,
+)
+from src.analysis.rule_validation_messages import render_terse, render_verbose
 
 logger = logging.getLogger(__name__)
 
 _OPTS_RE = re.compile(r'\((.+)\)\s*$', re.DOTALL)
+
+
+def _keyword_defs() -> dict:
+    """Lower-cased keyword name -> definition from content_keywords.json
+    ({} if the data is unavailable)."""
+    data = load_keywords_data() or {}
+    return {kw.get('name', '').lower(): kw for kw in data.get('keywords', [])}
+
+
+def _split_options_lossless(body: str) -> list:
+    """Split a rule options body on ';' outside double quotes (a backslash
+    escapes the next character). Joining the result with ';' gives ``body``."""
+    parts, current, in_quote, escaped = [], [], False, False
+    for ch in body:
+        if escaped:
+            escaped = False
+        elif ch == '\\':
+            escaped = True
+        elif ch == '"':
+            in_quote = not in_quote
+        elif ch == ';' and not in_quote:
+            parts.append(''.join(current))
+            current = []
+            continue
+        current.append(ch)
+    parts.append(''.join(current))
+    return parts
 
 
 def _split_options(options: str) -> list[str]:
@@ -68,6 +103,7 @@ class AgentLoop:
         rule_analyzer: RuleAnalyzerWrapper,
         best_practice_checker: BestPracticeChecker | None = None,
         max_retries: int = 3,
+        shared_validator: SharedRuleValidator | None = None,
     ):
         self.nl_parser = nl_parser
         self.rule_builder = rule_builder
@@ -75,6 +111,37 @@ class AgentLoop:
         self.rule_analyzer = rule_analyzer
         self.best_practice_checker = best_practice_checker or BestPracticeChecker()
         self.max_retries = max_retries
+        # Shared (AWS Network Firewall) validator, the same one paste and the
+        # editor use. Injectable for tests; built lazily on first use.
+        self._shared_validator = shared_validator
+
+    @property
+    def shared_validator(self) -> SharedRuleValidator:
+        """The shared rule validator, built once per AgentLoop on first use.
+
+        Variables only affect warnings and group checks, which
+        errors_for_rule never returns, so an empty container is used. A
+        None keywords file is handled by the validator itself.
+        """
+        if self._shared_validator is None:
+            self._shared_validator = SharedRuleValidator(load_keywords_data(), {})
+        return self._shared_validator
+
+    def _shared_errors(self, rule_str: str) -> list:
+        """Rule-local ERROR findings that AWS Network Firewall would reject."""
+        return self.shared_validator.errors_for_rule(rule_str)
+
+    @staticmethod
+    def _shared_feedback(findings: list) -> list[str]:
+        """Repair feedback for the LLM: code, terse message, and the verbose
+        fix steps collapsed onto one line."""
+        msgs = []
+        for f in findings:
+            terse = render_terse(f)
+            _title, body = render_verbose(f)
+            fix = " ".join(body.split())
+            msgs.append(f"{f.code}: {terse}. Fix: {fix}")
+        return msgs
 
     def generate(self, user_input: str, chat_history: list[dict] | None = None) -> GenerationResult:
         """Generate validated Suricata rule(s) from natural language input."""
@@ -163,6 +230,22 @@ class AgentLoop:
                     attempt_ok = False
                     break
 
+                # Shared (AWS Network Firewall) validation: rule-local errors
+                # that AWS would reject but the agent's validator may miss.
+                shared_findings = self._shared_errors(rule_str)
+                if shared_findings:
+                    all_errors.extend(
+                        f"Attempt {attempt} shared-validation: {f.code}: {render_terse(f)}"
+                        for f in shared_findings
+                    )
+                    error_feedback = self._shared_feedback(shared_findings)
+                    attempt_ok = False
+                    # Keep the rule as this attempt's best effort: if retries
+                    # run out it is returned, previewed with a warning, and
+                    # inserted commented out by the assistant panel.
+                    built_rules.append(rule_str)
+                    break
+
                 # Analyze conflicts
                 analysis = self.rule_analyzer.analyze([rule_str])
                 if not analysis.passed:
@@ -187,7 +270,7 @@ class AgentLoop:
                         if patched != rule_str:
                             bp_recheck = self.best_practice_checker.check(patched, user_input)
                             val_recheck = self.rule_validator.validate(patched)
-                            if val_recheck.valid:
+                            if val_recheck.valid and not self._shared_errors(patched):
                                 remaining = [i for i in bp_recheck.issues if i.severity == "strong_recommendation"]
                                 if not remaining:
                                     rule_str = patched
@@ -243,14 +326,23 @@ class AgentLoop:
 
     @staticmethod
     def _patch_redundant_app_layer_protocol(rule_str: str) -> str:
-        """Fix rules where protocol is an app-layer name AND options contain
-        app-layer-protocol with the same value.
+        """Fix app-layer-protocol statements AWS Network Firewall rejects.
 
-        Suricata rejects rules like:
-            alert ssh any any -> any 22 (...; app-layer-protocol:ssh; ...)
-        because the protocol field already implies the app-layer.
+        AWS (CreateRuleGroup DryRun, Oct 25 2026) rejects any
+        app-layer-protocol, negated or not, after an application-protocol
+        header (anything but tcp/udp/ip/icmp) or after an earlier
+        protocol-setting keyword (http.*, tls.*, dns.query, ssl_*; not
+        ja3/ja3s/ja4 -- see ``keyword_sets_app_layer_protocol``).
 
-        Fix: change the protocol to the underlying transport (tcp/udp).
+        Fix:
+        1. ``alert ssh ... (app-layer-protocol:ssh; ...)`` with no setter
+           keyword before it and no category keyword (which needs the app
+           header): change the header to the transport (tcp/udp). Same
+           meaning, and the app-layer-protocol is now valid.
+        2. Otherwise drop every rejected app-layer-protocol statement (the
+           header or the earlier keyword already scopes the protocol).
+        Conflicting values on a tcp/udp header are left to shared-validator
+        feedback.
         """
         # Map app-layer protocols to their transport
         app_to_transport = {
@@ -277,29 +369,45 @@ class AgentLoop:
             "sip": "udp",
         }
 
-        m = re.match(r'^(\w+)\s+(\w+)\s+', rule_str)
+        m = re.match(r'^(\s*\w+\s+)(\w+)(\s+[^(]*\()(.*)(\)\s*)$', rule_str, re.DOTALL)
         if not m:
             return rule_str
-
-        action = m.group(1)
         protocol = m.group(2).lower()
-
-        if protocol not in app_to_transport:
+        body = m.group(4)
+        statements = _split_options_lossless(body)
+        names = [s.split(':', 1)[0].strip().lower() for s in statements]
+        alp_idx = [i for i, n in enumerate(names)
+                   if n == 'app-layer-protocol' and ':' in statements[i]
+                   and statements[i].split(':', 1)[1].strip()]
+        if not alp_idx:
             return rule_str
 
-        # Check if options contain app-layer-protocol with the same value
-        if f"app-layer-protocol:{protocol}" in rule_str.lower():
-            transport = app_to_transport[protocol]
-            # Replace the protocol in the header
-            rule_str = re.sub(
-                r'^(\w+)\s+' + re.escape(protocol) + r'\s+',
-                f'{action} {transport} ',
-                rule_str,
-                count=1,
-                flags=re.IGNORECASE,
-            )
+        defs = _keyword_defs()
+        setter = next((i for i, n in enumerate(names)
+                       if n in defs and keyword_sets_app_layer_protocol(defs[n])), None)
+        header_sets = protocol not in NON_APP_HEADER_PROTOCOLS
 
-        return rule_str
+        def _rebuild(header_protocol, kept):
+            new_body = ';'.join(kept)
+            if not body[:1].isspace():
+                new_body = new_body.lstrip()
+            return m.group(1) + header_protocol + m.group(3) + new_body + m.group(5)
+
+        if header_sets:
+            first = alp_idx[0]
+            value = statements[first].split(':', 1)[1].strip().lower()
+            if (len(alp_idx) == 1 and protocol in app_to_transport and value == protocol
+                    and (setter is None or first < setter)
+                    and not any(n in CATEGORY_KEYWORDS for n in names)):
+                return _rebuild(app_to_transport[protocol], statements)
+            drop = set(alp_idx)
+        elif setter is not None:
+            drop = {i for i in alp_idx if i > setter}
+        else:
+            return rule_str
+        if not drop:
+            return rule_str
+        return _rebuild(m.group(2), [s for i, s in enumerate(statements) if i not in drop])
 
     @staticmethod
     def _patch_missing_flow(rule_str: str, user_input: str) -> str:
@@ -882,8 +990,11 @@ class AgentLoop:
     def _patch_smb_share_content_to_pcre(rule_str: str) -> str:
         """Replace multiple AND content matches for SMB shares with PCRE OR.
 
-        Pattern: content:"ADMIN$"; nocase; content:"IPC$"; nocase; -> smb.share; pcre:"/^(?:ADMIN\\$|C\\$|IPC\\$)$/i";
+        Pattern: content:"ADMIN$"; nocase; content:"IPC$"; nocase; -> smb.share; content:"$"; endswith; pcre:"/^(?:ADMIN\\$|C\\$|IPC\\$)$/i";
         Also replaces redundant PCRE after content matches.
+        The content:"$"; endswith; anchor (every share name ends in $) keeps
+        the rule valid on AWS Network Firewall, which rejects pcre without a
+        content (or tls.sni/http.host/http.uri/dns.query) in the rule.
         """
         m = _OPTS_RE.search(rule_str)
         if not m:
@@ -941,6 +1052,8 @@ class AgentLoop:
                         if not inserted:
                             if not has_smb_share:
                                 new_parts.append("smb.share")
+                            new_parts.append('content:"$"')
+                            new_parts.append("endswith")
                             new_parts.append(pcre_pattern)
                             inserted = True
                         continue
@@ -1353,8 +1466,11 @@ class AgentLoop:
         content:!"|80|" does NOT do bit-level checking — it checks if the
         exact byte 0x80 is absent, which is wrong for detecting bit 0x80 unset.
 
-        Replace with pcre:"/^[\\x00-\\x7f]/" which correctly matches any first
-        byte with bit 0x80 unset (Short Header format).
+        Replace with byte_test:1,!&,0x80,0 which matches any first byte with
+        bit 0x80 unset (Short Header format, 0x00-0x7F). A pcre first-byte
+        range check is not used: AWS Network Firewall rejects pcre without a
+        content (or tls.sni/http.host/http.uri/dns.query) companion, and no
+        single content byte is implied by the 0x00-0x7F range.
         """
         m = _OPTS_RE.search(rule_str)
         if not m:
@@ -1384,8 +1500,8 @@ class AgentLoop:
             skip_next_depth = False
 
             if kw == "content" and '!"|80|"' in part:
-                # Replace with PCRE for proper bit-level check
-                new_parts.append('pcre:"/^[\\x00-\\x7f]/"')
+                # Replace with byte_test for a proper bit-level check
+                new_parts.append("byte_test:1,!&,0x80,0")
                 skip_next_depth = True
                 changed = True
                 continue

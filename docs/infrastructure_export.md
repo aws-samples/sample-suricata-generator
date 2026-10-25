@@ -42,6 +42,7 @@ The tool generates AWS Network Firewall resources in three formats: **Terraform 
 
 **Pre-Deployment Options:**
 - **Test Mode:** Convert all actions to 'alert' (same as other exports)
+- **Rule Validation:** Runs when you click Deploy (see [Pre-Export Rule Validation](#pre-export-rule-validation))
 - **Analyze Before Export:** Run rule analyzer first
   - Shows summary (critical/warnings/info counts)
   - Option to view full report or continue
@@ -130,6 +131,20 @@ A default drop action is fully supported by AWS and does not break test mode —
 3. Identify false positives from log analysis
 4. Export without test mode -> Deploy production rules
 
+## Pre-Export Rule Validation
+
+Terraform export, CloudFormation export, and Direct Deploy check the rules exactly as they will be exported, in this order:
+
+1. **Undefined variables** (blocks): A variable used in a rule with no definition, including negated (`!$X`, `!@REF`) and grouped (`[$A,10.0.0.0/8]`) forms. `$HOME_NET` and `$EXTERNAL_NET` are exempt, because AWS defines them.
+2. **Duplicate SIDs** (blocks, *new in v2.12.0*): Export or deploy stops until every SID is unique.
+3. **Rules AWS would reject** (*new in v2.12.0*): One dialog lists every rule with an error by line number. Choose **Export anyway** (Terraform/CloudFormation), **Deploy anyway** (Direct Deploy, which warns that the deploy is likely to fail), or **Cancel**.
+
+Cancel writes no file and makes no AWS call. For Direct Deploy, the configuration dialog stays open so you can fix the rules and try again.
+
+In test mode, `reject` on an unsupported protocol isn't flagged, because every action becomes `alert`. Rule length is measured on the exported rule, including the `[TEST-ACTION]` message prefix.
+
+For the full list of checks, see [Rule Validation in the README](../README.md#rule-validation-new-in-v2120).
+
 ## Export Features
 
 **What's Included (All Formats):**
@@ -138,7 +153,7 @@ A default drop action is fully supported by AWS and does not break test mode —
 - **STRICT_ORDER**: Configured automatically
 - **Version Info**: Generator version in metadata
 - **Proper Escaping**: Handles special characters
-- **Validation**: Checks for undefined variables before export
+- **Validation**: Blocks on undefined variables and duplicate SIDs, then lists rules AWS would reject (see [Pre-Export Rule Validation](#pre-export-rule-validation))
 
 **Format-Specific Features:**
 

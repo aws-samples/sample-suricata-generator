@@ -1,6 +1,6 @@
 {
-  "version": "1.2.0",
-  "last_updated": "2026-04-23",
+  "version": "1.2.1",
+  "last_updated": "2026-10-25",
   "description": "Curated Suricata rule examples from official AWS and Suricata documentation",
   "source": "https://docs.aws.amazon.com/network-firewall/latest/developerguide/suricata-examples.html",
   "examples": [
@@ -55,13 +55,13 @@
     {
       "name": "Block HTTP direct-to-IP",
       "category": "block",
-      "rule": "reject http $HOME_NET any -> $EXTERNAL_NET any (http.host; content:\".\"; pcre:\"/^(?:[0-9]{1,3}\\\\.){3}[0-9]{1,3}$/\"; msg:\"IP in HTTP HOST Header\"; flow:to_server; sid:1239847;)",
+      "rule": "reject http $HOME_NET any -> $EXTERNAL_NET any (http.host; content:\".\"; pcre:\"/^(?:[0-9]{1,3}\\.){3}[0-9]{1,3}$/\"; msg:\"IP in HTTP HOST Header\"; flow:to_server; sid:1239847;)",
       "description": "Block outbound HTTP connections with IP address in HOST header"
     },
     {
       "name": "Block TLS direct-to-IP via SNI",
       "category": "block",
-      "rule": "reject tls $HOME_NET any -> $EXTERNAL_NET any (ssl_state:client_hello; tls.sni; content:\".\"; pcre:\"/^(?:[0-9]{1,3}\\\\.){3}[0-9]{1,3}$/\"; msg:\"IP in TLS SNI\"; flow:to_server; sid:1239848;)",
+      "rule": "reject tls $HOME_NET any -> $EXTERNAL_NET any (ssl_state:client_hello; tls.sni; content:\".\"; pcre:\"/^(?:[0-9]{1,3}\\.){3}[0-9]{1,3}$/\"; msg:\"IP in TLS SNI\"; flow:to_server; sid:1239848;)",
       "description": "Block outbound TLS connections with IP address in SNI"
     },
     {
@@ -277,13 +277,13 @@
     },
     {
       "name": "TLS C2 - suspicious certificate issuer (not well-known CA)",
-      "rule": "alert tls $HOME_NET any -> $EXTERNAL_NET 443 (msg:\"Suspicious TLS certificate issuer - possible C2\"; flow:established,to_server; tls.cert_issuer; pcre:\"/^(?!.*(?:DigiCert|Let's Encrypt|Comodo|GlobalSign|Sectigo|Amazon|Google Trust|Microsoft|IdenTrust|Baltimore|Entrust|GeoTrust|Thawte|VeriSign|Go Daddy|Starfield|USERTrust|Buypass|QuoVadis|SwissSign|ISRG Root))/i\"; sid:3000010; rev:1;)",
-      "description": "Detect TLS certificates NOT from well-known CAs using negative PCRE lookahead on tls.cert_issuer. Suricata CANNOT compare subject==issuer natively. Do NOT use both tls.cert_subject and tls.cert_issuer in the same rule — the second sticky buffer overrides the first.",
+      "rule": "alert tls $HOME_NET any -> $EXTERNAL_NET 443 (msg:\"Suspicious TLS certificate issuer - possible C2\"; flow:established,to_server; tls.cert_issuer; content:\"CN=\"; pcre:\"/^(?!.*(?:DigiCert|Let's Encrypt|Comodo|GlobalSign|Sectigo|Amazon|Google Trust|Microsoft|IdenTrust|Baltimore|Entrust|GeoTrust|Thawte|VeriSign|Go Daddy|Starfield|USERTrust|Buypass|QuoVadis|SwissSign|ISRG Root))/i\"; sid:3000010; rev:1;)",
+      "description": "Detect TLS certificates NOT from well-known CAs using negative PCRE lookahead on tls.cert_issuer. Suricata CANNOT compare subject==issuer natively. Do NOT use both tls.cert_subject and tls.cert_issuer in the same rule — the second sticky buffer overrides the first. The content:\"CN=\" anchor is required because AWS Network Firewall rejects pcre without content (issuers without CN= are not inspected).",
       "source": "TLS C2 detection pattern (validated)"
     },
     {
       "name": "TLS C2 - uncommon issuer with short CN (ephemeral C2 cert)",
-      "rule": "alert tls $HOME_NET any -> $EXTERNAL_NET 443 (msg:\"Suspicious TLS cert from uncommon issuer with short CN - possible ephemeral C2\"; flow:established,to_server; tls.cert_issuer; content:\"CN=\"; pcre:\"/^CN=[a-zA-Z0-9\\\\-\\\\.]{1,30}(,\\\\s*O=[^,]{1,30})?$/\"; pcre:\"/^(?!.*(?:DigiCert|Let's Encrypt|Comodo|GlobalSign|Sectigo|Amazon|Google Trust|Microsoft|IdenTrust))/i\"; sid:3000014; rev:1;)",
+      "rule": "alert tls $HOME_NET any -> $EXTERNAL_NET 443 (msg:\"Suspicious TLS cert from uncommon issuer with short CN - possible ephemeral C2\"; flow:established,to_server; tls.cert_issuer; content:\"CN=\"; pcre:\"/^CN=[a-zA-Z0-9\\-\\.]{1,30}(,\\s*O=[^,]{1,30})?$/\"; pcre:\"/^(?!.*(?:DigiCert|Let's Encrypt|Comodo|GlobalSign|Sectigo|Amazon|Google Trust|Microsoft|IdenTrust))/i\"; sid:3000014; rev:1;)",
       "description": "Detect certs from non-well-known issuers with short CN values typical of auto-generated C2 certificates. Approximation for short-lived cert detection since tls_cert_notbefore/tls_cert_notafter are NOT valid rule keywords.",
       "source": "TLS C2 detection pattern (validated)"
     },
@@ -295,8 +295,8 @@
     },
     {
       "name": "TLS C2 - weak cipher suite with PCRE alternation",
-      "rule": "alert tls $HOME_NET any -> $EXTERNAL_NET 443 (msg:\"Weak or uncommon TLS cipher suite - possible C2 evasion\"; flow:to_server; ssl_state:client_hello; tls.ciphersuites; pcre:\"/\\\\x00\\\\x00|\\\\x00\\\\x03/\"; sid:3000015; rev:1;)",
-      "description": "Detect NULL (0x0000) OR EXPORT_RC4_40 (0x0003) cipher suites using PCRE alternation after tls.ciphersuites sticky buffer. Use pcre for OR matching multiple ciphers.",
+      "rule": "alert tls $HOME_NET any -> $EXTERNAL_NET 443 (msg:\"Weak or uncommon TLS cipher suite - possible C2 evasion\"; flow:to_server; ssl_state:client_hello; tls.ciphersuites; content:\"|00|\"; pcre:\"/\\x00\\x00|\\x00\\x03/\"; sid:3000015; rev:1;)",
+      "description": "Detect NULL (0x0000) OR EXPORT_RC4_40 (0x0003) cipher suites using PCRE alternation after tls.ciphersuites sticky buffer. Use pcre for OR matching multiple ciphers. The content:\"|00|\" anchor (a byte both alternatives require) is mandatory because AWS Network Firewall rejects pcre without content. For a single cipher use content alone, e.g. tls.ciphersuites; content:\"|00 00|\";",
       "source": "TLS C2 detection pattern (validated)"
     },
     {
@@ -307,14 +307,14 @@
     },
     {
       "name": "TLS C2 - certificate from uncommon issuer with xbits",
-      "rule": "alert tls $HOME_NET any -> $EXTERNAL_NET 443 (msg:\"TLS cert from uncommon issuer\"; flow:established,to_server; tls.cert_issuer; pcre:\"/^(?!.*(?:DigiCert|Let's Encrypt|Comodo|GlobalSign|Sectigo|Amazon|Google Trust))/i\"; sid:3000013; rev:1;)",
-      "description": "Alert on TLS certificates NOT issued by well-known CAs using negative lookahead PCRE. Useful for C2 detection where attackers use self-signed or obscure CA certs.",
+      "rule": "alert tls $HOME_NET any -> $EXTERNAL_NET 443 (msg:\"TLS cert from uncommon issuer\"; flow:established,to_server; tls.cert_issuer; content:\"CN=\"; pcre:\"/^(?!.*(?:DigiCert|Let's Encrypt|Comodo|GlobalSign|Sectigo|Amazon|Google Trust))/i\"; sid:3000013; rev:1;)",
+      "description": "Alert on TLS certificates NOT issued by well-known CAs using negative lookahead PCRE. Useful for C2 detection where attackers use self-signed or obscure CA certs. The content:\"CN=\" anchor is required because AWS Network Firewall rejects pcre without content (issuers without CN= are not inspected).",
       "source": "TLS C2 detection pattern"
     },
     {
       "name": "Protocol anomaly - HTTP cleartext on port 443",
-      "rule": "alert http any any -> any 443 (msg:\"HTTP clear text on port 443\"; flow:to_server; app-layer-protocol:http; threshold: type limit, track by_src, seconds 3600, count 1; sid:2271019; rev:1;)",
-      "description": "Detect unencrypted HTTP on port 443 (should be TLS). Uses app-layer-protocol:http to match actual protocol, not just port.",
+      "rule": "alert tcp any any -> any 443 (msg:\"HTTP clear text on port 443\"; flow:to_server; app-layer-protocol:http; threshold: type limit, track by_src, seconds 3600, count 1; sid:2271019; rev:1;)",
+      "description": "Detect unencrypted HTTP on port 443 (should be TLS). Uses a tcp header with app-layer-protocol:http to match the actual protocol, not just the port (app-layer-protocol is redundant, and rejected, on an http header).",
       "source": "suricata-rules community (traffic_anomalies)"
     },
     {
@@ -481,8 +481,8 @@
     },
     {
       "name": "SMB admin share access from non-server (smb.share)",
-      "rule": "alert smb !$SERVERS any -> $HOME_NET 445 (msg:\"Administrative share access from workstation - possible lateral movement\"; flow:established,to_server; smb.share; pcre:\"/^(?:ADMIN\\$|C\\$|IPC\\$)$/i\"; sid:5000003; rev:1;)",
-      "description": "Detect TREE_CONNECT to admin shares using smb.share sticky buffer with PCRE OR alternation. Do NOT use multiple content matches (AND logic) — use PCRE for OR. Source negation !$SERVERS excludes legitimate servers.",
+      "rule": "alert smb !$SERVERS any -> $HOME_NET 445 (msg:\"Administrative share access from workstation - possible lateral movement\"; flow:established,to_server; smb.share; content:\"$\"; endswith; pcre:\"/^(?:ADMIN\\$|C\\$|IPC\\$)$/i\"; sid:5000003; rev:1;)",
+      "description": "Detect TREE_CONNECT to admin shares using smb.share sticky buffer with PCRE OR alternation, anchored by content:\"$\"; endswith; (every matched share ends in $; AWS Network Firewall rejects pcre without content). Do NOT use multiple content matches (AND logic) — use PCRE for OR. Source negation !$SERVERS excludes legitimate servers.",
       "source": "SMB lateral movement detection (validated)"
     },
     {
@@ -505,7 +505,7 @@
     },
     {
       "name": "QUIC CRYPTO frame with suspicious SNI",
-      "rule": "alert udp $HOME_NET any -> $EXTERNAL_NET any (msg:\"QUIC connection with suspicious SNI - possible C2 domain\"; flow:to_server; content:\"|06|\"; content:\"|00 00|\"; distance:0; within:50; pcre:\"/\\x00\\x00.{2}(?:(?:[0-9]{1,3}\\\\.){3}[0-9]{1,3}|[0-9a-f]{32,})/\"; sid:6000002; rev:1;)",
+      "rule": "alert udp $HOME_NET any -> $EXTERNAL_NET any (msg:\"QUIC connection with suspicious SNI - possible C2 domain\"; flow:to_server; content:\"|06|\"; content:\"|00 00|\"; distance:0; within:50; pcre:\"/\\x00\\x00.{2}(?:(?:[0-9]{1,3}\\.){3}[0-9]{1,3}|[0-9a-f]{32,})/\"; sid:6000002; rev:1;)",
       "description": "Detect QUIC CRYPTO frame (type 0x06) with TLS SNI extension (0x0000) containing IP addresses or hex-encoded DGA domains. Use single content:|00 00| with within:50, NOT duplicate content matches.",
       "source": "QUIC/HTTP3 C2 detection (validated)"
     },
@@ -517,8 +517,8 @@
     },
     {
       "name": "QUIC Short Header beaconing pattern",
-      "rule": "alert udp $HOME_NET any -> $EXTERNAL_NET any (msg:\"QUIC beaconing pattern detected - possible automated C2 check-in\"; flow:to_server; dsize:<200; pcre:\"/^[\\\\x00-\\\\x7f]/\"; threshold:type threshold, track by_both, count 8, seconds 240; sid:6000004; rev:1;)",
-      "description": "Detect QUIC Short Header packets (bit 0x80 NOT set) with small payloads at regular intervals. Use pcre:/^[\\x00-\\x7f]/ for bit-level check, NOT content:!|80| which only checks byte equality.",
+      "rule": "alert udp $HOME_NET any -> $EXTERNAL_NET any (msg:\"QUIC beaconing pattern detected - possible automated C2 check-in\"; flow:to_server; dsize:<200; byte_test:1,!&,0x80,0; threshold:type threshold, track by_both, count 8, seconds 240; sid:6000004; rev:1;)",
+      "description": "Detect QUIC Short Header packets (bit 0x80 NOT set) with small payloads at regular intervals. Use byte_test:1,!&,0x80,0 (first byte AND 0x80 is zero) for the bit-level check, NOT content:!|80| which only checks byte equality. Do not use a pcre first-byte range check here: AWS Network Firewall rejects pcre without content and no content byte is implied by the 0x00-0x7F range.",
       "source": "QUIC/HTTP3 C2 detection (validated)"
     },
     {
@@ -529,8 +529,8 @@
     },
     {
       "name": "MQTT PUBLISH to encoded topic",
-      "rule": "alert tcp $HOME_NET any -> $EXTERNAL_NET [1883,8883] (msg:\"MQTT publish to encoded topic - possible C2 command channel\"; flow:established,to_server; pcre:\"/^[\\x30-\\x3f]/\"; pcre:\"/.{1,4}\\x00.(?:(?:cmd|exec|shell|data)\\/[A-Za-z0-9+\\/=]{10,}|[A-Za-z0-9+\\/=]{50,})/s\"; sid:7000002; rev:1;)",
-      "description": "Detect MQTT PUBLISH (0x30-0x3F) with encoded topic names. Topic length is 2 bytes (\\x00.), NOT 1 byte. .{1,4} skips variable remaining length.",
+      "rule": "alert tcp $HOME_NET any -> $EXTERNAL_NET [1883,8883] (msg:\"MQTT publish to encoded topic - possible C2 command channel\"; flow:established,to_server; content:\"|00|\"; pcre:\"/^[\\x30-\\x3f]/\"; pcre:\"/.{1,4}\\x00.(?:(?:cmd|exec|shell|data)\\/[A-Za-z0-9+\\/=]{10,}|[A-Za-z0-9+\\/=]{50,})/s\"; sid:7000002; rev:1;)",
+      "description": "Detect MQTT PUBLISH (0x30-0x3F) with encoded topic names. Topic length is 2 bytes (\\x00.), NOT 1 byte. .{1,4} skips variable remaining length. content:\"|00|\" anchors the pcre (the topic-length MSB the second pcre requires) because AWS Network Firewall rejects pcre without content.",
       "source": "IoT/MQTT C2 detection (validated)"
     },
     {
@@ -571,7 +571,7 @@
     },
     {
       "name": "Base64-encoded image in HTTP body",
-      "rule": "alert http $HOME_NET any -> $EXTERNAL_NET any (msg:\"Large base64-encoded image in HTTP body - possible steganography exfiltration\"; flow:established,to_server; http.method; content:\"POST\"; http.content_type; pcre:\"/^application\\/(json|xml)/i\"; file_data; content:\"data:image/\"; pcre:\"/data:image\\/(?:png|jpeg);base64,[A-Za-z0-9+\\/=]{13300,}/s\"; sid:9000004; rev:1;)",
+      "rule": "alert http $HOME_NET any -> $EXTERNAL_NET any (msg:\"Large base64-encoded image in HTTP body - possible steganography exfiltration\"; flow:established,to_server; http.method; content:\"POST\"; http.content_type; pcre:\"/^application\\/(json|xml)/i\"; file_data; content:\"data:image/\"; pcre:\"/data:image\\/(?:png|jpeg)\\;base64,[A-Za-z0-9+\\/=]{13300,}/s\"; sid:9000004; rev:1;)",
       "description": "Detect base64-encoded image data in JSON or XML HTTP POST bodies. Uses PCRE on http.content_type to match both application/json and application/xml. Uses {13300,} because 10MB decoded ≈ 13.3MB base64.",
       "source": "Steganography detection (validated)"
     },
@@ -607,8 +607,8 @@
     },
     {
       "name": "Silver Ticket admin share access detection",
-      "rule": "alert smb $INTERNAL_NET any -> $AD_DOMAIN_CONTROLLERS 445 (msg:\"ALERT - Silver Ticket abuse - admin share access pattern\"; flow:established,to_server; smb.share; pcre:\"/^(?:ADMIN\\$|C\\$|IPC\\$)$/i\"; threshold:type threshold, track by_src, count 6, seconds 240; sid:1000009; rev:1;)",
-      "description": "Detect service ticket access to admin shares without normal TGT exchange. Uses smb.share sticky buffer with PCRE alternation for OR matching. Requires Suricata 5.0+ with SMB support.",
+      "rule": "alert smb $INTERNAL_NET any -> $AD_DOMAIN_CONTROLLERS 445 (msg:\"ALERT - Silver Ticket abuse - admin share access pattern\"; flow:established,to_server; smb.share; content:\"$\"; endswith; pcre:\"/^(?:ADMIN\\$|C\\$|IPC\\$)$/i\"; threshold:type threshold, track by_src, count 6, seconds 240; sid:1000009; rev:1;)",
+      "description": "Detect service ticket access to admin shares without normal TGT exchange. Uses smb.share sticky buffer with PCRE alternation for OR matching, anchored by content:\"$\"; endswith; (every matched share ends in $; AWS Network Firewall rejects pcre without content). Requires Suricata 5.0+ with SMB support.",
       "source": "Active Directory zero trust (validated)"
     },
     {
@@ -658,10 +658,10 @@
       "source": "AWS Network Firewall URL/Domain Category Filtering (official docs)"
     },
     {
-      "name": "AWS: GeoIP negation - drop traffic not from US or UK",
+      "name": "AWS: GeoIP negation - drop traffic not from US or United Kingdom (GB)",
       "category": "block",
-      "rule": "drop ip any any -> any any (msg:\"Drop traffic not from US or UK\"; geoip:src,!US,UK; sid:55555558; rev:1;)",
-      "description": "Drop traffic from any country except US and UK using geoip negation. Negation applies to the first country code, remaining are included.",
+      "rule": "drop ip any any -> any any (msg:\"Drop traffic not from US or GB\"; geoip:src,!US,GB; sid:55555558; rev:1;)",
+      "description": "Drop traffic from any country except US and United Kingdom using geoip negation. Country codes are ISO 3166-1 alpha-2 (United Kingdom is GB, not UK). Negation applies to the first country code, remaining are included.",
       "source": "AWS Network Firewall Geographic IP Filtering (official docs)"
     },
     {
@@ -682,7 +682,7 @@
       "name": "AWS: Reject non-HTTP/2 TCP traffic",
       "category": "block",
       "rule": "reject tcp $HOME_NET any -> $EXTERNAL_NET any (app-layer-protocol:!http2; flow:to_server, established; sid:2; rev:1;)",
-      "description": "Reject TCP traffic that is not HTTP/2 protocol. Used in combination with HTTP/2 domain filtering rules.",
+      "description": "Reject TCP traffic that is not HTTP/2 protocol. Used in combination with the HTTP/2 domain filtering rules (pass the allowed domain, drop all other decrypted HTTP/2).",
       "source": "AWS Network Firewall Suricata Examples (official docs)"
     },
     {

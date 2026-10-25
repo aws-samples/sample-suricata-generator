@@ -17,11 +17,28 @@ try:
 except ImportError:
     boto3 = None
 
+from src.agent.bedrock_converse import converse as _bedrock_converse
+from src.agent.bedrock_converse import effective_max_tokens as _effective_max_tokens
+from src.agent.bedrock_converse import response_stop_reason as _response_stop_reason
+from src.agent.bedrock_converse import response_text as _response_text
+from src.agent.bedrock_converse import truncated_response_message
 from src.agent.knowledge_base import KnowledgeBase
 from src.agent.models import DetectionIntent
 from src.core.constants import SuricataConstants
 
 logger = logging.getLogger(__name__)
+
+# Output-token limits for the AI Rule Assistant. Models whose limit is lower
+# than INTENT_MAX_TOKENS are retried automatically with
+# bedrock_converse.FALLBACK_MAX_TOKENS (8192); CLASSIFY_MAX_TOKENS is already
+# below that fallback, so it is sent unchanged.
+INTENT_MAX_TOKENS = 16000
+CLASSIFY_MAX_TOKENS = 2048
+
+_INTENT_TRUNCATED_ADVICE = (
+    "Try again, select a different model, or split the request into "
+    "smaller parts."
+)
 
 _SYSTEM_PROMPT = """\
 You are a Suricata IDS/IPS rule generation assistant for AWS Network Firewall. \
@@ -99,6 +116,10 @@ and will miss failed login attempts. Combine with threshold for rate detection.
 - When detecting tunneling or anomalous traffic on a specific protocol (e.g., SSH tunneling), \
 always include "app-layer-protocol:ssh" (or the relevant protocol) to scope the rule. \
 Without it, the rule will match ALL TCP traffic meeting the criteria, not just the target protocol.
+- APP-LAYER-PROTOCOL PLACEMENT (AWS Network Firewall rejects violations): only use app-layer-protocol \
+with a tcp/udp/ip header, before any protocol-specific keyword (http.*, tls.*, dns.query, ssl_*). \
+Never use it, negated or not, after an http/tls/dns/ssh/... header or such a keyword. \
+Use at most one non-negated value.
 - KEYWORD ORDERING in the content field is critical: \
 1) flow keyword FIRST (e.g., flow:established,to_server), \
 2) then sticky buffers (e.g., dns.query, http.uri, tls.sni), \
@@ -138,7 +159,7 @@ GOOD: src <> dst (...; sid:N; rev:1;)
   The second sticky buffer OVERRIDES the first — both content/pcre matches will apply to the LAST \
   sticky buffer only. This means you CANNOT compare subject vs issuer. Pick ONE sticky buffer per rule. \
   BAD (FORBIDDEN): tls.cert_issuer; tls.cert_subject; content:"CN="; pcre:"/CN=[^,]{1,20}$/"; content:"CN="; pcre:"/CN=[^,]{1,20}$/"; \
-  GOOD: tls.cert_issuer; pcre:"/^(?!.*(?:DigiCert|Let's Encrypt|Comodo|GlobalSign|Sectigo|Amazon|Google Trust|Microsoft|IdenTrust))/i"; \
+  GOOD: tls.cert_issuer; content:"CN="; pcre:"/^(?!.*(?:DigiCert|Let's Encrypt|Comodo|GlobalSign|Sectigo|Amazon|Google Trust|Microsoft|IdenTrust))/i"; \
   FORBIDDEN 2: Do NOT use tls_cert_notbefore or tls_cert_notafter — these are NOT valid Suricata \
   rule keywords. They exist only in EVE JSON log output. Any rule using them will FAIL to load. \
   BAD (FORBIDDEN): tls_cert_notafter:<2025-07-15 \
@@ -146,7 +167,7 @@ GOOD: src <> dst (...; sid:N; rev:1;)
   Suricata CANNOT check certificate dates or validity periods in rules. Period. \
   FORBIDDEN 3: Do NOT use ssl_state with pcre/content directly — use tls.ciphersuites sticky buffer. \
   BAD: ssl_state:client_hello; pcre:"/\\x00\\x00/"; \
-  GOOD: ssl_state:client_hello; tls.ciphersuites; pcre:"/\\x00\\x00/"; \
+  GOOD: ssl_state:client_hello; tls.ciphersuites; content:"|00 00|"; \
   FORBIDDEN 4: Do NOT use dsize with flags:S — SYN packets have no payload. \
 - *** FORBIDDEN HTTP/2 PATTERNS — NEVER USE THESE ***: \
   FORBIDDEN 1: http2.framelen is NOT a valid Suricata keyword. Do NOT use it. \
@@ -192,7 +213,7 @@ GOOD: src <> dst (...; sid:N; rev:1;)
   Self-signed certificate detection: Suricata CANNOT compare tls.cert_subject == tls.cert_issuer. \
   ONLY approach: Use tls.cert_issuer with a negative PCRE lookahead to exclude well-known CAs. \
   This catches most self-signed certs because they won't match any known CA name. \
-  CORRECT content: flow:established,to_server; tls.cert_issuer; pcre:"/^(?!.*(?:DigiCert|Let's Encrypt|Comodo|GlobalSign|Sectigo|Amazon|Google Trust|Microsoft|IdenTrust))/i"; \
+  CORRECT content: flow:established,to_server; tls.cert_issuer; content:"CN="; pcre:"/^(?!.*(?:DigiCert|Let's Encrypt|Comodo|GlobalSign|Sectigo|Amazon|Google Trust|Microsoft|IdenTrust))/i"; \
   If the user asks for subject==issuer comparison, explain in the message field that \
   this requires Lua scripting and provide the negative-lookahead rule as the closest alternative. \
   Short-lived certificate detection: Since tls_cert_notbefore/tls_cert_notafter are INVALID keywords, \
@@ -201,7 +222,8 @@ GOOD: src <> dst (...; sid:N; rev:1;)
   If the user asks for cert date checking, explain the limitation in the message field. \
   Weak cipher suite detection: ALWAYS use tls.ciphersuites sticky buffer before content/pcre. \
   CORRECT content: flow:to_server; ssl_state:client_hello; tls.ciphersuites; content:"|00 00|"; \
-  For multiple ciphers: tls.ciphersuites; pcre:"/\\x00\\x00|\\x00\\x03/"; \
+  For multiple ciphers: tls.ciphersuites; content:"|00|"; pcre:"/\\x00\\x00|\\x00\\x03/"; \
+  (content:"|00|" is a byte both alternatives require; AWS Network Firewall rejects pcre without content.) \
   Beaconing detection: Use flow:established,to_server with dsize on data packets + threshold. \
   CORRECT content: flow:established,to_server; dsize:<1024; app-layer-protocol:tls; threshold:type threshold, track by_both, count 5, seconds 300; \
   For beaconing, use track by_both (tracks src-dst pairs). For brute force, use track by_src (per source IP). \
@@ -254,7 +276,7 @@ GOOD: src <> dst (...; sid:N; rev:1;)
   Use "type threshold" for rate counting (fires every N matches), NOT "type both". \
   Rule 3 (Admin Share Access — smb.share with PCRE OR): \
   Use smb.share sticky buffer with PCRE alternation for OR matching multiple shares: \
-  CORRECT: flow:established,to_server; smb.share; pcre:"/^(?:ADMIN\\$|C\\$|IPC\\$)$/i"; \
+  CORRECT: flow:established,to_server; smb.share; content:"$"; endswith; pcre:"/^(?:ADMIN\\$|C\\$|IPC\\$)$/i"; \
   Do NOT use multiple content matches for different shares — content matches use AND logic, \
   meaning ALL must be present. Use PCRE alternation for OR logic. \
   For non-server hosts, use source negation: !$SERVERS any -> $HOME_NET 445 \
@@ -298,17 +320,20 @@ GOOD: src <> dst (...; sid:N; rev:1;)
   NEW_CONNECTION_ID frame type = |18|. \
   CORRECT: flow:to_server; content:"|18|"; threshold:type threshold, track by_both, count 10, seconds 120; \
   Rule 4 (QUIC Short Header beaconing): \
-  To detect Short Header packets (bit 0x80 NOT set), use PCRE for bit-level checking: \
-  CORRECT: flow:to_server; dsize:<200; pcre:"/^[\\x00-\\x7f]/"; threshold:type threshold, track by_both, count 8, seconds 240; \
+  To detect Short Header packets (bit 0x80 NOT set), use byte_test with a negated bitwise AND on the first byte: \
+  CORRECT: flow:to_server; dsize:<200; byte_test:1,!&,0x80,0; threshold:type threshold, track by_both, count 8, seconds 240; \
   Do NOT use content:!"|80|"; depth:1; — this checks if byte 0x80 is absent, NOT if bit 0x80 is unset. \
   A byte like 0x85 has bit 0x80 set but is not equal to 0x80, so content:!"|80|" would wrongly match it. \
-  Use pcre:"/^[\\x00-\\x7f]/" to correctly match any first byte in the 0x00-0x7F range.
+  byte_test:1,!&,0x80,0 correctly matches any first byte in the 0x00-0x7F range. Do NOT use a pcre \
+  first-byte range check for this: AWS Network Firewall rejects pcre without content, and no content \
+  byte is implied by the 0x00-0x7F range.
 - IoT PROTOCOL DETECTION PATTERNS (MQTT and CoAP): \
   MQTT uses TCP on ports 1883 (plain) and 8883 (TLS). CoAP uses UDP on ports 5683/5684. \
   MQTT CONNECT packet: type byte 0x10, followed by remaining length (variable 1-4 bytes), \
   then protocol identifier |00 04 4d 51 54 54| ("MQTT" with 2-byte length prefix). \
   MQTT PUBLISH packet: type byte range 0x30-0x3F (includes QoS/DUP/RETAIN flags in lower nibble). \
-  Use pcre:"/^[\\x30-\\x3f]/" to match any PUBLISH variant. \
+  Use pcre:"/^[\\x30-\\x3f]/" to match any PUBLISH variant (always together with a content match - \
+  AWS Network Firewall rejects pcre without content). \
   MQTT topic length is 2 bytes (MSB + LSB), NOT 1 byte. After remaining length, \
   the topic length field is \\x00. (2 bytes), then the topic string follows. \
   Do NOT assume topic length fits in 1 byte — use \\x00. to match the 2-byte length field. \
@@ -319,9 +344,10 @@ GOOD: src <> dst (...; sid:N; rev:1;)
   The PCRE handles MQTT 3.1.1 (0x04) and 5.0 (0x05), skips flags+keepalive (.{4}), \
   then matches 2-byte client ID length (\\x00.) and hex client ID pattern. \
   Rule 2 (MQTT PUBLISH with encoded topics): \
-  CORRECT: flow:established,to_server; pcre:"/^[\\x30-\\x3f]/"; \
+  CORRECT: flow:established,to_server; content:"|00|"; pcre:"/^[\\x30-\\x3f]/"; \
   pcre:"/.{1,4}\\x00.(?:(?:cmd|exec|shell|data)\\/[A-Za-z0-9+\\/=]{10,}|[A-Za-z0-9+\\/=]{50,})/s"; \
   .{1,4} skips variable remaining length. \\x00. matches 2-byte topic length (MSB always 0 for short topics). \
+  content:"|00|" anchors the pcre matches (the topic-length MSB the second pcre requires). \
   Rule 3 (MQTT wildcard subscription): \
   CORRECT: flow:established,to_server; content:"|82|"; depth:1; \
   pcre:"/(?:cmd|exec|shell|control|admin).*?[#\\+]|[#\\+].*?(?:cmd|exec|shell|control|admin)/i"; \
@@ -387,11 +413,11 @@ GOOD: src <> dst (...; sid:N; rev:1;)
   GOLDEN TICKET DETECTION: \
   Golden Ticket detection approximates abnormal ticket lifetime fields in AS-REQ. \
   The ticket lifetime is in the KDC-REQ-BODY (tag a5) with GeneralizedTime fields (tag 18). \
-  CORRECT PCRE: pcre:"/\\xa5.{0,20}\\x30.{0,10}\\x18[\\x00-\\x7f]{10,17}\\x18[\\x00-\\x7f]{10,17}/s"; \
+  CORRECT: content:"|a0 03 02 01 05|"; content:"|a1 03 02 01 0a|"; pcre:"/\\xa5.{0,20}\\x30.{0,10}\\x18[\\x00-\\x7f]{10,17}\\x18[\\x00-\\x7f]{10,17}/s"; \
   This matches two consecutive GeneralizedTime values in the ticket body with suspicious lengths. \
   DCSync detection: Match DRSUAPI interface UUID content:"|e8 06 d0 46 9b b8 01 18 9d 68 00 80 5f 9b 4f b4|"; \
   with DCE/RPC header content:"|05 00|"; depth:2; \
-  For SMB admin share detection: Use smb.share sticky buffer with PCRE: pcre:"/^(?:ADMIN\\$|C\\$|IPC\\$)$/i"; \
+  For SMB admin share detection: Use smb.share sticky buffer with a content anchor plus PCRE: content:"$"; endswith; pcre:"/^(?:ADMIN\\$|C\\$|IPC\\$)$/i"; \
   For Kerberos port rules: TCP/UDP 88. For LDAP: 389. LDAPS: 636. Global Catalog: 3268. \
   For DC replication pass rules, use <> with flow:established (no direction). \
   For external Kerberos blocking, use reject with flow:to_server (not established) to catch initial packets.
@@ -422,8 +448,9 @@ GOOD: src <> dst (...; sid:N; rev:1;)
   BAD: byte_test:0,>,5242880,0,string,dec; http.content_len; (byte_test has no buffer to read) \
   GOOD: http.content_len; byte_test:0,>,5242880,0,string,dec; (byte_test reads content_len buffer) \
   For image MIME type: http.content_type; content:"image/"; \
-  For JSON or XML body detection: http.content_type; pcre:"/^application\\/(json|xml)/i"; \
-  (matches both application/json and application/xml with a single PCRE). \
+  For JSON or XML body detection: http.content_type; content:"application/"; nocase; startswith; pcre:"/^application\\/(json|xml)/i"; \
+  (matches both application/json and application/xml with a single PCRE; the content anchor is required \
+  because AWS Network Firewall rejects a rule whose pcre has no content, tls.sni, http.host, http.uri, or dns.query). \
   For repeated uploads: threshold:type threshold, track by_both, count 10, seconds 600; \
   When the user says "more than N", use count N+1 (e.g., "more than 3" → count 4). \
   For base64 size estimation: 1MB decoded ≈ 1.33MB base64 chars. \
@@ -609,13 +636,21 @@ class NLParser:
         )
         messages = self._build_converse_messages(chat_history, user_input)
         try:
-            response = self.client.converse(
-                modelId=self.model_id,
+            response = _bedrock_converse(
+                self.client,
+                self.model_id,
                 messages=messages,
                 system=[{"text": system}],
-                inferenceConfig={"maxTokens": 512, "temperature": 0.0},
+                inferenceConfig={"maxTokens": CLASSIFY_MAX_TOKENS, "temperature": 0.0},
             )
-            raw = response["output"]["message"]["content"][0]["text"].strip()
+            raw = _response_text(response).strip()
+            if _response_stop_reason(response) == "max_tokens":
+                logger.warning(
+                    "Classification answer was cut off at the output token "
+                    "limit (%d tokens); defaulting to rule_request",
+                    _effective_max_tokens(self.model_id, CLASSIFY_MAX_TOKENS),
+                )
+                return "rule_request", None
             if raw.startswith("```"):
                 raw = raw.split("\n", 1)[-1]
             if raw.endswith("```"):
@@ -646,16 +681,26 @@ class NLParser:
         messages = self._build_converse_messages(chat_history, prompt)
 
         try:
-            response = self.client.converse(
-                modelId=self.model_id,
+            response = _bedrock_converse(
+                self.client,
+                self.model_id,
                 messages=messages,
                 system=[{"text": system}],
-                inferenceConfig={"maxTokens": 8192, "temperature": 0.0},
+                inferenceConfig={"maxTokens": INTENT_MAX_TOKENS, "temperature": 0.0},
             )
-            raw = response["output"]["message"]["content"][0]["text"]
+            raw = _response_text(response)
         except Exception as e:
             logger.error("Bedrock invocation failed: %s", e)
             return None, f"Bedrock error: {e}"
+
+        if _response_stop_reason(response) == "max_tokens":
+            # Truncated JSON can't be parsed reliably; don't try.
+            message = truncated_response_message(
+                _effective_max_tokens(self.model_id, INTENT_MAX_TOKENS),
+                _INTENT_TRUNCATED_ADVICE,
+            )
+            logger.warning("Intent extraction answer cut off: %s", message)
+            return None, f"Bedrock error: {message}"
 
         return self._parse_response(raw)
 

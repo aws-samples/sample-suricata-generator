@@ -15,6 +15,12 @@ from dataclasses import replace
 from datetime import datetime, timezone
 from typing import Any, Callable
 
+from src.agent.bedrock_converse import BedrockEmptyResponseError
+from src.agent.bedrock_converse import BedrockTruncatedResponseError
+from src.agent.bedrock_converse import converse as _bedrock_converse
+from src.agent.bedrock_converse import effective_max_tokens as _effective_max_tokens
+from src.agent.bedrock_converse import response_stop_reason as _response_stop_reason
+from src.agent.bedrock_converse import response_text as _response_text
 from src.agent.models import AnalysisFinding, StructuredAnalysisResponse
 
 # Guard boto3 import — module loads successfully without boto3
@@ -25,6 +31,30 @@ try:
     HAS_BOTO3 = True
 except ImportError:
     boto3 = None
+
+
+# Output-token limit requested for AI Analysis. Models with a lower limit are
+# retried automatically with bedrock_converse.FALLBACK_MAX_TOKENS (8192).
+ANALYSIS_MAX_TOKENS = 32000
+
+# Socket read timeout (seconds) for the AI Analysis Bedrock client. Large
+# rulesets with a 32000-token answer can take longer than the 300s default.
+ANALYSIS_READ_TIMEOUT_SECONDS = 600
+
+_TRUNCATED_ADVICE = (
+    "Try again, select a different model, or analyze fewer rules."
+)
+
+
+def create_analysis_bedrock_client(factory: Any, region: str) -> Any:
+    """Return the ``bedrock-runtime`` client used by AI Analysis.
+
+    Uses *factory*'s ``get_bedrock_client`` with the AI-Analysis-specific
+    :data:`ANALYSIS_READ_TIMEOUT_SECONDS` read timeout.
+    """
+    return factory.get_bedrock_client(
+        region, read_timeout=ANALYSIS_READ_TIMEOUT_SECONDS
+    )
 
 
 # Section key to ID prefix mapping
@@ -202,16 +232,18 @@ class AIRuleAnalyzer:
         if on_progress is not None:
             on_progress("Parsing response...")
 
-        response = self._parse_response(raw_response)
+        response, parsed_ok = self._parse_response_with_status(raw_response)
 
         # 6. Stamp metadata on the response
         response.timestamp = datetime.now(timezone.utc).isoformat()
         response.model_id = self._model_id
         response.was_summarized = was_summarized
 
-        # 7. Store in cache (Req 14.1)
-        cache_key = self._compute_cache_key(rules, variables, policy_context)
-        self._cache[cache_key] = response
+        # 7. Store in cache (Req 14.1). A fallback (unparseable) result is
+        # not cached so a retry calls the model again.
+        if parsed_ok:
+            cache_key = self._compute_cache_key(rules, variables, policy_context)
+            self._cache[cache_key] = response
 
         return response
 
@@ -223,6 +255,12 @@ class AIRuleAnalyzer:
         network timeouts, ModelNotReadyException, and unexpected errors.
         """
         exc_type_name = type(exc).__name__
+
+        # No answer text (e.g. only reasoning blocks) or an answer cut off at
+        # the output token limit: message is already descriptive, so surface
+        # it as-is.
+        if isinstance(exc, (BedrockEmptyResponseError, BedrockTruncatedResponseError)):
+            return RuntimeError(str(exc))
 
         # botocore ClientError subtypes
         if HAS_BOTO3 and isinstance(exc, ClientError):
@@ -280,9 +318,15 @@ class AIRuleAnalyzer:
 
         Returns:
             The raw text content from the model response.
+
+        Raises:
+            BedrockTruncatedResponseError: if the answer was cut off at the
+                output token limit (``stopReason == "max_tokens"``). The
+                incomplete text is never parsed or cached.
         """
-        response = self._client.converse(
-            modelId=self._model_id,
+        response = _bedrock_converse(
+            self._client,
+            self._model_id,
             messages=[
                 {
                     "role": "user",
@@ -290,9 +334,15 @@ class AIRuleAnalyzer:
                 }
             ],
             system=[{"text": system_prompt}],
-            inferenceConfig={"maxTokens": 8192, "temperature": 0.0},
+            inferenceConfig={"maxTokens": ANALYSIS_MAX_TOKENS, "temperature": 0.0},
         )
-        return response["output"]["message"]["content"][0]["text"]
+        text = _response_text(response)
+        if _response_stop_reason(response) == "max_tokens":
+            raise BedrockTruncatedResponseError(
+                _effective_max_tokens(self._model_id, ANALYSIS_MAX_TOKENS),
+                _TRUNCATED_ADVICE,
+            )
+        return text
 
     # ------------------------------------------------------------------
     # Response parsing
@@ -308,12 +358,21 @@ class AIRuleAnalyzer:
         Each finding is assigned a unique id (e.g. ``cg-1``, ``pc-2``)
         and missing optional fields are filled with safe defaults.
         """
+        return self._parse_response_with_status(raw_text)[0]
+
+    def _parse_response_with_status(
+        self, raw_text: str
+    ) -> tuple[StructuredAnalysisResponse, bool]:
+        """Like :meth:`_parse_response`, plus whether JSON parsing succeeded.
+
+        The flag is False when the free-form fallback was used.
+        """
         try:
             data = self._extract_json(raw_text)
-            return self._build_response_from_json(data, raw_text)
+            return self._build_response_from_json(data, raw_text), True
         except (json.JSONDecodeError, TypeError, KeyError, ValueError):
             # Fallback: return a response with the raw text preserved
-            return self._fallback_parse(raw_text)
+            return self._fallback_parse(raw_text), False
 
     # ------------------------------------------------------------------
     # Internal helpers

@@ -8,12 +8,74 @@ Extracted from the main application for better modularity and testability.
 Version: See version.py for current version information
 """
 
+import functools
 import re
 import ipaddress
 from typing import List, Dict, Optional, Set, Tuple
 from src.core.suricata_rule import SuricataRule
+from src.core.rule_options import split_option_statements as _split_option_statements, mask_quoted_values as _mask_quoted_values
 from src.core.version import get_analyzer_version
 from src.analysis.finding_model import Category, Severity, tag_finding
+from src.core.aws_rule_constraints import is_reject_allowed, reject_allowlist_text
+
+
+# Option-statement prefixes that SuricataRule.from_string leaves out of
+# SuricataRule.content (msg, sid and rev).
+_NON_CONTENT_PREFIXES = ('msg:', 'sid:', 'rev:')
+
+
+def _from_string_content(options):
+    # type: (str) -> str
+    """The pre-fix (naive ``str.split(';')``) derivation of ``content``.
+
+    SuricataRule.from_string derives ``content`` with a quote-aware split
+    (src.core.rule_options.content_from_options). This mirror is kept naive
+    on purpose: _option_views uses it only to detect "content was derived by
+    from_string from these options", and keeping it unchanged keeps the
+    branch selection, and so analyzer results, identical for every rule
+    without a ``;`` inside a quoted value. For a rule with a quoted ``;`` the
+    two derivations can differ; _option_views then uses ``content`` as is.
+    """
+    if not options:
+        return ''
+    parts = []
+    for part in options.split(';'):
+        part = part.strip()
+        if part and not part.startswith(_NON_CONTENT_PREFIXES):
+            parts.append(part)
+    return '; '.join(parts)
+
+
+@functools.lru_cache(maxsize=65536)
+def _option_views(original_options, content):
+    # type: (str, str) -> Tuple[str, str, str]
+    """Return ``(option_content, keyword_content, keyword_text)`` for a rule.
+
+    * ``keyword_text``: the rule's options (``original_options``, else
+      ``content``) with quoted values masked. Used where a check scanned
+      ``content + ' ' + original_options``.
+    * ``option_content``: the rule's ``content`` (options other than
+      msg/sid/rev). When ``content`` was derived from ``original_options`` by
+      SuricataRule.from_string (a loaded rule), it is rebuilt with the
+      quote-aware split so a ``;`` inside msg or another quoted value no longer
+      leaks a fragment of that value into it; otherwise (editor-, template- or
+      constructor-built rules) it is ``content`` unchanged.
+    * ``keyword_content``: ``option_content`` with quoted values masked. Used
+      where a check scanned ``content`` for keywords.
+
+    Cached because the pairwise checks ask for the same rule many times.
+    """
+    original_options = original_options or ''
+    content = content or ''
+    if original_options and _from_string_content(original_options) == content:
+        option_content = '; '.join(
+            s for s in _split_option_statements(original_options)
+            if not s.startswith(_NON_CONTENT_PREFIXES))
+    else:
+        option_content = content
+    keyword_content = _mask_quoted_values(option_content)
+    keyword_text = _mask_quoted_values(original_options or content)
+    return option_content, keyword_content, keyword_text
 
 
 class RuleAnalyzer:
@@ -37,7 +99,7 @@ class RuleAnalyzer:
         Returns:
             Dictionary with conflict categories: {'critical': [], 'warning': [], 'info': [], 'protocol_layering': [], 'sticky_buffer_order': [], 'udp_flow_established': [], 'protocol_keyword_mismatch': []}
         """
-        conflicts = {'critical': [], 'warning': [], 'info': [], 'protocol_layering': [], 'sticky_buffer_order': [], 'udp_flow_established': [], 'protocol_keyword_mismatch': [], 'asymmetric_flow': [], 'reject_ip_protocol': [], 'reject_quic_protocol': [], 'unsupported_keywords': [], 'pcre_restrictions': [], 'priority_strict_order': []}
+        conflicts = {'critical': [], 'warning': [], 'info': [], 'protocol_layering': [], 'sticky_buffer_order': [], 'udp_flow_established': [], 'protocol_keyword_mismatch': [], 'asymmetric_flow': [], 'reject_unsupported_protocol': [], 'unsupported_keywords': [], 'pcre_restrictions': [], 'priority_strict_order': []}
         
         # Filter out comments and blank lines for analysis
         actual_rules = [r for r in rules if not getattr(r, 'is_comment', False) and not getattr(r, 'is_blank', False)]
@@ -136,13 +198,10 @@ class RuleAnalyzer:
         asymmetric_flow_issues = self.check_asymmetric_flow_policies(rules, variables)
         conflicts['asymmetric_flow'] = asymmetric_flow_issues
         
-        # Check for reject actions on IP protocol rules (AWS Network Firewall restriction)
-        reject_ip_issues = self.check_reject_on_ip_protocol(rules)
-        conflicts['reject_ip_protocol'] = reject_ip_issues
-        
-        # Check for reject actions on QUIC protocol rules (AWS Network Firewall restriction)
-        reject_quic_issues = self.check_reject_on_quic_protocol(rules)
-        conflicts['reject_quic_protocol'] = reject_quic_issues
+        # Check for reject actions on protocols outside the AWS reject allowlist
+        # (AWS Network Firewall restriction; one finding per offending rule)
+        reject_issues = self.check_reject_on_unsupported_protocol(rules)
+        conflicts['reject_unsupported_protocol'] = reject_issues
         
         # AWS Network Firewall: Check for unsupported keywords
         unsupported_keyword_issues = self.check_unsupported_keywords(rules)
@@ -184,8 +243,7 @@ class RuleAnalyzer:
             'port_protocol_mismatch': Severity.INFORMATIONAL,
             'contradictory_flow': Severity.WARNING,
             'packet_drop_flow_pass': Severity.WARNING,
-            'reject_ip_protocol': Severity.CRITICAL,
-            'reject_quic_protocol': Severity.CRITICAL,
+            'reject_unsupported_protocol': Severity.CRITICAL,
             'unsupported_keywords': Severity.CRITICAL,
             'pcre_restrictions': Severity.CRITICAL,
             'threshold_limited': Severity.WARNING,
@@ -490,6 +548,12 @@ class RuleAnalyzer:
             # is not partially rewritten.
             full = full.replace('http_host.raw', 'http.host.raw')
             full = full.replace('http_host', 'http.host')
+            # Keyword tests read the options with quoted values masked, so
+            # text inside msg/content/pcre never counts as a keyword; the
+            # content VALUE (domain, leading dot) is still read from `full`.
+            kw = self._keyword_text(rule).lower()
+            kw = kw.replace('http_host.raw', 'http.host.raw')
+            kw = kw.replace('http_host', 'http.host')
 
             protocol = (getattr(rule, 'protocol', '') or '').lower()
             if protocol not in ('tls', 'http'):
@@ -498,18 +562,18 @@ class RuleAnalyzer:
             # Host_Buffer determination with the Excluded_Host_Buffer gate
             # FIRST (ordering is load-bearing because 'http.host' is a substring
             # of 'http.host.raw').
-            has_raw_host = 'http.host.raw' in full
+            has_raw_host = 'http.host.raw' in kw
             # A non-.raw http.host token is an occurrence of 'http.host' that is
             # not immediately followed by '.raw'.
             has_plain_http_host = bool(
-                re.search(r'http\.host(?!\.raw)', full))
+                re.search(r'http\.host(?!\.raw)', kw))
 
             if has_raw_host and not has_plain_http_host:
                 # The only host token is http.host.raw (Excluded_Host_Buffer).
                 return None
 
             if protocol == 'tls':
-                if 'tls.sni' not in full:
+                if 'tls.sni' not in kw:
                     return None
                 host_buffer = 'tls.sni'
             else:  # http
@@ -518,9 +582,10 @@ class RuleAnalyzer:
                 host_buffer = 'http.host'
 
             # Require endswith + an extractable domain.
-            if 'endswith' not in full:
+            if 'endswith' not in kw:
                 return None
-            domain = self.extract_endswith_domain(full)
+            domain = (self.extract_endswith_domain(full)
+                      if self.has_endswith_pattern(kw) else None)
             if not domain:
                 return None
 
@@ -529,7 +594,8 @@ class RuleAnalyzer:
             # original_options alone; the combined `full` duplicates the
             # content keyword (SuricataRule.content is a subset of
             # original_options), so counting on `full` would double-count.
-            raw_options = (getattr(rule, 'original_options', '') or '').lower()
+            raw_options = _mask_quoted_values(
+                getattr(rule, 'original_options', '') or '').lower()
             raw_options = raw_options.replace('http_host.raw', 'http.host.raw')
             raw_options = raw_options.replace('http_host', 'http.host')
             if raw_options.count('content:') != 1:
@@ -542,14 +608,14 @@ class RuleAnalyzer:
                 return None
             raw_value = content_match.group(1)
 
-            has_startswith = 'startswith' in full
+            has_startswith = 'startswith' in kw
             has_leading_dot = raw_value.startswith('.')
 
-            if self.has_exact_domain_match(full) and not has_leading_dot:
+            if self.has_exact_domain_match(kw) and not has_leading_dot:
                 role = 'apex'
-            elif ('endswith' in full) and (not has_startswith) and has_leading_dot:
+            elif ('endswith' in kw) and (not has_startswith) and has_leading_dot:
                 role = 'subdomain'
-            elif ('endswith' in full) and (not has_startswith) and (not has_leading_dot):
+            elif ('endswith' in kw) and (not has_startswith) and (not has_leading_dot):
                 # Loose apex: bare domain anchored only by endswith (no
                 # startswith, no leading dot) -> over-matches any host ENDING in
                 # the literal base domain (the apex, but also look-alikes like
@@ -572,7 +638,7 @@ class RuleAnalyzer:
         normalized to its dotted form."""
         tokens = set()
         raw = (getattr(rule, 'original_options', '') or '')
-        for part in raw.split(';'):
+        for part in _split_option_statements(raw):
             token = part.strip().lower()
             if not token:
                 continue
@@ -1237,12 +1303,19 @@ class RuleAnalyzer:
     
     def is_content_equal_or_broader(self, rule1: SuricataRule, rule2: SuricataRule) -> bool:
         """Check if rule1 content is equal to or broader than rule2 content for complete shadowing"""
-        content1 = (rule1.content or '').lower()
-        content2 = (rule2.content or '').lower()
+        content1 = self._option_content(rule1).lower()
+        content2 = self._option_content(rule2).lower()
+        # Keyword views: quoted values (msg, content, pcre, ...) masked so
+        # their text never counts as a keyword. content1/content2 keep the
+        # values for the domain and equality comparisons below.
+        kw_content1 = self._keyword_content(rule1).lower()
+        kw_content2 = self._keyword_content(rule2).lower()
         
         # Get full content including original_options for comprehensive analysis
         full_content1 = content1 + ' ' + (rule1.original_options or '').lower()
         full_content2 = content2 + ' ' + (rule2.original_options or '').lower()
+        kw_full1 = self._keyword_text(rule1).lower()
+        kw_full2 = self._keyword_text(rule2).lower()
         
         # FIRST: Check if rules have mutually exclusive flow states
         # This must come BEFORE other checks since it's a fundamental incompatibility
@@ -1253,14 +1326,14 @@ class RuleAnalyzer:
         # ssl_version makes a rule MORE specific (only matches specific TLS versions)
         # A rule with ssl_version:sslv2,sslv3,tls1.0,tls1.1 is NOT broader than rules without it
         # It only matches OLD TLS versions, while domain-based rules match ANY TLS version
-        if 'ssl_version:' in full_content1:
+        if 'ssl_version:' in kw_full1:
             # Rule1 has version restriction - it's targeting specific versions, not all TLS
             # It cannot be broader than rule2
             return False
         
         # Check if rule1 has only flow keywords (no actual content matching)
-        has_only_flow_keywords1 = self.has_only_flow_keywords(content1)
-        has_only_flow_keywords2 = self.has_only_flow_keywords(content2)
+        has_only_flow_keywords1 = self.has_only_flow_keywords(kw_content1)
+        has_only_flow_keywords2 = self.has_only_flow_keywords(kw_content2)
         
         # If rule1 has only flow keywords and rule2 has app-layer content, rule1 is broader
         # Example: "flow:to_server" (line 87) is broader than "ssl_state:...; ja4.hash; content:...; flowbits:..."
@@ -1284,22 +1357,22 @@ class RuleAnalyzer:
         # NOTE: noalert check is intentionally removed here
         # Even if a rule has noalert, it may be setting flowbits or performing other actions
         # that shouldn't be shadowed by broader rules
-        if self.has_negated_content(full_content1) or self.has_negated_content(full_content2):
+        if self.has_negated_content(kw_full1) or self.has_negated_content(kw_full2):
             return False
-        if self.uses_different_detection_mechanisms(full_content1, full_content2):
+        if self.uses_different_detection_mechanisms(kw_full1, kw_full2):
             return False
-        if self.has_geographic_specificity(full_content1, full_content2):
+        if self.has_geographic_specificity(kw_full1, kw_full2):
             return False
-        if self.domains_dont_match_patterns(full_content1, full_content2):
+        if self.domains_dont_match_patterns(full_content1, full_content2, kw_full1, kw_full2):
             return False
-        if not self.flow_states_overlap(content1, content2):
+        if not self.flow_states_overlap(kw_content1, kw_content2):
             return False
         # GEOIP COMPARISON: Check if both rules use geoip and if one is broader
         # Negated geoip (e.g., !KH,!CN) is BROADER than specific geoip (e.g., BT)
-        if 'geoip:' in full_content1 and 'geoip:' in full_content2:
+        if 'geoip:' in kw_full1 and 'geoip:' in kw_full2:
             # Check if rule1 uses negated pattern (broader) and rule2 uses specific countries
-            has_negated_geo1 = ',!' in full_content1 and 'geoip:' in full_content1
-            has_negated_geo2 = ',!' in full_content2 and 'geoip:' in full_content2
+            has_negated_geo1 = ',!' in kw_full1 and 'geoip:' in kw_full1
+            has_negated_geo2 = ',!' in kw_full2 and 'geoip:' in kw_full2
             
             if has_negated_geo1 and not has_negated_geo2:
                 # Rule1 has negated geoip (blocks all except listed) - BROADER
@@ -1313,8 +1386,8 @@ class RuleAnalyzer:
             elif not has_negated_geo1 and not has_negated_geo2:
                 # Both use specific countries (e.g., both have geoip:dst,BT)
                 # Extract country codes to compare
-                geo_match1 = re.search(r'geoip:dst,([A-Z,]+)', full_content1)
-                geo_match2 = re.search(r'geoip:dst,([A-Z,]+)', full_content2)
+                geo_match1 = re.search(r'geoip:dst,([A-Z,]+)', kw_full1)
+                geo_match2 = re.search(r'geoip:dst,([A-Z,]+)', kw_full2)
                 
                 if geo_match1 and geo_match2:
                     countries1 = set(geo_match1.group(1).split(','))
@@ -1328,15 +1401,15 @@ class RuleAnalyzer:
                         return False
         
         # NEW: Handle endswith patterns for domain matching (critical for TLS SNI and HTTP host shadowing)
-        if self.has_endswith_pattern(content1) and self.has_endswith_pattern(content2):
+        if self.has_endswith_pattern(kw_content1) and self.has_endswith_pattern(kw_content2):
             domain1 = self.extract_endswith_domain(content1)
             domain2 = self.extract_endswith_domain(content2)
             
             if domain1 and domain2:
                 # Check if BOTH rules use exact domain matching (startswith + endswith)
                 # This means they only match the exact domain, not subdomains
-                exact_match1 = self.has_exact_domain_match(content1)
-                exact_match2 = self.has_exact_domain_match(content2)
+                exact_match1 = self.has_exact_domain_match(kw_content1)
+                exact_match2 = self.has_exact_domain_match(kw_content2)
                 
                 if exact_match1 and exact_match2:
                     # Both use exact matching - only equal if domains are exactly the same
@@ -1410,8 +1483,8 @@ class RuleAnalyzer:
         This is specifically for cases where one rule targets connection establishment
         and another targets application layer content (which requires established connections).
         """
-        content1 = (rule1.content or '').lower()
-        content2 = (rule2.content or '').lower()
+        content1 = self._keyword_content(rule1).lower()
+        content2 = self._keyword_content(rule2).lower()
         
         flow1 = self.extract_flow_keywords(content1)
         flow2 = self.extract_flow_keywords(content2)
@@ -1447,7 +1520,7 @@ class RuleAnalyzer:
     
     def requires_established_connection(self, rule: SuricataRule) -> bool:
         """Check if rule requires an established connection for application layer parsing"""
-        content = (rule.content or '').lower()
+        content = self._keyword_content(rule).lower()
         protocol = rule.protocol.lower()
         
         # Application layer protocols inherently require established connections
@@ -1483,8 +1556,8 @@ class RuleAnalyzer:
         if not rule.content and not rule.original_options:
             return False
         
-        # Check both content and original_options for flowbits
-        content = (rule.content or '') + ' ' + (rule.original_options or '')
+        # Check the rule's options for flowbits (quoted values masked)
+        content = self._keyword_text(rule)
         
         # Rules with flowbits:set typically are conditional and may not conflict
         if 'flowbits:set,' in content or 'flowbits:isnotset,' in content:
@@ -1596,8 +1669,8 @@ class RuleAnalyzer:
         """Check for intentional layered security patterns"""
         # Pattern: specific reject/drop rules before generic alert rules
         if upper_rule.action in ['reject', 'drop'] and lower_rule.action == 'alert':
-            upper_content = (upper_rule.content or '').lower()
-            lower_content = (lower_rule.content or '').lower()
+            upper_content = self._keyword_content(upper_rule).lower()
+            lower_content = self._keyword_content(lower_rule).lower()
             
             # Check if upper rule has specific content and lower rule has generic pcre pattern
             if ('content:' in upper_content and 'pcre:' in lower_content and 
@@ -1606,17 +1679,27 @@ class RuleAnalyzer:
         
         return False
     
-    def domains_dont_match_patterns(self, content1: str, content2: str) -> bool:
-        """Check if specific domains wouldn't match generic patterns"""
+    def domains_dont_match_patterns(self, content1: str, content2: str,
+                                    keywords1: Optional[str] = None,
+                                    keywords2: Optional[str] = None) -> bool:
+        """Check if specific domains wouldn't match generic patterns
+
+        ``keywords1``/``keywords2`` are optional keyword views of the same
+        rules (quoted values masked); when given, the ``pcre:`` keyword test
+        reads them so text inside msg or other quoted values does not count.
+        The domain value and the 'suspicious' text are read from content1/2.
+        """
+        kw1 = content1 if keywords1 is None else keywords1
+        kw2 = content2 if keywords2 is None else keywords2
         domain1 = self.extract_domain_from_content(content1)
         domain2 = self.extract_domain_from_content(content2)
         
         # Check if one has a specific domain and the other has a pattern that wouldn't match it
-        if domain1 and 'pcre:' in content2:
+        if domain1 and 'pcre:' in kw2:
             if 'suspicious' in content2 and '.amazonaws.com' in domain1:
                 return True
         
-        if domain2 and 'pcre:' in content1:
+        if domain2 and 'pcre:' in kw1:
             if 'suspicious' in content1 and '.amazonaws.com' in domain2:
                 return True
         
@@ -1759,14 +1842,14 @@ class RuleAnalyzer:
             return True
         
         # No content restrictions vs specific content
-        if not rule1.content and rule2.content:
+        if not self._option_content(rule1) and self._option_content(rule2):
             return True
         
         # Flow-only keywords vs app-layer content matching
         # Example: "flow:to_server" (line 87) is significantly broader than
         # "ssl_state:...; ja4.hash; content:...; flowbits:..." (lines 93-96)
-        content1 = (rule1.content or '').lower()
-        content2 = (rule2.content or '').lower()
+        content1 = self._keyword_content(rule1).lower()
+        content2 = self._keyword_content(rule2).lower()
         
         if self.has_only_flow_keywords(content1) and not self.has_only_flow_keywords(content2):
             # Rule1 has only flow constraints, rule2 has actual content matching
@@ -1838,7 +1921,7 @@ class RuleAnalyzer:
         - SIG_TYPE_APP_TX (Application Layer Transaction)
         - SIG_TYPE_NOT_SET (error/unknown)
         """
-        content = (rule.content or '').lower()
+        content = self._keyword_content(rule).lower()
         protocol = rule.protocol.lower()
         
         # 1. DECODER EVENTS ONLY - decode-event keyword
@@ -2108,11 +2191,33 @@ class RuleAnalyzer:
     _GEOIP_COUNTRY_RE = re.compile(r'geoip:(?:any|src|dst),([A-Z,!]+)', re.IGNORECASE)
 
     def _rule_full_content(self, rule) -> str:
-        """Combined content + original_options for a rule, mirroring the
-        shadowing path's full_content composition (lines 676-677)."""
-        content = (getattr(rule, 'content', '') or '')
-        original = (getattr(rule, 'original_options', '') or '')
-        return (content + ' ' + original)
+        """The rule's options (original_options, else content) with quoted
+        values masked, so keyword tests (geoip, app-layer-protocol) never
+        match text inside msg or other quoted values. Case is preserved."""
+        return self._keyword_text(rule)
+
+    # ------------------------------------------------------------------
+    # Option text views (see _option_views). Every keyword test reads a
+    # view in which quoted values are masked, so words inside msg, content,
+    # pcre or any other quoted value never count as keywords.
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _views(rule):
+        return _option_views(getattr(rule, 'original_options', '') or '',
+                             getattr(rule, 'content', '') or '')
+
+    def _option_content(self, rule) -> str:
+        """The rule's content options (msg/sid/rev excluded), values kept."""
+        return self._views(rule)[0]
+
+    def _keyword_content(self, rule) -> str:
+        """_option_content with quoted values masked (case preserved)."""
+        return self._views(rule)[1]
+
+    def _keyword_text(self, rule) -> str:
+        """original_options (else content) with quoted values masked (case
+        preserved). Replaces scanning ``content + ' ' + original_options``."""
+        return self._views(rule)[2]
 
     def _geoip_positive_countries(self, full_content: str):
         """Return the set of positive (non-negated) country codes in the first
@@ -2497,7 +2602,7 @@ class RuleAnalyzer:
             return False
         
         # Check if rule1 has app-layer-protocol restrictions that could match rule2's protocol
-        rule1_content = (rule1.content or '').lower()
+        rule1_content = self._keyword_content(rule1).lower()
         if 'app-layer-protocol:!' in rule1_content:
             # Extract what protocols are excluded
             excluded_pattern = re.search(r'app-layer-protocol:!(\w+)', rule1_content)
@@ -2510,7 +2615,7 @@ class RuleAnalyzer:
                 return True
         
         # Check if rule2 has app-layer-protocol restrictions that could match rule1's protocol
-        rule2_content = (rule2.content or '').lower()
+        rule2_content = self._keyword_content(rule2).lower()
         if 'app-layer-protocol:!' in rule2_content:
             # Extract what protocols are excluded
             excluded_pattern = re.search(r'app-layer-protocol:!(\w+)', rule2_content)
@@ -2536,11 +2641,11 @@ class RuleAnalyzer:
     
     def rule_is_broader_for_type_conflict(self, broader_rule: SuricataRule, specific_rule: SuricataRule) -> bool:
         """Check if one rule is broader than another for type-based conflicts"""
-        broader_content = (broader_rule.content or '').lower()
-        specific_content = (specific_rule.content or '').lower()
+        broader_content = self._option_content(broader_rule).lower()
+        specific_content = self._option_content(specific_rule).lower()
         
         # If broader rule has app-layer-protocol negation, it's broader than specific protocol rules
-        if 'app-layer-protocol:!' in broader_content:
+        if 'app-layer-protocol:!' in self._keyword_content(broader_rule).lower():
             return True
         
         # If broader rule has no content restrictions but specific rule does
@@ -2907,8 +3012,8 @@ class RuleAnalyzer:
     def low_level_rule_is_broader_than_app_rule(self, low_level_rule: SuricataRule, app_rule: SuricataRule) -> bool:
         """Check if low-level protocol rule is broader (less restrictive) than application layer rule"""
         # Low-level rule should have fewer content restrictions than higher-layer rule
-        low_level_content = (low_level_rule.content or '').lower()
-        app_content = (app_rule.content or '').lower()
+        low_level_content = self._keyword_content(low_level_rule).lower()
+        app_content = self._keyword_content(app_rule).lower()
         
         # If low-level rule has no content restrictions but app rule does, low-level is broader
         if not low_level_content and app_content:
@@ -3018,9 +3123,7 @@ class RuleAnalyzer:
         e.g., 'flow: to_server' and 'flow:to_server' are both valid. We use regex
         to handle this variation.
         """
-        content = (rule.content or '').lower()
-        original_options = (rule.original_options or '').lower()
-        full_content = content + ' ' + original_options
+        full_content = self._keyword_text(rule).lower()
         
         # Use regex to match flow keywords with optional whitespace after colon
         # This handles both 'flow:to_server' and 'flow: to_server' formats
@@ -3459,8 +3562,8 @@ class RuleAnalyzer:
             if rule.action.lower() not in ['drop', 'reject']:
                 continue
             
-            # Check if rule contains flow:established
-            full_content = (rule.content or '') + ' ' + (rule.original_options or '')
+            # Check if rule contains flow:established (quoted values masked)
+            full_content = self._keyword_text(rule)
             if 'flow:established' not in full_content.lower() and 'flow: established' not in full_content.lower():
                 continue
             
@@ -3557,10 +3660,14 @@ class RuleAnalyzer:
             'krb5': ['krb5.cname', 'krb5.sname']
         }
         
-        # AWS Category keywords with their protocol requirements
+        # AWS Category keywords with their protocol requirements, mirroring AWS
+        # Network Firewall's own category validator. Each value is
+        # (allowed header protocols, display text for messages). 'http1' is
+        # accepted by the service but is not a selectable protocol in the app,
+        # so it is omitted from the display text.
         aws_category_keywords = {
-            'aws_url_category': 'http',      # HTTP only
-            'aws_domain_category': ['tls', 'http']  # TLS or HTTP
+            'aws_url_category': ({'http', 'http1', 'http2'}, 'HTTP or HTTP2'),
+            'aws_domain_category': ({'http', 'http1', 'http2', 'tls'}, 'TLS, HTTP, or HTTP2'),
         }
         
         # Map each app protocol to its required transport layer
@@ -3590,25 +3697,15 @@ class RuleAnalyzer:
             if not protocol_transport:
                 continue  # Unknown protocol, skip
             
-            # Get rule content
-            full_content = (rule.content or '') + ' ' + (rule.original_options or '')
+            # Get rule options with quoted values masked
+            full_content = self._keyword_text(rule)
             full_content_lower = full_content.lower()
             
             # Check for AWS category keywords first (special validation rules)
-            for aws_keyword, required_protocols in aws_category_keywords.items():
+            for aws_keyword, (required_protocols, protocol_list) in aws_category_keywords.items():
                 if aws_keyword in full_content_lower:
-                    # Normalize required_protocols to list for consistent handling
-                    if isinstance(required_protocols, str):
-                        required_protocols = [required_protocols]
-                    
-                    # Check if current protocol is in the allowed list
+                    # Check if current protocol is in the allowed set
                     if protocol not in required_protocols:
-                        # Format the allowed protocols nicely
-                        if len(required_protocols) == 1:
-                            protocol_list = required_protocols[0].upper()
-                        else:
-                            protocol_list = ' or '.join(p.upper() for p in required_protocols)
-                        
                         issue = {
                             'line': line_num,
                             'rule': rule,
@@ -3792,7 +3889,7 @@ class RuleAnalyzer:
             line_num = rules.index(rule) + 1
             
             # Extract flow keywords
-            flow_keywords = self.extract_flow_keywords((rule.content or '') + ' ' + (rule.original_options or ''))
+            flow_keywords = self.extract_flow_keywords(self._keyword_text(rule))
             
             if not flow_keywords:
                 continue
@@ -3862,8 +3959,8 @@ class RuleAnalyzer:
                     if self.rules_could_match_same_traffic(rule1, rule2, {}):
                         # Additional filter: Skip if rules use different detection mechanisms
                         # (e.g., one uses geoip and the other uses domain matching)
-                        rule1_content = (rule1.content or '').lower()
-                        rule2_content = (rule2.content or '').lower()
+                        rule1_content = self._keyword_content(rule1).lower()
+                        rule2_content = self._keyword_content(rule2).lower()
                         
                         if self.uses_different_detection_mechanisms(rule1_content, rule2_content):
                             continue
@@ -3941,8 +4038,8 @@ class RuleAnalyzer:
             Issue dictionary if asymmetric policy exists, None otherwise
         """
         # Extract flow directions
-        content1 = (rule1.content or '').lower()
-        content2 = (rule2.content or '').lower()
+        content1 = self._keyword_content(rule1).lower()
+        content2 = self._keyword_content(rule2).lower()
         
         # Skip alert rules entirely - they only log/observe traffic and don't make
         # allow/block decisions, so they cannot create asymmetric flow policies
@@ -4101,71 +4198,46 @@ class RuleAnalyzer:
         
         return forward_match
     
-    def check_reject_on_ip_protocol(self, rules: List[SuricataRule]) -> List[Dict]:
-        """Check for reject actions on IP protocol rules (AWS Network Firewall restriction)
-        
-        AWS Network Firewall does not allow reject actions on IP protocol rules.
-        IP protocol rules must use drop, pass, or alert actions instead.
-        
+    def check_reject_on_unsupported_protocol(self, rules: List[SuricataRule]) -> List[Dict]:
+        """Check for reject actions on protocols outside the AWS reject allowlist
+
+        AWS Network Firewall accepts the reject action only on the header
+        protocols in REJECT_CAPABLE_PROTOCOLS (tcp, http, tls, smb, dcerpc, ssh,
+        smtp); any other protocol (ip, udp, icmp, dns, quic, http2, ftp, ...)
+        fails service validation. Uses the shared is_reject_allowed() predicate
+        (src/core/aws_rule_constraints.py), the same one the main editor uses.
+        Each offending rule is reported exactly once.
+
         Args:
             rules: List of SuricataRule objects to analyze
-            
+
         Returns:
-            List of dictionaries describing reject on IP protocol issues
+            List of dictionaries describing reject on unsupported protocol issues
         """
         issues = []
+        allowlist = reject_allowlist_text()
         
         # Filter out comments and blank lines
         actual_rules = [r for r in rules if not getattr(r, 'is_comment', False) and not getattr(r, 'is_blank', False)]
         
         for rule in actual_rules:
+            if is_reject_allowed(rule.action, rule.protocol):
+                continue
             # Get line number in original rules list
             line_num = rules.index(rule) + 1
-            
-            # Check if rule uses IP protocol with reject action
-            if rule.protocol.lower() == 'ip' and rule.action.lower() == 'reject':
-                issue = {
-                    'line': line_num,
-                    'rule': rule,
-                    'issue': f"AWS Network Firewall does not allow REJECT action on IP protocol rules. This rule will be rejected as invalid syntax.",
-                    'suggestion': "Change action from 'reject' to 'drop' for IP protocol rules",
-                    'severity': 'critical'
-                }
-                issues.append(issue)
-        
-        return issues
-    
-    def check_reject_on_quic_protocol(self, rules: List[SuricataRule]) -> List[Dict]:
-        """Check for reject actions on QUIC protocol rules (AWS Network Firewall restriction)
-        
-        AWS Network Firewall does not allow reject actions on QUIC protocol rules.
-        QUIC protocol rules must use drop, pass, or alert actions instead.
-        
-        Args:
-            rules: List of SuricataRule objects to analyze
-            
-        Returns:
-            List of dictionaries describing reject on QUIC protocol issues
-        """
-        issues = []
-        
-        # Filter out comments and blank lines
-        actual_rules = [r for r in rules if not getattr(r, 'is_comment', False) and not getattr(r, 'is_blank', False)]
-        
-        for rule in actual_rules:
-            # Get line number in original rules list
-            line_num = rules.index(rule) + 1
-            
-            # Check if rule uses QUIC protocol with reject action
-            if rule.protocol.lower() == 'quic' and rule.action.lower() == 'reject':
-                issue = {
-                    'line': line_num,
-                    'rule': rule,
-                    'issue': f"AWS Network Firewall does not allow REJECT action on QUIC protocol rules. This rule will be rejected as invalid syntax.",
-                    'suggestion': "Change action from 'reject' to 'drop' for QUIC protocol rules",
-                    'severity': 'critical'
-                }
-                issues.append(issue)
+            protocol = (rule.protocol or '').strip().lower() or '(none)'
+            issue = {
+                'line': line_num,
+                'rule': rule,
+                'protocol': protocol,
+                'issue': (f"AWS Network Firewall does not support the REJECT action on the "
+                          f"'{protocol}' protocol. It accepts reject only on {allowlist}, "
+                          f"so this rule will be rejected as invalid."),
+                'suggestion': (f"Change action from 'reject' to 'drop' (or use one of the "
+                               f"protocols that support reject: {allowlist})"),
+                'severity': 'critical'
+            }
+            issues.append(issue)
         
         return issues
     
@@ -4218,8 +4290,8 @@ class RuleAnalyzer:
         for rule in actual_rules:
             line_num = rules.index(rule) + 1
             
-            # Get full rule content
-            full_content = (rule.content or '') + ' ' + (rule.original_options or '')
+            # Get rule options with quoted values masked
+            full_content = self._keyword_text(rule)
             full_content_lower = full_content.lower()
             
             # Check for each unsupported keyword
@@ -4243,58 +4315,87 @@ class RuleAnalyzer:
         
         return issues
     
+    # Keywords that satisfy AWS Network Firewall's pcre companion requirement.
+    # Source: CreateRuleGroup DryRun rejection text (Oct 25 2026):
+    # 'Using "pcre" without one of the following options is not allowed:
+    # [tls.sni, http.host, dns.query, http.uri, content]'.
+    _PCRE_COMPANION_KEYWORDS = frozenset(
+        ('content', 'tls.sni', 'http.host', 'http.uri', 'dns.query'))
+
+    @staticmethod
+    def _option_keyword_names(options: str) -> List[str]:
+        """Return the keyword name of every option statement in ``options``.
+
+        Statements are ``;``-separated outside double quotes; a backslash
+        escapes the next character (so ``\\"`` and ``\\;`` never toggle
+        quoting or end a statement). The keyword name is the text before the
+        first ``:`` of the statement (or the whole statement for bare
+        keywords such as ``nocase``), stripped of whitespace. Text inside
+        quoted values (e.g. ``msg:"content:x"``) is never returned as a
+        keyword. Case is preserved.
+        """
+        return [statement.split(':', 1)[0].strip()
+                for statement in _split_option_statements(options)]
+
     def check_pcre_restrictions(self, rules: List[SuricataRule]) -> List[Dict]:
         """Check for PCRE keyword usage restrictions in AWS Network Firewall
-        
-        AWS Network Firewall only allows 'pcre' keyword with specific companion keywords:
-        - content
+
+        AWS Network Firewall only allows the 'pcre' keyword when the rule also
+        has at least one of these companion option statements:
+        - content (including negated content:!"...")
         - tls.sni
-        - http.host
+        - http.host (NOT http.host.raw)
+        - http.uri (NOT http.uri.raw)
         - dns.query
-        
+
+        Matching is done on parsed option statement keyword names, so text
+        inside quoted values such as msg never counts, and option order and
+        the rule header protocol are irrelevant.
+
+        Evidence: AWS Network Firewall CreateRuleGroup DryRun, Oct 25 2026.
+        The rejection message lists [tls.sni, http.host, dns.query, http.uri,
+        content]. The DryRun showed the 'pcre' keyword check is case-sensitive
+        (an uppercase 'PCRE:' statement was accepted), so only the exact
+        lowercase 'pcre' keyword is checked. Companion case sensitivity was not
+        verified; companions are matched case-insensitively, which is lenient
+        and can never produce a false rejection.
         Per: https://docs.aws.amazon.com/network-firewall/latest/developerguide/suricata-limitations-caveats.html
-        
+
         Args:
             rules: List of SuricataRule objects to analyze
-            
         Returns:
             List of dictionaries describing PCRE restriction violations
         """
         issues = []
-        
-        # Define allowed companion keywords for pcre
-        allowed_companions = ['content:', 'tls.sni', 'http.host', 'dns.query']
-        
         # Filter out comments and blank lines
         actual_rules = [r for r in rules if not getattr(r, 'is_comment', False) and not getattr(r, 'is_blank', False)]
-        
         for rule in actual_rules:
             line_num = rules.index(rule) + 1
-            
-            # Get full rule content
-            full_content = (rule.content or '') + ' ' + (rule.original_options or '')
-            full_content_lower = full_content.lower()
-            
-            # Check if rule contains pcre keyword
-            if 'pcre:' not in full_content_lower:
+            # Use original_options when available (the full options text of a
+            # loaded or editor-built rule); otherwise fall back to content
+            # (a constructor-built rule whose msg is a separate field). Never
+            # concatenate both: content is a subset of original_options.
+            options_text = (getattr(rule, 'original_options', '') or
+                            getattr(rule, 'content', '') or '')
+            keyword_names = self._option_keyword_names(options_text)
+            # Case-sensitive: AWS accepted an uppercase 'PCRE:' statement.
+            if 'pcre' not in keyword_names:
                 continue
-            
-            # Check if rule has at least one of the allowed companion keywords
-            has_allowed_companion = any(companion in full_content_lower for companion in allowed_companions)
-            
+            # Companions matched case-insensitively (lenient; see docstring).
+            has_allowed_companion = any(
+                name.lower() in self._PCRE_COMPANION_KEYWORDS for name in keyword_names)
             if not has_allowed_companion:
                 issue = {
                     'line': line_num,
                     'rule': rule,
                     'issue': (f"Rule uses 'pcre' keyword without allowed companion keywords. "
-                             f"AWS Network Firewall only allows 'pcre' with: content, tls.sni, http.host, or dns.query"),
-                    'suggestion': f"Add one of the allowed companion keywords (content, tls.sni, http.host, dns.query) or remove 'pcre' keyword",
+                             f"AWS Network Firewall only allows 'pcre' with: content, tls.sni, http.host, http.uri, or dns.query"),
+                    'suggestion': f"Add one of the allowed companion keywords (content, tls.sni, http.host, http.uri, or dns.query) or remove 'pcre' keyword",
                     'severity': 'critical'
                 }
                 issues.append(issue)
-        
         return issues
-    
+
     def check_threshold_keyword(self, rules: List[SuricataRule]) -> List[Dict]:
         """Check for threshold keyword usage in AWS Network Firewall
         
@@ -4315,8 +4416,8 @@ class RuleAnalyzer:
         for rule in actual_rules:
             line_num = rules.index(rule) + 1
             
-            # Get full rule content
-            full_content = (rule.content or '') + ' ' + (rule.original_options or '')
+            # Get rule options with quoted values masked
+            full_content = self._keyword_text(rule)
             full_content_lower = full_content.lower()
             
             # Check if rule contains threshold keyword
@@ -4356,8 +4457,8 @@ class RuleAnalyzer:
         for rule in actual_rules:
             line_num = rules.index(rule) + 1
             
-            # Get full rule content
-            full_content = (rule.content or '') + ' ' + (rule.original_options or '')
+            # Get rule options with quoted values masked
+            full_content = self._keyword_text(rule)
             full_content_lower = full_content.lower()
             
             # Check if rule contains priority keyword
@@ -4745,21 +4846,11 @@ class RuleAnalyzer:
                     report += f"   Rule Types: {issue['rule_type1']}, {issue['rule_type2']}\n"
                     report += f"   Action: {self._suggestion_text(issue, attribution)}\n\n"
         
-        # Reject on IP protocol issues (AWS Network Firewall restriction)
-        if conflicts.get('reject_ip_protocol'):
-            report += f"🚨 REJECT ON IP PROTOCOL - CRITICAL ({len(conflicts['reject_ip_protocol'])})\n"
+        # Reject on protocols outside the AWS reject allowlist (AWS Network Firewall restriction)
+        if conflicts.get('reject_unsupported_protocol'):
+            report += f"🚨 REJECT ON UNSUPPORTED PROTOCOL - CRITICAL ({len(conflicts['reject_unsupported_protocol'])})\n"
             report += f"-" * 30 + "\n"
-            for i, issue in enumerate(conflicts['reject_ip_protocol'], 1):
-                report += f"{i}. {self._line_ref_for_field(issue, 'line', attribution)}\n"
-                report += f"   Issue: {issue['issue']}\n"
-                report += f"   Rule: {self._export_rule_text(issue['rule'])}\n"
-                report += f"   Suggestion: {issue['suggestion']}\n\n"
-        
-        # Reject on QUIC protocol issues (AWS Network Firewall restriction)
-        if conflicts.get('reject_quic_protocol'):
-            report += f"🚨 REJECT ON QUIC PROTOCOL - CRITICAL ({len(conflicts['reject_quic_protocol'])})\n"
-            report += f"-" * 30 + "\n"
-            for i, issue in enumerate(conflicts['reject_quic_protocol'], 1):
+            for i, issue in enumerate(conflicts['reject_unsupported_protocol'], 1):
                 report += f"{i}. {self._line_ref_for_field(issue, 'line', attribution)}\n"
                 report += f"   Issue: {issue['issue']}\n"
                 report += f"   Rule: {self._export_rule_text(issue['rule'])}\n"
@@ -5081,21 +5172,10 @@ class RuleAnalyzer:
                         html += f'<strong>Action:</strong> {self._suggestion_text(issue, attribution)}<br>'
                         html += '</div>'
             
-            # Reject on IP protocol issues (AWS Network Firewall restriction)
-            if conflicts.get('reject_ip_protocol'):
-                html += f'<h2 class="critical">🚨 REJECT ON IP PROTOCOL - CRITICAL ({len(conflicts["reject_ip_protocol"])})</h2>'
-                for i, issue in enumerate(conflicts['reject_ip_protocol'], 1):
-                    html += f'<div class="conflict conflict-critical">'
-                    html += f'<strong>{i}. {self._line_ref_for_field(issue, "line", attribution)}</strong><br>'
-                    html += f'<strong>Issue:</strong> {issue["issue"]}<br>'
-                    html += f'<strong>Suggestion:</strong> {issue["suggestion"]}<br>'
-                    html += f'<div class="rule-text">Rule: {self._export_rule_text(issue["rule"])}</div>'
-                    html += '</div>'
-            
-            # Reject on QUIC protocol issues (AWS Network Firewall restriction)
-            if conflicts.get('reject_quic_protocol'):
-                html += f'<h2 class="critical">🚨 REJECT ON QUIC PROTOCOL - CRITICAL ({len(conflicts["reject_quic_protocol"])})</h2>'
-                for i, issue in enumerate(conflicts['reject_quic_protocol'], 1):
+            # Reject on protocols outside the AWS reject allowlist (AWS Network Firewall restriction)
+            if conflicts.get('reject_unsupported_protocol'):
+                html += f'<h2 class="critical">🚨 REJECT ON UNSUPPORTED PROTOCOL - CRITICAL ({len(conflicts["reject_unsupported_protocol"])})</h2>'
+                for i, issue in enumerate(conflicts['reject_unsupported_protocol'], 1):
                     html += f'<div class="conflict conflict-critical">'
                     html += f'<strong>{i}. {self._line_ref_for_field(issue, "line", attribution)}</strong><br>'
                     html += f'<strong>Issue:</strong> {issue["issue"]}<br>'

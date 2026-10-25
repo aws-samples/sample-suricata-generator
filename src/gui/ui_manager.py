@@ -5,6 +5,7 @@ import os
 from typing import Optional
 from src.core.constants import SuricataConstants, classify_reference_arn, looks_like_valid_reference_arn, CONTAINER_ASSOCIATION_ARN_RE
 from src.core.suricata_rule import SuricataRule
+from src.core.category_protocols import category_keyword_options
 from datetime import datetime, timedelta
 from src.aws.iam_feature_model import (
     build_policy_json as _build_iam_policy_json,
@@ -16285,7 +16286,7 @@ Would you like to run a complete analysis?"""
         """Show category picker dialog for inserting AWS category keywords
         
         Auto-detects keyword type based on current protocol:
-        - HTTP protocol → User can choose aws_url_category OR aws_domain_category
+        - HTTP/HTTP1/HTTP2 protocol → User can choose aws_url_category OR aws_domain_category
         - TLS protocol → aws_domain_category only
         - Other protocols → Button should be disabled (handled by update_category_button_state)
         """
@@ -16294,29 +16295,34 @@ Would you like to run a complete analysis?"""
         # Get current protocol
         protocol = self.protocol_var.get().lower()
         
-        # Validate protocol (should only be HTTP or TLS)
-        if protocol not in ['http', 'tls']:
+        # Category keywords valid on this protocol, in display order
+        keyword_options = category_keyword_options(protocol)
+        
+        # Validate protocol (must allow at least one category keyword)
+        if not keyword_options:
             messagebox.showinfo("Protocol Required",
-                "The Insert Category feature only works with HTTP or TLS protocols.\n\n"
+                "The Insert Category feature only works with HTTP, HTTP2, or TLS protocols.\n\n"
                 "Current protocol: " + protocol.upper() + "\n\n"
-                "Please select HTTP or TLS protocol first.")
+                "Please select HTTP, HTTP2, or TLS protocol first.")
             return
         
-        # For HTTP protocol, let user choose between URL and Domain categories
-        # For TLS protocol, only Domain category is available
+        # When both keywords are valid (http/http1/http2), let the user choose
+        # between URL and Domain categories. Otherwise (tls) only Domain category
+        # is available.
+        offer_choice = len(keyword_options) > 1
         keyword_type = None
         keyword_name = None
         protocol_note = None
         
-        if protocol == 'http':
-            # HTTP supports both aws_url_category and aws_domain_category
+        if offer_choice:
+            # Both aws_url_category and aws_domain_category are valid
             # Show radio buttons to let user choose
-            keyword_type = 'aws_url_category'  # Default for HTTP
+            keyword_type = keyword_options[0]  # Default: aws_url_category
             keyword_name = "URL Category"
-            protocol_note = "HTTP protocol - URL inspection"
+            protocol_note = protocol.upper() + " protocol - URL inspection"
         else:  # tls
             # TLS only supports aws_domain_category
-            keyword_type = 'aws_domain_category'
+            keyword_type = keyword_options[0]  # aws_domain_category
             keyword_name = "Domain Category"
             protocol_note = "TLS protocol - SNI inspection"
         
@@ -16375,8 +16381,8 @@ Would you like to run a complete analysis?"""
                  font=("TkDefaultFont", 12, "bold")).pack(pady=(0, 10))
         
         # Keyword type section
-        if protocol == 'http':
-            # HTTP: Show radio buttons to choose between URL and Domain categories
+        if offer_choice:
+            # HTTP/HTTP1/HTTP2: Show radio buttons to choose between URL and Domain categories
             type_frame = ttk.LabelFrame(main_frame, text="Keyword Type (select one)")
             type_frame.pack(fill=tk.X, pady=(0, 15))
             
@@ -16483,7 +16489,7 @@ Would you like to run a complete analysis?"""
             selected_categories = [category_listbox.get(idx) for idx in selection]
             
             # Determine which keyword type to use in preview
-            if protocol == 'http' and keyword_type_var:
+            if offer_choice and keyword_type_var:
                 current_keyword_type = keyword_type_var.get()
             else:
                 current_keyword_type = keyword_type
@@ -16499,8 +16505,8 @@ Would you like to run a complete analysis?"""
         
         category_listbox.bind('<<ListboxSelect>>', update_preview)
         
-        # If HTTP protocol, also bind radio button changes to update preview
-        if protocol == 'http' and keyword_type_var:
+        # If URL/Domain choice is offered, also bind radio button changes to update preview
+        if offer_choice and keyword_type_var:
             url_radio.configure(command=update_preview)
             domain_radio.configure(command=update_preview)
         
@@ -16513,6 +16519,22 @@ Would you like to run a complete analysis?"""
         help_text = "Tip: Hold Ctrl to select multiple categories | This will be inserted into the Content Keywords field"
         ttk.Label(main_frame, text=help_text,
                  font=("TkDefaultFont", 8, "italic"), foreground="#666666").pack(pady=(0, 10))
+        
+        # Alert on pass option
+        # Only valid on pass rules, so enable the checkbox only when the editor
+        # action was 'pass' at the time this dialog was opened. The dialog is
+        # modal (grab_set) so the action cannot change while it is open.
+        alert_enabled = self.action_var.get().strip().lower() == 'pass'
+        alert_frame = ttk.Frame(main_frame)
+        alert_frame.pack(fill=tk.X, pady=(0, 10))
+        
+        alert_var = tk.BooleanVar(value=False)
+        alert_checkbox = ttk.Checkbutton(alert_frame, text="Alert on pass",
+                                         variable=alert_var,
+                                         state="normal" if alert_enabled else "disabled")
+        alert_checkbox.pack(anchor=tk.W)
+        self.create_tooltip(alert_checkbox,
+                           "Adds 'alert' keyword to the content keywords for logging\n(only applies to 'pass' action)")
         
         # Buttons
         button_frame = ttk.Frame(main_frame)
@@ -16528,8 +16550,8 @@ Would you like to run a complete analysis?"""
             # Get all selected categories
             selected_categories = [category_listbox.get(idx) for idx in selection]
             
-            # Determine which keyword type to use (HTTP allows choice, TLS is fixed)
-            if protocol == 'http' and keyword_type_var:
+            # Determine which keyword type to use (HTTP/HTTP2 allow choice, TLS is fixed)
+            if offer_choice and keyword_type_var:
                 selected_keyword_type = keyword_type_var.get()
                 selected_keyword_name = "URL Category" if selected_keyword_type == 'aws_url_category' else "Domain Category"
             else:
@@ -16540,6 +16562,12 @@ Would you like to run a complete analysis?"""
             # Example: aws_domain_category:Child Abuse,Command and Control,Career and Job Search
             categories_csv = ','.join(selected_categories)
             content_to_insert = f"{selected_keyword_type}:{categories_csv}"
+            
+            # Add the 'alert' keyword only when the checkbox is both enabled
+            # (action was 'pass' at open time) and checked. Prefix it before the
+            # category keyword so it is added exactly once.
+            if alert_var.get() and alert_enabled:
+                content_to_insert = f"alert; {content_to_insert}"
             
             # Get current content
             current_content = self.content_var.get().strip()
@@ -16644,8 +16672,8 @@ Would you like to run a complete analysis?"""
                 "aws_url_category keywords. When these rules trigger alerts,\n"
                 "CloudWatch logs which categories the domain belongs to.\n\n"
                 "To use this feature:\n"
-                "1. Create rules using the \"Block Domain Categories\" or\n"
-                "   \"Block URL Categories\" rule templates\n"
+                "1. Create rules using the \"Manage Domain Categories\" or\n"
+                "   \"Manage URL Categories\" rule templates\n"
                 "2. Deploy rules to AWS Network Firewall\n"
                 "3. Wait for traffic to trigger the rules\n"
                 "4. Re-run the Rule Usage Analysis"
@@ -17645,12 +17673,13 @@ Would you like to run a complete analysis?"""
         """Update Insert Category button state based on protocol selection
         
         Should be called whenever protocol changes to enable/disable the button.
-        Button is only enabled for HTTP and TLS protocols.
+        Button is enabled only for protocols where at least one AWS category
+        keyword is valid (http, http1, http2, tls).
         """
         if hasattr(self, 'insert_category_button'):
             protocol = self.protocol_var.get().lower()
             
-            if protocol in ['http', 'tls']:
+            if category_keyword_options(protocol):
                 self.insert_category_button.config(state='normal')
             else:
                 self.insert_category_button.config(state='disabled')

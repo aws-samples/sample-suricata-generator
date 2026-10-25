@@ -37,6 +37,8 @@ from typing import Dict, List, Optional, Tuple, Any
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 
+from src.core.aws_rule_constraints import is_reject_allowed, reject_allowlist_text
+
 logger = logging.getLogger(__name__)
 
 
@@ -1247,9 +1249,17 @@ class PaloAltoConverter:
                 app_info = self.app_mapper.resolve_application(app_name)
                 app_deny_action = app_info.get('deny_action', 'drop')
                 if app_deny_action == 'reject':
-                    # Safety: AWS NF disallows reject on ip and quic protocols
-                    if protocol not in ('ip', 'quic'):
-                        effective_action = 'reject'
+                    effective_action = 'reject'
+            
+            # reject comes from the deny_action override above or from
+            # ACTION_MAP (reset-* -> reject). Never emit it on a protocol outside
+            # the AWS reject allowlist: the shared is_reject_allowed predicate
+            # decides, and a substitution to drop is explained in a note (R11).
+            requested_action = effective_action
+            effective_action, reject_note = self._reject_safe_action(
+                effective_action, protocol)
+            if reject_note:
+                rule_notes.append(reject_note)
             
             # Determine disabled prefix
             disabled_prefix = ''
@@ -1318,6 +1328,8 @@ class PaloAltoConverter:
                         output_lines.append(f'# CONVERSION FAILED: {note}')
                     else:
                         output_lines.append(f'# Note: {note}')
+            if reject_note and options.get('include_conversion_notes', True):
+                output_lines.append(f'# Note: {reject_note}')
             
             output_lines.append(rule_str)
             rules_generated += 1
@@ -1326,7 +1338,10 @@ class PaloAltoConverter:
             if app_tier == 2 and domain:
                 http_port = pp.get('http_port', 'any')
                 http_result = self._generate_tier2_http_rule(
-                    rule_name, app_name, domain, effective_action,
+                    # The HTTP companion rule is always protocol http (reject
+                    # allowed), so it keeps the action requested before the
+                    # per-protocol reject substitution above.
+                    rule_name, app_name, domain, requested_action,
                     src_net, dst_net, port, is_disabled, rule,
                     http_port=http_port
                 )
@@ -1357,6 +1372,22 @@ class PaloAltoConverter:
         
         suricata_action = self.ACTION_MAP.get(pa_action, 'drop')
         return suricata_action
+
+    @staticmethod
+    def _reject_safe_action(action, protocol):
+        """Return (action, note_or_None), substituting drop for an unsupported reject.
+
+        AWS Network Firewall accepts `reject` only on the protocols in
+        REJECT_CAPABLE_PROTOCOLS (shared `is_reject_allowed` predicate). When
+        `action` is `reject` on any other protocol, return `drop` plus a
+        conversion note explaining the substitution. Every other case is
+        returned unchanged with no note.
+        """
+        if action == 'reject' and not is_reject_allowed('reject', protocol):
+            note = (f'reject changed to drop: AWS Network Firewall accepts reject '
+                    f'only on {reject_allowlist_text()} (protocol: {protocol})')
+            return 'drop', note
+        return action, None
 
     def _classify_member(self, member):
         """Classify a source/destination member value using 6-step precedence.
@@ -2113,6 +2144,7 @@ class PaloAltoConverter:
                         )
                         lines.extend(result['lines'])
                         rule_count += result['rule_count']
+                        notes.extend(result.get('notes', []))
                 
                 else:
                     # Non-HTTP/TLS protocol — FQDN limitation
@@ -2165,6 +2197,7 @@ class PaloAltoConverter:
         )
         lines.extend(tls_result['lines'])
         rule_count += tls_result['rule_count']
+        notes.extend(tls_result.get('notes', []))
         
         # HTTP rule
         http_result = self._generate_single_fqdn_rule(
@@ -2174,6 +2207,7 @@ class PaloAltoConverter:
         )
         lines.extend(http_result['lines'])
         rule_count += http_result['rule_count']
+        notes.extend(http_result.get('notes', []))
         
         return {'lines': lines, 'rule_count': rule_count, 'notes': notes}
 
@@ -2197,9 +2231,15 @@ class PaloAltoConverter:
             suffix: Optional suffix for msg (e.g., 'TLS', 'HTTP')
             
         Returns:
-            dict with 'lines', 'rule_count'
+            dict with 'lines', 'rule_count', 'notes'
         """
         lines = []
+        notes = []
+        
+        # Never emit reject on a protocol outside the AWS reject allowlist (R11)
+        suricata_action, reject_note = self._reject_safe_action(suricata_action, protocol)
+        if reject_note:
+            notes.append(reject_note)
         
         disabled_prefix = ''
         if is_disabled:
@@ -2240,7 +2280,7 @@ class PaloAltoConverter:
         )
         lines.append(rule_str)
         
-        return {'lines': lines, 'rule_count': 1}
+        return {'lines': lines, 'rule_count': 1, 'notes': notes}
 
     def _generate_fqdn_manual_ip_rule(self, rule_name, fqdn, fqdn_obj_name, protocol,
                                        port, suricata_action, src_net, src_geoip,
@@ -2277,6 +2317,13 @@ class PaloAltoConverter:
         """
         lines = []
         notes = []
+        
+        # Never emit reject on a protocol outside the AWS reject allowlist (R11)
+        suricata_action, reject_note = self._reject_safe_action(suricata_action, protocol)
+        if reject_note:
+            notes.append(reject_note)
+            if options.get('include_conversion_notes', True):
+                lines.append(f'# Note: {reject_note}')
         
         # Create a variable for the FQDN that needs manual IP resolution
         var_name = self._make_variable_name(fqdn_obj_name)

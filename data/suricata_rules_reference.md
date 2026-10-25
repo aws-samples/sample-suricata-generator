@@ -315,7 +315,7 @@ TLS keywords match on properties of TLS/SSL handshakes. All sticky buffers suppo
   - Example: `tls.version:1.2;`
 - `ssl_version` — match SSL/TLS record version: sslv2, sslv3, tls1.0, tls1.1, tls1.2, tls1.3
   - Multiple: `ssl_version:sslv2,sslv3;`
-  - Negation: `ssl_version:!tls1.2,!tls1.3;` (match if NOT these versions)
+  - Negation: `ssl_version:!tls1.2,tls1.3;` (match if NOT these versions — a single leading `!` on the first value negates the whole list; `!` on any other value, multiple `!`, or duplicate values are rejected)
 
 ### TLS Certificate Validity
 - `tls_cert_notbefore` — match NotBefore date (format: YYYY-MM-DD or ranges)

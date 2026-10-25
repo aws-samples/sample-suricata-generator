@@ -517,7 +517,7 @@ HTTP-layer controls (methods, URL categories, and related web protections).
 
 Examples:
 - HTTP Method Control
-- Block URL Categories
+- Manage URL Categories
 
 ### 7. Default Deny
 Comprehensive default deny rulesets.

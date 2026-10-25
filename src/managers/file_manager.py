@@ -8,6 +8,8 @@ Handles all file I/O operations including:
 - Export functionality (Terraform/CloudFormation/AWS)
 """
 
+from __future__ import annotations
+
 import os
 import json
 import re
@@ -21,6 +23,8 @@ from src.core.suricata_rule import SuricataRule
 from src.core.constants import SuricataConstants, SecurityConstants, ValidationMessages, classify_reference_arn
 from src.core.security_validator import validate_file_operation, security_validator
 from src.core.version import get_main_version
+from src.analysis.rule_validator import RuleValidator, load_keywords_data, header_variable_names
+from src.analysis.rule_validation_messages import render_terse
 
 
 class FileManager:
@@ -91,6 +95,95 @@ class FileManager:
         except Exception as e:
             raise Exception(f"Failed to load file {filename}: {str(e)}")
     
+    def find_hard_save_error(self, rules: List[SuricataRule], variables: dict,
+                             check_variables: bool = True) -> Optional[str]:
+        """Return the first hard-block save error message, or None.
+
+        Pure (no dialogs). Checks, in order: duplicate SIDs among active rules
+        (R10.6), then undefined variables (R10.7) when ``check_variables`` is
+        True. The message text is exactly what save_rules_to_file raises.
+        """
+        # Check for duplicate SIDs
+        sids = [rule.sid for rule in rules if not getattr(rule, 'is_comment', False) and not getattr(rule, 'is_blank', False)]
+        duplicate_sids = [sid for sid in set(sids) if sids.count(sid) > 1]
+        
+        if duplicate_sids:
+            return f"Duplicate SIDs found: {', '.join(map(str, duplicate_sids))}"
+        
+        if not check_variables:
+            return None
+        
+        # Variable validation (R10.7, extended by R13.11)
+        undefined_vars = self.find_undefined_variables(rules, variables)
+        
+        if undefined_vars:
+            var_list = ', '.join(undefined_vars)
+            return f"Rules reference undefined variables: {var_list}"
+        
+        return None
+
+    # Variables AWS Network Firewall defines implicitly; never reported as
+    # undefined at disk save, export, or deploy (R13.11.2).
+    IMPLICIT_VARIABLES = frozenset({'$EXTERNAL_NET', '$HOME_NET'})
+
+    def find_undefined_variables(self, rules: List[SuricataRule], variables: dict) -> list:
+        """Return the sorted undefined header variables used by active rules.
+
+        Pure (no dialogs). Shared by the disk-save hard check
+        (``find_hard_save_error``) and the export/deploy check
+        (``SuricataRuleGenerator._get_undefined_variables``). Detection uses
+        ``header_variable_names`` over the four header fields of every active
+        rule (comment and blank rows skipped), so negated (``!$X``,
+        ``!@REF``) and grouped (``[$A,10.0.0.0/8]``, ``![$A]``,
+        ``[80,$PORTS]``) forms are found (R13.11.1). A variable is undefined
+        if it is missing from ``variables`` or its definition (dict
+        ``"definition"`` or legacy string) is empty. ``$EXTERNAL_NET`` and
+        ``$HOME_NET`` are exempt (R13.11.2). Sorted for a deterministic
+        message order.
+        """
+        variables = variables or {}
+        used_vars = set()
+        for rule in rules:
+            if getattr(rule, 'is_comment', False) or getattr(rule, 'is_blank', False):
+                continue
+            used_vars |= header_variable_names(rule.src_net, rule.src_port,
+                                               rule.dst_net, rule.dst_port)
+        
+        undefined_vars = []
+        for var in sorted(used_vars):
+            if var in self.IMPLICIT_VARIABLES:
+                continue
+            if var not in variables:
+                undefined_vars.append(var)
+                continue
+            var_data = variables[var]
+            # Handle both old format (string) and new format (dict with definition/description)
+            if isinstance(var_data, dict):
+                var_definition = var_data.get("definition", "")
+            else:
+                var_definition = var_data  # Legacy format
+            if not isinstance(var_definition, str) or not var_definition.strip():
+                undefined_vars.append(var)
+        return undefined_vars
+
+    def collect_rule_group_errors(self, rules: List[SuricataRule], variables: dict,
+                                  keywords_data: Optional[dict] = None) -> list:
+        """Aggregate rule errors for the disk-save / export acknowledge dialog.
+
+        Pure (no dialogs). Returns ``[(line_number, code, terse_message)]``
+        sorted by line number, one entry per finding, for every ACTIVE rule
+        (comment and blank rows are ignored, R10.5). ``keywords_data``
+        defaults to the shared ``load_keywords_data()``.
+        """
+        if keywords_data is None:
+            keywords_data = load_keywords_data()
+        validator = RuleValidator(keywords_data, variables)
+        findings = validator.errors_for_rule_group(rules, variables)
+        offenders = [(f.line_num, f.code, render_terse(f)) for f in findings]
+        # Stable sort keeps per-rule finding order within a line.
+        offenders.sort(key=lambda item: item[0])
+        return offenders
+
     def save_rules_to_file(self, filename: str, rules: List[SuricataRule], variables: dict, 
                           tags: dict = None, has_header: bool = False, tracking_enabled: bool = False, 
                           pending_history: List = None) -> bool:
@@ -106,49 +199,16 @@ class FileManager:
             pending_history: Pending history entries to write
         """
         
-        # Check for duplicate SIDs
-        sids = [rule.sid for rule in rules if not getattr(rule, 'is_comment', False) and not getattr(rule, 'is_blank', False)]
-        duplicate_sids = [sid for sid in set(sids) if sids.count(sid) > 1]
+        # Hard checks (duplicate SIDs, undefined variables). The reject-on-ip
+        # backstop that used to raise here is now part of the aggregate
+        # acknowledge flow (collect_rule_group_errors, R10.4).
+        hard_error = self.find_hard_save_error(rules, variables)
+        if hard_error:
+            raise ValueError(hard_error)
         
-        if duplicate_sids:
-            raise ValueError(f"Duplicate SIDs found: {', '.join(map(str, duplicate_sids))}")
-        
-        # Check for reject actions on IP protocol rules (AWS Network Firewall restriction)
-        invalid_ip_rules = []
-        for i, rule in enumerate(rules):
-            if not getattr(rule, 'is_comment', False) and not getattr(rule, 'is_blank', False):
-                if rule.protocol.lower() == 'ip' and rule.action.lower() == 'reject':
-                    line_num = i + 1
-                    invalid_ip_rules.append(line_num)
-        
-        if invalid_ip_rules:
-            lines_str = ', '.join(map(str, invalid_ip_rules))
-            raise ValueError(f"AWS Network Firewall does not allow REJECT action on IP protocol rules. Invalid rules found at line(s): {lines_str}. Change action to 'drop' instead.")
-        
-        # Variable validation
+        # Variables used by the rules decide whether the companion .var file
+        # is written (computed here since the check moved to find_hard_save_error).
         used_vars = self.scan_rules_for_variables(rules)
-        
-        # Handle both old format (string) and new format (dict) for validation
-        undefined_vars = []
-        for var in used_vars:
-            if var not in variables:
-                undefined_vars.append(var)
-            else:
-                var_data = variables[var]
-                # Handle both old format (string) and new format (dict with definition/description)
-                if isinstance(var_data, dict):
-                    var_definition = var_data.get("definition", "")
-                else:
-                    var_definition = var_data  # Legacy format
-                
-                if not var_definition.strip():
-                    undefined_vars.append(var)
-        
-        undefined_vars = [var for var in undefined_vars if var != '$EXTERNAL_NET']
-        
-        if undefined_vars:
-            var_list = ', '.join(undefined_vars)
-            raise ValueError(f"Rules reference undefined variables: {var_list}")
         
         try:
             # Update header if present and tracking enabled

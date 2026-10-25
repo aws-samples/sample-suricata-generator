@@ -1,5 +1,124 @@
 # Release Notes
 
+## Version 2.12.0 - October 25, 2026
+
+### Rule validation in the main editor, paste, save, and export (main editor parity)
+
+The keyword-level checks the **Advanced Editor** performs now also run in the **main editor**, on **paste**, at **save to disk**, and at **export/deploy**. Every path uses one shared, UI-free validator (`src/analysis/rule_validator.py`, with message text in `src/analysis/rule_validation_messages.py`), so the two editors always agree. This delivers the main-editor keyword validation that the 2.11.3 notes described as a future effort. The Advanced Editor's existing behavior is preserved (verified with a snapshot test).
+
+- **Main editor save**: Saving a single rule (edit, blank-line replacement, or new-rule insert) is now blocked when the rule has an error the Advanced Editor flags, with one explanatory dialog for the first error. This replaces the main editor's separate category/protocol and reject/protocol checks. Unknown keywords still save with no warning, so new Suricata or AWS keywords keep working.
+- **Paste**: Rules pasted from the system clipboard that have errors are inserted commented out as `# [VALIDATION ERROR: …] <rule>`, with no dialogs. Valid rules paste normally.
+- **Save to disk, export, and deploy**: Saving the file, Terraform and CloudFormation export, and direct deploy now show one dialog listing every rule with an error by line number. Choose **Save anyway**, **Export anyway**, or **Deploy anyway**, or Cancel; the deploy dialog warns that the deploy is likely to fail. This replaces the previous hard block for `reject` on `ip` at disk save. Duplicate SIDs and undefined variables remain hard blocks, and duplicate SIDs now also block export and deploy. Test-mode export doesn't flag `reject`, because every action becomes `alert`.
+- **New checks that match what AWS Network Firewall accepts**:
+  - Request and response buffers mixed in one rule without a flow direction
+  - An IP set reference (`@REF`) inside a network group, and a customer-supplied `gid`
+  - Keywords AWS doesn't support, flagged as unsupported: `filestore`, `lua`, `luajit`, `luaxform`, `dataset`, `datarep`, `iprep`, and `geneve.tlv`
+  - Uppercase `http.host` content, and a JA3/JA3S hash that isn't hex or is used with `nocase`
+  - Category values: exact case (with a case suggestion), duplicate and empty values, and conflicting `aws_url_category`/`aws_domain_category` keywords in one rule
+  - `aws_route_53_resolved_domain` values that are empty or not a valid domain (matching AWS Network Firewall's domain validation)
+  - `app-layer-protocol` placement is now enforced everywhere, matching AWS: it's rejected after an application-protocol header (anything but tcp, udp, ip, or icmp) or after a protocol-specific keyword such as `tls.sni`, `http.host`, or `dns.query`, even when negated or naming a different protocol. Place it on a tcp or udp header, before those keywords (`ja3.hash`, `ja3s.hash`, and `ja4.hash` don't count). Conflicting `app-layer-protocol` keywords (two non-negated values, or a non-negated value mixed with a negated one) are also flagged. The AI Rule Assistant's auto-fix follows the same rule.
+  - `reject` on an unsupported protocol is now also shown in the Advanced Editor
+  - `flowbits` checked (`isset`/`isnotset`) but never set anywhere in the file: a warning in the Advanced Editor, and listed by the save and export dialog
+- **Keyword data corrections**: `http.content_type` and `http2.header_name` now match both request and response headers, so they're no longer flagged as request-only with `flow:to_client` or as mixed with response buffers. The `http.header` and `tls.cert_fingerprint` sticky buffers were added, so they no longer show "Unknown keyword". `app-layer-protocol` now accepts every protocol AWS Network Firewall supports (for example `smb`, `dcerpc`, `krb5`, `quic`, and `http2`), so valid values are no longer flagged.
+- **Rule length measured the AWS way**: The 8,191-byte limit is now measured in UTF-8 bytes, expanding only header variables (not `$` text inside `msg` or content), with an allowance for the `gid` AWS adds and for `@` reference expansion. The editor warns above 7,691 bytes, and length is checked again at save and export. The AI Rule Assistant's insertion check now uses the same measurement (it previously counted characters against 8,192 and expanded `$` text anywhere in the rule).
+- **Undefined variables**: Negated (`!$X`, `!@REF`) and grouped (`[$A,10.0.0.0/8]`) forms are now detected at save, export, and deploy. `$HOME_NET` is now exempt, like `$EXTERNAL_NET`, matching AWS.
+- **Not checked per rule (by design)**: Uncommenting a rule, toggling a rule's disabled state, find/replace, and copy/paste within the app don't run the per-rule checks. Those rules are still listed by the save and export dialog.
+
+The keyword library `data/content_keywords.json` is bumped to version 1.4.3.
+
+### AI Rule Assistant: validated rule generation
+
+- **Same validator as paste and the editors**: Each generated rule is checked with the shared validator inside the assistant's retry loop, and its errors are fed back to the model to repair. A rule that still has errors after the last attempt is shown in the chat preview with a warning that it will be inserted commented out, and on insert it is added as `# [VALIDATION ERROR: …] <rule>` (the same format as paste), with the chat listing each one by SID. This replaces the assistant's separate URL/domain category protocol check, which skipped such rules instead of inserting them.
+- **No pcre-only rules**: AWS Network Firewall requires a rule that uses `pcre` to also contain `content` (or `tls.sni`, `http.host`, `http.uri`, or `dns.query`). The prompt examples, best-practice hints, the SMB admin-share and QUIC short-header auto-fixes, and the curated example rules no longer produce pcre-only rules; the QUIC example now uses `byte_test` instead of `pcre`.
+- **Example rules AWS would reject were fixed**: a redundant `app-layer-protocol`, an invalid GeoIP country code (`UK` is now `GB`), and the HTTP/2 "reject non-HTTP/2 TCP traffic" example, which is now valid with `app-layer-protocol:!http2`. Every curated example now passes the shared validator. The AI rule examples file `data/aws_rule_examples.json` is now version 1.2.1.
+
+### Rule Analyzer (v4.0.3): pcre companion check matches AWS Network Firewall
+
+The **AWS PCRE Restrictions** check now matches what AWS Network Firewall accepts (verified with CreateRuleGroup DryRun, October 25, 2026). It now accepts `http.uri` as a companion, ignores text inside `msg` and other quoted values, doesn't treat `http.host.raw` as `http.host`, and only checks the lowercase `pcre` keyword, as AWS does. The finding text now lists all five companions: `content`, `tls.sni`, `http.host`, `http.uri`, or `dns.query`. The AI Rule Assistant now treats this finding as an error, and its analyzer feedback now includes each finding's message and suggestion instead of only the category name.
+
+The analyzer also no longer treats words inside `msg` or other quoted values as keywords (for example, in the unsupported-keyword, threshold, priority, UDP `flow:established`, and protocol/keyword checks), so it no longer reports false findings from rule messages.
+
+### Palo Alto importer (v1.0.2-beta): no `reject` on unsupported protocols
+
+The Palo Alto importer no longer emits `reject` on a protocol AWS Network Firewall doesn't accept it for. When a `deny_action` override or a `reset-*` action would produce `reject` on such a protocol, the importer emits `drop` instead and adds a conversion note explaining the change.
+
+### Fix: escaped semicolons and quotes inside quoted values are preserved
+
+Rules with an escaped semicolon (`\;`) inside a quoted value such as `msg`, `content`, or `pcre` were changed when loaded and saved. Part of the `msg` was duplicated into the rule options, and a space was inserted after `\;`, which silently changed what `content` and `pcre` matched. These rules are now kept exactly as written. This applies everywhere the app writes a parsed rule: load and save, paste, re-saving from the main editor, the Advanced Editor, the AI Rule Assistant, Terraform and CloudFormation export, and direct deploy.
+
+- **Escaped quotes in msg**: A `msg` that contains an escaped quote (`\"`) is no longer cut off at the `\"`.
+- **No false validation findings**: The rule validator (main editor, Advanced Editor, paste, and the AI Rule Assistant) no longer reports findings for text inside a quoted value that contains `;`, such as a false `pcre` companion error, "Unknown keyword" warnings, or URL/domain category and `aws_route_53_resolved_domain` findings.
+- **Rule Analyzer**: Findings change only for rules with a `;` inside a quoted value that were built or edited in the main editor, because they no longer pick up text from their `msg`. The analyzer version is unchanged (4.0.3).
+- **Unescaped semicolons**: AWS Network Firewall still rejects a bare `;` inside quotes (use `\;`). Such rules are now preserved as written instead of being split. No new validator error was added for them, so AWS reports them at deploy time.
+
+### Fix: Python 3.7 and 3.8 compatibility
+
+`src/managers/file_manager.py` and seven AI Rule Assistant modules in `src/agent/` (`agent_factory`, `best_practice_checker`, `knowledge_base`, `models`, `rule_builder`, `rule_validator`, `sid_allocator`) used built-in generic type hints such as `tuple[...]` and `list[...]`, which fail at import on Python 3.7 and 3.8, so the application couldn't start there. These modules now use `from __future__ import annotations`. Nothing changes on Python 3.9 and later.
+
+### Fix: AI features work with newer Bedrock models
+
+AI Analysis and the AI Rule Assistant failed with "`temperature` is deprecated for this model" on models such as US Anthropic Claude Opus 5.5. When a model rejects the `temperature` setting, the request is now retried once without it, and later requests to that model omit it. Models that accept `temperature` still use 0.0. Bedrock calls go through the new shared helper `src/agent/bedrock_converse.py`. Responses that contain reasoning blocks before the answer (returned by newer models) are now read correctly instead of failing with "KeyError: 'text'"; only the answer text is used, and a response with no answer text now reports why (for example, the output token limit was reached). AI Analysis and the AI Rule Assistant can now return longer answers (up to 32,000 and 16,000 output tokens), falling back automatically to 8,192 on models with a lower limit. An answer cut off at the output token limit now shows a clear error instead of an empty result, and the AI Analysis request timeout is now 10 minutes instead of 5.
+
+---
+
+## Version 2.11.3 - October 22, 2026
+
+### Advanced Editor: recognizes the new `aws_route_53_resolved_domain` keyword
+
+AWS Network Firewall recently added [Route 53 Resolved IP Validation](https://docs.aws.amazon.com/network-firewall/latest/developerguide/route53-resolved-ip-validation.html), which introduces the `aws_route_53_resolved_domain` Suricata rule keyword. This release teaches the **Advanced Editor** about that keyword:
+
+- **Recognized as a known keyword**: It no longer flags `aws_route_53_resolved_domain` as an "Unknown keyword", and it now appears in the Advanced Editor's auto-complete with a description and examples (the keyword definition lives in `data/content_keywords.json`, bumped to library version 1.4.1).
+- **Syntax validation**: The Advanced Editor now flags the three most common mistakes for this keyword in real time — a value that is not enclosed in double quotes, more than one `aws_route_53_resolved_domain` keyword in a single rule, and a wildcard written with an asterisk instead of a leading dot (`.example.com`). These are advisory (red underline / hover tooltip) and do not block saving. No protocol restriction is applied, since the keyword works on any protocol.
+
+Note that the **main editor already supported this keyword** — it accepts new, arbitrary content keywords without complaint, so rules using `aws_route_53_resolved_domain` could already be authored and saved there. This change only adds the Advanced Editor's real-time recognition and syntax hints; bringing the same keyword-level validation to the main editor is planned as a separate, future effort.
+
+### Main editor: block the `reject` action on unsupported protocols earlier
+
+The main window's rule editor now stops you from saving a rule that uses the `reject` action with a protocol AWS Network Firewall doesn't support for it. AWS Network Firewall accepts `reject` only on `tcp`, `http`, `tls`, `smb`, `dcerpc`, `ssh`, and `smtp`. The editor blocks saving a reject rule on any other protocol (for example `ip`, `udp`, `icmp`, `dns`, `http2`, `ftp`, or `imap`).
+
+- **Earlier, clearer feedback**: Previously this was caught only when saving the whole file to disk (and only for the `ip` protocol). The editor now hard-blocks the save of an individual rule — on edit, blank-line replacement, or new-rule insertion — with an explanatory message as soon as you try to save it, and the check covers every protocol outside the AWS reject allowlist, not just `ip`.
+- **Backstop preserved**: The existing save-to-disk validation remains in place as a safety net for rules introduced by other means (paste, import, etc.).
+- **Rule Analyzer (v4.0.2)**: **Review Rule Groups** and **Review Firewall Policy** now flag `reject` on any protocol outside the AWS allowlist as critical (previously only `ip` and `quic`). These findings appear in one new **Reject on Unsupported Protocol** category, replacing the separate Reject-on-IP and Reject-on-QUIC categories.
+
+### Fix: URL and domain category keywords now allowed on HTTP2 rules
+
+The main editor and the Advanced Editor previously rejected `aws_url_category` and `aws_domain_category` on `http2` rules, even though AWS Network Firewall accepts them. `aws_url_category` is now accepted on HTTP and HTTP2 rules, and `aws_domain_category` on TLS, HTTP, and HTTP2 rules. The rule analyzer and the AI Rule Assistant's rule check no longer flag these combinations either. The main editor's **Insert Category...** button now also works on HTTP2 rules, with the same URL/Domain choice as HTTP.
+
+### Fix: Advanced Editor accuracy for ssl_version, flow.age, xbits, geoip, dsize, and category keywords
+
+The Advanced Editor flagged four rule forms that AWS Network Firewall actually accepts. Each one was verified in the AWS Network Firewall console:
+
+- **ssl_version negation**: A single leading `!` on the first value, which negates the whole list (for example `ssl_version:!tls1.0` or `ssl_version:!tls1.0,tls1.1`), is now accepted. Only a misplaced `!` (on any value other than the first), more than one `!`, or a duplicate value (for example `ssl_version:tls1.2,tls1.2`) is flagged.
+- **flow.age**: Now treated as a supported keyword.
+- **xbits**: Now flagged only when it uses `track tx`. `track ip_src`, `track ip_dst`, and `track ip_pair` are accepted.
+- **geoip**: Can now be combined with app-layer keywords such as `tls.sni` in the same rule. Packet-level keywords such as `dsize` and `flags` are still flagged when mixed with app-layer keywords.
+
+The AI reference text for `ssl_version` negation was also corrected so the AI assistant no longer suggests the rejected `!a,!b` form.
+
+Further accuracy fixes:
+
+- **dsize numeric values**: Numeric values such as `dsize:>5`, `dsize:300<>400`, and `dsize:100` are no longer flagged as invalid. The keyword data had listed dsize's operators (`<`, `>`, `=`) as its only allowed values. dsize was the only keyword with this problem.
+- **flow.age is packet-level**: `flow.age` is now treated as a packet-level keyword, so combining it with app-layer keywords (for example `tls.sni`) is flagged, as AWS Network Firewall requires (verified in the AWS Network Firewall console). `flow.age` on its own is still accepted.
+- **Category syntax hints**: The `aws_url_category` and `aws_domain_category` syntax hints now show unquoted values (for example `aws_url_category:Malware`), which AWS requires. AWS rejects quoted category values (verified in the AWS Network Firewall console), so the Advanced Editor continues to flag them.
+
+---
+
+## Version 2.11.2 - October 21, 2026
+
+### Category rule templates gain Pass/Alert actions and are renamed to "Manage …"
+
+The two category rule templates (**File > Insert Rules From Template**) now support the full set of rule actions, not just blocking ones:
+
+- **Pass and Alert actions added**: The action selector on both category templates now offers **Pass**, **Alert**, **Drop**, and **Reject** (in that order). Previously only Drop and Reject were available, so the templates could only block a category — now you can allow a category (Pass), log it without blocking (Alert), or block it (Drop/Reject) from the same template.
+- **Message verb follows the action**: The generated rule's message now begins with a verb that matches the chosen action — **Allow** for Pass, **Alert on** for Alert, and **Block** for Drop/Reject — so, for example, a Pass rule for the Malware category reads `Allow Malware` instead of the old hard-coded `Block …`.
+- **Templates renamed**: "Block URL Categories" → **Manage URL Categories**, and "Block Domain Categories" → **Manage Domain Categories**, reflecting that they now manage traffic with any action rather than only block it. The template descriptions and the action/category selection labels were reworded to be action-neutral. The rule templates library is bumped to **1.2.2**.
+
+### Insert Category dialog: optional "Alert on pass"
+
+The **Insert Category…** dialog in the main editor gains an **"Alert on pass"** checkbox. It is enabled only when the editor's action was `pass` at the time the dialog was opened (greyed out otherwise, since the `alert` keyword is only valid on pass rules), and defaults to unchecked. When checked, inserting a category adds the `alert` keyword to the Content Keywords field alongside the category keyword (for example, `flow:to_server; alert; aws_domain_category:…`), so the passed traffic is logged.
+
+---
+
 ## Version 2.11.1 - October 19, 2026
 
 ### Bug fix: removed an inaccurate "port on portless protocol" analyzer finding (Rule Analyzer v4.0.1)

@@ -611,7 +611,7 @@ class PolicyReviewService:
     #   * Single-rule findings (categories: sticky_buffer_order,
     #     udp_flow_established, protocol_keyword_mismatch, port_protocol_mismatch,
     #     contradictory_flow, packet_drop_flow_pass? no -- see below,
-    #     reject_ip_protocol, reject_quic_protocol, unsupported_keywords,
+    #     reject_unsupported_protocol, unsupported_keywords,
     #     pcre_restrictions, threshold_limited, priority_strict_order) carry
     #     ``line`` and ``rule``.
     #   * Dual-rule findings (categories: packet_drop_flow_pass, asymmetric_flow)

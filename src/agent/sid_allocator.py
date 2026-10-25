@@ -4,6 +4,8 @@ SID Allocator for the Suricata Rule Generator AI Agent Layer.
 Assigns unique SIDs within the valid range, tracking existing SIDs to avoid collisions.
 """
 
+from __future__ import annotations
+
 from typing import Optional
 from src.core.constants import SuricataConstants
 

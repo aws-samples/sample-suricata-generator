@@ -5,8 +5,11 @@ Maps DetectionIntent to SuricataRule using the existing suricata_rule.py,
 assigns SIDs via SIDAllocator, and produces deterministic rule strings.
 """
 
+from __future__ import annotations
+
 from src.agent.models import DetectionIntent
 from src.agent.sid_allocator import SIDAllocator
+from src.core.rule_options import content_from_options
 from src.core.suricata_rule import SuricataRule
 
 
@@ -38,12 +41,7 @@ class RuleBuilder:
 
         # Clean content: remove msg, sid, rev keywords since to_string() adds them
         if kwargs.get("content"):
-            parts = [p.strip() for p in kwargs["content"].split(";")]
-            cleaned = [
-                p for p in parts
-                if p and not p.startswith("msg:") and not p.startswith("sid:") and not p.startswith("rev:")
-            ]
-            kwargs["content"] = "; ".join(cleaned)
+            kwargs["content"] = content_from_options(kwargs["content"])
 
         rule = SuricataRule(**kwargs)
         return rule.to_string()

@@ -33,6 +33,95 @@ try:
 except ImportError:
     HAS_BOTO3_MRG = False
 
+# The AWS Network Firewall `reject` allowlist (REJECT_CAPABLE_PROTOCOLS) and the
+# is_reject_allowed() predicate live in src/core/aws_rule_constraints.py (shared
+# with the Rule Analyzer). Re-exported here so existing imports keep working.
+from src.core.aws_rule_constraints import (  # noqa: E402
+    REJECT_CAPABLE_PROTOCOLS,
+    is_reject_allowed,
+)
+
+# Header protocols on which AWS Network Firewall accepts the AWS category
+# keywords, plus the helper, live in src/core/category_protocols.py (shared with
+# the Insert Category UI). Re-exported here so existing imports keep working.
+from src.core.category_protocols import (  # noqa: E402
+    AWS_CATEGORY_ALLOWED_PROTOCOLS,
+    is_category_protocol_allowed,
+)
+
+# Shared rule-validation module (also used by the Advanced Editor). Note:
+# src/agent/rule_validator.py defines an unrelated RuleValidator; this module
+# does not import it, so the name below always refers to the shared validator.
+# Keyword data comes from load_keywords_data() (cached at module level). The
+# variables source for both the rule-local and group APIs is self.variables,
+# the app's {name: definition} dict -- no separate state is kept.
+from src.analysis.rule_validator import (  # noqa: E402
+    Finding,
+    RULE_MAX_BYTES,
+    RULE_WARN_BYTES,
+    RuleValidator,
+    load_keywords_data,
+    make_finding,
+    measure_rule_bytes,
+)
+from src.analysis.rule_validation_messages import (  # noqa: E402
+    render_rule_length_warning,
+    render_terse,
+    render_verbose,
+)
+
+
+def _rule_keywords_data():
+    """Return the parsed data/content_keywords.json (cached), or None if unavailable."""
+    return load_keywords_data()
+
+
+def first_rule_validation_error(action, protocol, src_net, src_port, direction,
+                                dst_net, dst_port, message, content,
+                                variables, keywords_data) -> Optional[Finding]:
+    """Return the first rule-local ERROR finding for the given editor values, or None.
+
+    Pure (no Tk): builds a throwaway SuricataRule from the values exactly as the
+    main editor's save paths do (sid/rev are placeholders and are not validated
+    here) and validates ``rule.to_string()`` -- the text that will be saved --
+    with the shared validator's ``errors_for_rule``. Unknown keywords and group
+    conditions (undefined variables, duplicate SIDs, flowbits) never produce a
+    result here.
+    """
+    rule = SuricataRule(
+        action=action,
+        protocol=protocol,
+        src_net=src_net,
+        src_port=src_port,
+        dst_net=dst_net,
+        dst_port=dst_port,
+        message=message,
+        content=content,
+        sid=SuricataConstants.SID_MIN,
+        direction=direction,
+        rev=1,
+    )
+    validator = RuleValidator(keywords_data, variables)
+    errors = validator.errors_for_rule(rule.to_string())
+    return errors[0] if errors else None
+
+
+def paste_validation_comment(validator, parsed_rule, corrected_line) -> Optional[str]:
+    """Return the paste comment-out text for a parsed rule, or None if it is clean.
+
+    Pure (no Tk): runs the shared validator's rule-local ``errors_for_rule`` on
+    ``parsed_rule.to_string()`` (the text that will be inserted). On any ERROR,
+    returns ``# [VALIDATION ERROR: {terse message}] {corrected_line}`` using the
+    first finding. Unknown keywords, warnings, and group conditions never
+    produce a comment (errors_for_rule returns rule-local ERRORs only).
+    """
+    findings = validator.errors_for_rule(parsed_rule.to_string())
+    if not findings:
+        return None
+    terse = render_terse(findings[0])
+    return f"# [VALIDATION ERROR: {terse}] {corrected_line}"
+
+
 class SuricataRuleGenerator:
     """Main application class for the Suricata Rule Generator GUI"""
     def __init__(self):
@@ -1549,11 +1638,11 @@ class SuricataRuleGenerator:
         return True
     
     def validate_total_rule_length(self, rule: SuricataRule) -> bool:
-        """Validate total rule length including expanded variables (AWS limit: 8,192 chars)
-        
-        AWS Network Firewall has a hard limit of 8,192 characters per Suricata rule,
-        INCLUDING the expanded variable values. This validation expands all variables
-        and checks the total length.
+        """Validate the AWS rule length (RULE_TOO_LONG; R12.4, R13.9).
+
+        AWS Network Firewall rejects a rule of 8,192 bytes or more (max 8,191),
+        measured by ``measure_rule_bytes``. Fails with the verbose
+        RULE_TOO_LONG dialog; warns above RULE_WARN_BYTES (7,691).
         
         Args:
             rule: SuricataRule object to validate
@@ -1561,48 +1650,24 @@ class SuricataRuleGenerator:
         Returns:
             bool: True if rule length is valid, False otherwise
         """
-        # Get rule string
-        rule_string = rule.to_string()
-        
-        # Expand all variables to their actual values
-        for var_name, var_data in self.variables.items():
-            if isinstance(var_data, dict):
-                definition = var_data.get("definition", "")
-            else:
-                definition = var_data
-            
-            # Replace variable with its definition
-            if definition:
-                rule_string = rule_string.replace(var_name, definition)
-        
-        # Check total length
-        total_length = len(rule_string)
-        
-        if total_length > 8192:
-            messagebox.showerror(
-                "AWS Network Firewall Quota Violation",
-                f"Rule length exceeds AWS Network Firewall limit!\n\n"
-                f"Total length (with variables expanded): {total_length} characters\n"
-                f"AWS limit: 8,192 characters\n\n"
-                f"Please reduce the rule length by:\n"
-                f"• Shortening the message text\n"
-                f"• Reducing content keywords\n"
-                f"• Simplifying variable definitions\n"
-                f"• Using shorter variable names"
-            )
+        # Measured the AWS way (R13.9): header-only variable expansion, UTF-8
+        # bytes, @ reference fields and the injected gid included. The old
+        # global str.replace (which also rewrote $ text in msg/content) is gone.
+        total_length = measure_rule_bytes(rule, self.variables)
+
+        if total_length > RULE_MAX_BYTES:
+            title, body = render_verbose(make_finding(
+                "RULE_TOO_LONG",
+                params={"length": total_length, "max": RULE_MAX_BYTES}))
+            messagebox.showerror(title, body)
             return False
-        
-        # Warn if approaching limit (within 500 characters)
-        if total_length > 7692:
-            messagebox.showwarning(
-                "Rule Length Warning",
-                f"Rule length is approaching AWS Network Firewall limit!\n\n"
-                f"Current length: {total_length} characters\n"
-                f"AWS limit: 8,192 characters\n"
-                f"Remaining: {8192 - total_length} characters\n\n"
-                f"Consider reducing rule complexity to stay within limits."
-            )
-        
+
+        # Warn if approaching limit (within 500 bytes)
+        if total_length > RULE_WARN_BYTES:
+            title, body = render_rule_length_warning(
+                total_length, RULE_MAX_BYTES - total_length)
+            messagebox.showwarning(title, body)
+
         return True
     
     def validate_ip_set_references(self, new_rule: Optional[SuricataRule] = None, 
@@ -1864,6 +1929,31 @@ class SuricataRuleGenerator:
                 "Suricata syntax requires brackets for all port ranges and complex port specifications.")
             return False
         
+        return True
+    
+    def validate_rule_compat(self) -> bool:
+        """Block saving a rule that has a rule-local validation error.
+
+        Reads the rule editor's fields, runs the shared validator through
+        first_rule_validation_error(), and on the first ERROR shows its verbose
+        dialog. Returns True if the rule is OK to save, False otherwise.
+        """
+        finding = first_rule_validation_error(
+            self.action_var.get(),
+            self.protocol_var.get(),
+            self.src_net_var.get(),
+            self.src_port_var.get(),
+            self.direction_var.get(),
+            self.dst_net_var.get(),
+            self.dst_port_var.get(),
+            self.message_var.get(),
+            self.content_var.get(),
+            self.variables,
+            _rule_keywords_data(),
+        )
+        if finding is not None:
+            messagebox.showerror(*render_verbose(finding))
+            return False
         return True
     
     def add_rule(self):
@@ -2693,6 +2783,27 @@ class SuricataRuleGenerator:
             if not os.access(directory, os.W_OK):
                 raise PermissionError(f"Cannot write to directory: {directory}")
             
+            # Rule validation BEFORE any side effect (history migration, write),
+            # so Cancel leaves nothing changed. Hard errors first (R10.8):
+            # duplicate SIDs and undefined variables block the save.
+            hard_error = self.file_manager.find_hard_save_error(self.rules, self.variables)
+            if hard_error:
+                messagebox.showerror("Validation Error", hard_error)
+                return False
+            
+            # Then the aggregate of rule errors AWS would reject: one
+            # acknowledge dialog, never a hard block (R10.1-R10.4).
+            try:
+                offenders = self.file_manager.collect_rule_group_errors(self.rules, self.variables)
+            except Exception as e:
+                import logging
+                logging.getLogger(__name__).error(
+                    "Rule validation failed during save", exc_info=True)
+                messagebox.showerror("Save Error", f"Failed to save rules to {filename}:\n\n{str(e)}")
+                return False
+            if offenders and not self._confirm_rule_errors(offenders, "save"):
+                return False
+            
             # CRITICAL: If tracking enabled and this is first save, migrate _unsaved_.history
             if self.tracking_enabled and not self.current_file:
                 import tempfile
@@ -2759,6 +2870,179 @@ class SuricataRuleGenerator:
             messagebox.showerror("Save Error", f"Failed to save rules to {filename}:\n\n{str(e)}")
         
         return False
+    
+    def _confirm_rule_errors(self, offenders, context, parent=None) -> bool:
+        """Show ONE aggregate dialog listing rule errors; return the user's choice.
+
+        Used by disk save ("save"), export ("export"), and direct deploy
+        ("deploy") (R10.1-R10.3, R14.2, R14.3). ``offenders`` is the
+        ``[(line_number, code, terse_message)]`` list from
+        ``FileManager.collect_rule_group_errors``. Returns True only when the
+        user clicks the proceed button; Cancel and closing the window are both
+        Cancel. ``parent`` defaults to the main window.
+
+        Per ui-conventions.md: resizable Toplevel with minsize(), buttons
+        packed BOTTOM first, no transient(), grab_set(), wait_window() guarded
+        by winfo_exists(), read-only Text with mouse-wheel and copy bindings.
+        """
+        if not offenders:
+            return True
+        if parent is None:
+            parent = self.root
+
+        proceed_labels = {
+            "save": "Save anyway",
+            "export": "Export anyway",
+            "deploy": "Deploy anyway",
+        }
+        titles = {
+            "save": "Rule Errors - Save",
+            "export": "Rule Errors - Export",
+            "deploy": "Rule Errors - Deploy",
+        }
+        proceed_text = proceed_labels.get(context, "Continue")
+
+        count = len(offenders)
+        heading = f"{count} rule(s) have errors that AWS Network Firewall will reject"
+        detail_lines = []
+        if context == "deploy":
+            detail_lines.append(
+                "AWS Network Firewall will reject these rules, so the deploy is likely to fail.")
+        detail_lines.append(
+            "Review the list below. Cancel to go back and fix the rules, or "
+            f"click '{proceed_text}' to continue.")
+
+        result = [False]
+
+        dialog = tk.Toplevel(parent)
+        dialog.title(titles.get(context, "Rule Errors"))
+        dialog.geometry("720x420")
+        dialog.minsize(480, 300)
+        dialog.resizable(True, True)
+        # NOTE: no transient() call — per ui-conventions.md rule 3.
+        try:
+            dialog.geometry("+%d+%d" % (
+                parent.winfo_rootx() + 100,
+                parent.winfo_rooty() + 80
+            ))
+        except tk.TclError:
+            pass
+
+        def on_proceed():
+            result[0] = True
+            dialog.destroy()
+
+        def on_cancel():
+            result[0] = False
+            dialog.destroy()
+
+        # ── Buttons packed at BOTTOM first (ui-conventions rule 5) ──
+        button_frame = ttk.Frame(dialog)
+        button_frame.pack(side=tk.BOTTOM, fill=tk.X, padx=15, pady=(0, 15))
+        ttk.Button(button_frame, text="Cancel", command=on_cancel).pack(side=tk.RIGHT)
+        ttk.Button(button_frame, text=proceed_text, command=on_proceed).pack(
+            side=tk.RIGHT, padx=(0, 5))
+
+        # ── Content ──
+        main_frame = ttk.Frame(dialog)
+        main_frame.pack(side=tk.TOP, fill=tk.BOTH, expand=True, padx=15, pady=15)
+
+        ttk.Label(main_frame, text=heading, font=("TkDefaultFont", 11, "bold"),
+                  wraplength=660, justify=tk.LEFT).pack(anchor=tk.W, pady=(0, 6))
+        for line in detail_lines:
+            ttk.Label(main_frame, text=line, wraplength=660,
+                      justify=tk.LEFT).pack(anchor=tk.W, pady=(0, 4))
+
+        text_frame = ttk.Frame(main_frame)
+        text_frame.pack(side=tk.TOP, fill=tk.BOTH, expand=True, pady=(6, 0))
+        scrollbar = ttk.Scrollbar(text_frame, orient=tk.VERTICAL)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        text = tk.Text(text_frame, wrap=tk.WORD, height=12, yscrollcommand=scrollbar.set)
+        text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scrollbar.config(command=text.yview)
+
+        for line_number, _code, message in sorted(offenders, key=lambda o: o[0]):
+            text.insert(tk.END, f"Line {line_number}: {message}\n")
+        text.config(state=tk.DISABLED)
+
+        def on_mousewheel(event):
+            if event.num == 4:  # macOS/Linux scroll up
+                text.yview_scroll(-3, "units")
+            elif event.num == 5:  # macOS/Linux scroll down
+                text.yview_scroll(3, "units")
+            else:  # Windows/Linux
+                text.yview_scroll(int(-1 * (event.delta / 120)), "units")
+            return "break"
+
+        def copy_selection(event=None):
+            try:
+                sel = text.get(tk.SEL_FIRST, tk.SEL_LAST)
+                dialog.clipboard_clear()
+                dialog.clipboard_append(sel)
+            except tk.TclError:
+                pass
+            return "break"
+
+        text.bind("<MouseWheel>", on_mousewheel)
+        text.bind("<Button-4>", on_mousewheel)
+        text.bind("<Button-5>", on_mousewheel)
+        text.bind("<Control-c>", copy_selection)
+        text.bind("<Command-c>", copy_selection)
+
+        # Window close (X) and Escape are Cancel.
+        dialog.protocol("WM_DELETE_WINDOW", on_cancel)
+        dialog.bind("<Escape>", lambda e: on_cancel())
+
+        try:
+            dialog.grab_set()
+        except tk.TclError:
+            pass
+
+        if dialog.winfo_exists():
+            dialog.wait_window()
+        return result[0]
+
+    def _check_rules_before_export(self, test_mode, context, parent=None) -> bool:
+        """Validate the rules exactly as they will be exported/deployed (R14).
+
+        Shared by Terraform export, CloudFormation export (``context="export"``)
+        and direct deploy (``context="deploy"``, ``parent`` = AWS config
+        dialog). Validates the output of ``_prepare_rules_for_export`` so test
+        mode (every action -> ``alert``) cannot produce
+        ``REJECT_UNSUPPORTED_PROTOCOL`` (R14.4). Duplicate SIDs are a hard
+        block (R14.5); every other rule error goes to ONE aggregate
+        acknowledge dialog (R14.2). Returns True to proceed, False to abort.
+        The undefined-variable hard block is the caller's (it runs first,
+        with export/deploy wording).
+        """
+        # Parent error dialogs to the AWS config dialog when given (deploy),
+        # else let messagebox use the default root.
+        err_kw = {'parent': parent} if parent is not None else {}
+        try:
+            export_rules = self.file_manager._prepare_rules_for_export(self.rules, test_mode)
+            hard_error = self.file_manager.find_hard_save_error(
+                export_rules, self.variables, check_variables=False)
+        except Exception as e:
+            import logging
+            logging.getLogger(__name__).error(
+                "Rule validation failed before %s", context, exc_info=True)
+            messagebox.showerror("Export Error", str(e), **err_kw)
+            return False
+        if hard_error:
+            messagebox.showerror("Duplicate SIDs", hard_error, **err_kw)
+            return False
+
+        try:
+            offenders = self.file_manager.collect_rule_group_errors(export_rules, self.variables)
+        except Exception as e:
+            import logging
+            logging.getLogger(__name__).error(
+                "Rule validation failed before %s", context, exc_info=True)
+            messagebox.showerror("Export Error", str(e), **err_kw)
+            return False
+        if not offenders:
+            return True
+        return self._confirm_rule_errors(offenders, context, parent)
     
     
 
@@ -2882,6 +3166,8 @@ class SuricataRuleGenerator:
         """Parse clipboard text into SuricataRule objects with auto-conversion for port brackets"""
         rules = []
         lines = clipboard_text.strip().split('\n')
+        # Shared rule validator, built lazily once per call (not per line)
+        validator = None
         
         for line in lines:
             line = line.strip()
@@ -2956,8 +3242,20 @@ class SuricataRuleGenerator:
                         error_rule.comment_text = f"# [VALIDATION ERROR: {error_summary}] {corrected_line}"
                         rules.append(error_rule)
                     else:
-                        # Valid rule - add it
-                        rules.append(parsed_rule)
+                        # Field checks passed - run the shared rule-local
+                        # keyword/content checks (no dialogs; R9). One
+                        # validator per parse_clipboard_text call.
+                        if validator is None:
+                            validator = RuleValidator(load_keywords_data(), self.variables)
+                        comment_text = paste_validation_comment(validator, parsed_rule, corrected_line)
+                        if comment_text is not None:
+                            error_rule = SuricataRule()
+                            error_rule.is_comment = True
+                            error_rule.comment_text = comment_text
+                            rules.append(error_rule)
+                        else:
+                            # Valid rule - add it
+                            rules.append(parsed_rule)
                 else:
                     # Malformed rule - insert as comment with error note
                     error_rule = SuricataRule()
@@ -3438,6 +3736,12 @@ class SuricataRuleGenerator:
                 f"Cannot export with undefined variables:\n\n{var_list}\n\n"
                 "Please define these variables in the Variables tab before exporting."
             )
+            return
+        
+        # STEP 2.65: Duplicate-SID hard block, then ONE aggregate acknowledge
+        # dialog for rule errors AWS would reject, validated on the rules as
+        # exported (test-mode conversion applied) (R14.1, R14.2, R14.4, R14.5).
+        if not self._check_rules_before_export(test_mode, "export"):
             return
         
         # STEP 2.7: Enforce the AWS 2 MB rules-string limit before writing the
@@ -4035,25 +4339,13 @@ class SuricataRuleGenerator:
         Shared by the Direct Deploy and IaC (Terraform/CloudFormation) export
         paths so all three block on undefined variables identically. A
         variable is undefined if it is used in a rule but missing from
-        ``self.variables`` or defined with an empty value. ``$EXTERNAL_NET``
-        is excluded because AWS Network Firewall defines it implicitly.
+        ``self.variables`` or defined with an empty value. Detection covers
+        negated and grouped header forms (R13.11.1); ``$EXTERNAL_NET`` and
+        ``$HOME_NET`` are excluded because AWS Network Firewall defines them
+        implicitly (R13.11.2). Same helper as the disk-save hard check;
+        returned sorted.
         """
-        used_vars = self.file_manager.scan_rules_for_variables(self.rules)
-        undefined_vars = []
-        for var in used_vars:
-            if var == '$EXTERNAL_NET':
-                continue  # Auto-defined by AWS
-            if var not in self.variables:
-                undefined_vars.append(var)
-            else:
-                var_data = self.variables[var]
-                if isinstance(var_data, dict):
-                    var_def = var_data.get('definition', '')
-                else:
-                    var_def = var_data
-                if not var_def.strip():
-                    undefined_vars.append(var)
-        return undefined_vars
+        return self.file_manager.find_undefined_variables(self.rules, self.variables)
     
     def show_iac_rule_group_name_dialog(self, export_format: str, test_mode: bool) -> Optional[str]:
         """Prompt for the rule group name to embed in a Terraform/CloudFormation export.
@@ -4460,6 +4752,19 @@ class SuricataRuleGenerator:
                     f"Cannot deploy with undefined variables:\n\n{var_list}\n\n"
                     "Please define these variables in the Variables tab before deploying."
                 )
+                return
+            
+            # Duplicate-SID hard block, then the aggregate acknowledge dialog
+            # warning that the deploy is likely to fail (R14.1-R14.5). On
+            # Cancel the config dialog stays open and no AWS call is made.
+            proceed = self._check_rules_before_export(test_mode, "deploy", parent=dialog)
+            if not proceed:
+                # The confirm/error dialog took the grab; give it back.
+                try:
+                    if dialog.winfo_exists():
+                        dialog.grab_set()
+                except tk.TclError:
+                    pass
                 return
             
             # Close config dialog
@@ -4870,35 +5175,10 @@ class SuricataRuleGenerator:
                 if not self.validate_port_field(self.dst_port_var.get(), "Dest Port"):
                     return
                 
-                # Validate category keywords match protocol
-                content = self.content_var.get().lower()
-                protocol = self.protocol_var.get().lower()
-                
-                if 'aws_url_category:' in content:
-                    if protocol != 'http':
-                        messagebox.showerror(
-                            "Protocol/Category Mismatch",
-                            f"The Content Keywords field contains aws_url_category which only supports HTTP protocol.\n\n"
-                            f"Current protocol: {protocol.upper()}\n"
-                            f"Required protocol: HTTP\n\n"
-                            f"Please either:\n"
-                            f"1. Change protocol to HTTP\n"
-                            f"2. Remove aws_url_category from Content Keywords"
-                        )
-                        return
-                
-                if 'aws_domain_category:' in content:
-                    if protocol not in ['tls', 'http']:
-                        messagebox.showerror(
-                            "Protocol/Category Mismatch",
-                            f"The Content Keywords field contains aws_domain_category which only supports TLS or HTTP protocols.\n\n"
-                            f"Current protocol: {protocol.upper()}\n"
-                            f"Required protocols: TLS or HTTP\n\n"
-                            f"Please either:\n"
-                            f"1. Change protocol to TLS or HTTP\n"
-                            f"2. Remove aws_domain_category from Content Keywords"
-                        )
-                        return
+                # Block rule-local keyword/protocol errors (shared validator:
+                # category protocols, reject allowlist, keyword checks)
+                if not self.validate_rule_compat():
+                    return
                 
                 # Create new rule from editor fields
                 options_parts = []
@@ -5169,35 +5449,10 @@ class SuricataRuleGenerator:
                 if not self.validate_port_field(self.dst_port_var.get(), "Dest Port"):
                     return
                 
-                # Validate category keywords match protocol
-                content = self.content_var.get().lower()
-                protocol = self.protocol_var.get().lower()
-                
-                if 'aws_url_category:' in content:
-                    if protocol != 'http':
-                        messagebox.showerror(
-                            "Protocol/Category Mismatch",
-                            f"The Content Keywords field contains aws_url_category which only supports HTTP protocol.\n\n"
-                            f"Current protocol: {protocol.upper()}\n"
-                            f"Required protocol: HTTP\n\n"
-                            f"Please either:\n"
-                            f"1. Change protocol to HTTP\n"
-                            f"2. Remove aws_url_category from Content Keywords"
-                        )
-                        return
-                
-                if 'aws_domain_category:' in content:
-                    if protocol not in ['tls', 'http']:
-                        messagebox.showerror(
-                            "Protocol/Category Mismatch",
-                            f"The Content Keywords field contains aws_domain_category which only supports TLS or HTTP protocols.\n\n"
-                            f"Current protocol: {protocol.upper()}\n"
-                            f"Required protocols: TLS or HTTP\n\n"
-                            f"Please either:\n"
-                            f"1. Change protocol to TLS or HTTP\n"
-                            f"2. Remove aws_domain_category from Content Keywords"
-                        )
-                        return
+                # Block rule-local keyword/protocol errors (shared validator:
+                # category protocols, reject allowlist, keyword checks)
+                if not self.validate_rule_compat():
+                    return
                 
                 # Check if any non-message fields changed to determine if rev should increment
                 original_rule = self.rules[self.selected_rule_index]
@@ -5658,6 +5913,11 @@ class SuricataRuleGenerator:
             if not self.validate_port_field(self.src_port_var.get(), "Source Port"):
                 return
             if not self.validate_port_field(self.dst_port_var.get(), "Dest Port"):
+                return
+            
+            # Block rule-local keyword/protocol errors (shared validator:
+            # category protocols, reject allowlist, keyword checks)
+            if not self.validate_rule_compat():
                 return
             
             # Create new rule from editor fields

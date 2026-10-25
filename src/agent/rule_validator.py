@@ -5,10 +5,13 @@ Validates Suricata rule strings using SuricataRule.from_string() for parsing,
 then checks action, protocol, keywords, and SID against known-good sets.
 """
 
+from __future__ import annotations
+
 import re
 from src.agent.knowledge_base import KnowledgeBase
 from src.agent.models import ValidationError, ValidationResult
 from src.core.constants import SuricataConstants
+from src.core.rule_options import split_options_lossless
 from src.core.suricata_rule import SuricataRule
 
 # Standard Suricata meta-keywords that are always valid (not in content_keywords.json)
@@ -115,7 +118,7 @@ class RuleValidator:
             return set()
         options = match.group(1)
         keywords = set()
-        for part in options.split(';'):
+        for part in split_options_lossless(options):
             part = part.strip()
             if not part:
                 continue

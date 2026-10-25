@@ -8,6 +8,7 @@ individual Suricata rules with parsing, validation, and formatting capabilities.
 import re
 from typing import Optional
 from src.core.constants import SuricataConstants, ValidationMessages
+from src.core.rule_options import content_from_options, extract_msg
 
 
 class SuricataRule:
@@ -159,10 +160,8 @@ class SuricataRule:
         original_options = options_str or ""
         
         if options_str:
-            # Extract message from msg:"text" format
-            msg_match = re.search(r'msg:"([^"]*)"', options_str)
-            if msg_match:
-                message = msg_match.group(1)
+            # Extract message from msg:"text" format (honors \" escapes)
+            message = extract_msg(options_str)
             
             # Extract SID number - match sid: that is NOT inside quoted strings
             # Use negative lookbehind to ensure we're not inside a msg:"..." field
@@ -189,17 +188,8 @@ class SuricataRule:
                     rev = 1  # Use default if parsing fails
             
             # Extract all other content (keywords, flow, etc.) excluding msg, sid, and rev
-            content_parts = []
-            parts = options_str.split(';')
-            for part in parts:
-                part = part.strip()
-                if (part and 
-                    not part.startswith('msg:') and 
-                    not part.startswith('sid:') and 
-                    not part.startswith('rev:') and 
-                    part != ''):
-                    content_parts.append(part)
-            content = '; '.join(content_parts)
+            # (quote-aware split: a ';' inside a quoted value does not split it)
+            content = content_from_options(options_str)
         
         rule = cls(action, protocol, src_net, src_port, dst_net, dst_port, message, content, sid, direction, original_options, rev)
         # Preserve the original raw text for display purposes (e.g., local file rule popups)

@@ -1,6 +1,6 @@
 {
-  "version": "1.3.0",
-  "last_updated": "2026-08-01",
+  "version": "1.4.3",
+  "last_updated": "2026-10-25",
   "description": "AWS Network Firewall Suricata Content Keywords",
   "note": "This file contains keywords verified to work with AWS Network Firewall. Users can add new keywords as AWS/Suricata adds features.",
   "keywords": [
@@ -240,7 +240,7 @@
       "syntax": "http2.header_name; content:\"<header_name>\"",
       "syntax_mode": "sticky_buffer",
       "keyword_level": "app_layer",
-      "flow_direction": "to_server",
+      "flow_direction": "both",
       "modifiers": [
         "content",
         "nocase",
@@ -280,6 +280,7 @@
       "syntax": "ja3.hash; content:\"<hash>\"",
       "syntax_mode": "sticky_buffer",
       "keyword_level": "app_layer",
+      "sets_app_layer_protocol": false,
       "flow_direction": "to_server",
       "modifiers": [
         "content",
@@ -294,6 +295,7 @@
       "syntax": "ja3s.hash; content:\"<hash>\"",
       "syntax_mode": "sticky_buffer",
       "keyword_level": "app_layer",
+      "sets_app_layer_protocol": false,
       "flow_direction": "to_client",
       "modifiers": [
         "content",
@@ -308,6 +310,7 @@
       "syntax": "ja4.hash; content:\"<pattern>\"",
       "syntax_mode": "sticky_buffer",
       "keyword_level": "app_layer",
+      "sets_app_layer_protocol": false,
       "modifiers": [
         "content",
         "startswith",
@@ -352,19 +355,22 @@
         "tls1.3"
       ],
       "multi_value": true,
-      "description": "Match version of SSL/TLS record. Multiple versions can be specified with commas to match any of the listed versions.",
+      "description": "Match version of SSL/TLS record. Multiple versions can be specified with commas to match any of the listed versions. A single leading ! on the first value negates the whole list.",
       "category": "tls",
       "example": "ssl_version:tls1.2",
       "examples": [
         "ssl_version:tls1.2;",
         "ssl_version:sslv2,sslv3;",
         "ssl_version:tls1.0,tls1.1;",
-        "ssl_version:tls1.2,tls1.3;"
+        "ssl_version:tls1.2,tls1.3;",
+        "ssl_version:!tls1.0,tls1.1;"
       ],
       "notes": [
         "Matches the SSL/TLS record version, not negotiated version",
         "Multiple versions can be comma-separated (matches if ANY listed version is seen)",
-        "Negation (!) is NOT supported in AWS Network Firewall",
+        "Negation: a single leading ! on the FIRST value negates the whole list (e.g., ssl_version:!tls1.0,tls1.1 matches any version except TLS 1.0 and 1.1)",
+        "Only one ! is allowed, and only on the first value — ssl_version:tls1.0,!tls1.1 and ssl_version:!tls1.0,!tls1.1 are rejected",
+        "Each version may appear only once — duplicate values (e.g., ssl_version:tls1.2,tls1.2) are rejected",
         "To block old versions: use alert/drop with ssl_version:tls1.0,tls1.1 to match deprecated traffic"
       ]
     },
@@ -378,6 +384,34 @@
         "ftp",
         "smtp",
         "dns",
+        "http2",
+        "nfs",
+        "imap",
+        "smb",
+        "dcerpc",
+        "ntp",
+        "ftp-data",
+        "tftp",
+        "ike",
+        "krb5",
+        "quic",
+        "dhcp",
+        "rfb",
+        "mqtt",
+        "pgsql",
+        "telnet",
+        "websocket",
+        "ldap",
+        "doh2",
+        "rdp",
+        "bittorrent-dht",
+        "pop3",
+        "mdns",
+        "snmp",
+        "http1",
+        "ikev2",
+        "failed",
+        "unknown",
         "!tls",
         "!http",
         "!ssh"
@@ -389,7 +423,6 @@
     {
       "name": "geoip",
       "syntax": "geoip:<direction>,<country_code>[,<country_code>]",
-      "keyword_level": "packet",
       "values": [
         "src",
         "dst",
@@ -412,7 +445,7 @@
         "both = match if source AND destination match (AND logic)",
         "Supports multiple comma-separated country codes",
         "Negation (!) must prefix each country code individually (e.g., !US,!GB)",
-        "Cannot be combined with app-layer keywords (tls.sni, http.*, dns.query, etc.) in the same rule",
+        "Can be combined with app-layer keywords (tls.sni, http.*, dns.query, etc.) in the same rule",
         "Uses MaxMind GeoIP database for IP-to-country lookups",
         "IP must have a location in MaxMind's database to match — anycast IPs will not match",
         "Network Firewall only allows valid ISO 3166-1 alpha-2 country codes",
@@ -586,12 +619,7 @@
       "name": "dsize",
       "syntax": "dsize:<operator><size>",
       "keyword_level": "packet",
-      "values": [
-        "<",
-        ">",
-        "="
-      ],
-      "description": "Match on payload data size",
+      "description": "Match on payload data size. Takes a numeric size, optionally prefixed with an operator (<, >, =) or written as a range (min<>max), e.g. dsize:100, dsize:>5, dsize:300<>400",
       "category": "payload",
       "example": "dsize:>1000"
     },
@@ -684,22 +712,25 @@
     },
     {
       "name": "xbits",
-      "syntax": "xbits:<operation>,<name>,track tx",
-      "supported": false,
-      "unsupported_reason": "requires undocumented rule hook — use flowbits instead",
-      "description": "Transaction-level bit tracking. Listed as partially supported in AWS Network Firewall documentation but may require explicit rule hooks not documented publicly. Consider using flowbits instead for reliable cross-rule state tracking.",
+      "syntax": "xbits:<operation>,<name>,track <ip_src|ip_dst|ip_pair>[,expire <seconds>]",
+      "description": "Extended bit tracking keyed by IP address (track ip_src, ip_dst, or ip_pair), with optional expiration. Lets one rule set state that another rule checks across flows. track tx is not supported in AWS Network Firewall — use flowbits for per-flow state instead.",
       "category": "flow",
-      "example": "xbits:set,suspicious,track tx",
+      "example": "xbits:set,suspicious,track ip_src,expire 3600",
+      "examples": [
+        "xbits:set,suspicious,track ip_src,expire 3600;",
+        "xbits:isset,suspicious,track ip_src;",
+        "xbits:set,allowed_dst,track ip_dst,expire 3600;",
+        "xbits:isset,seen_pair,track ip_pair;"
+      ],
       "notes": [
-        "track ip_src, ip_dst, and ip_pair are explicitly NOT supported",
-        "track tx may require an explicit rule hook (undocumented requirement)",
-        "Consider using flowbits for reliable state tracking in AWS Network Firewall",
+        "track ip_src, ip_dst, and ip_pair are supported in AWS Network Firewall",
+        "track tx is NOT supported in AWS Network Firewall — use flowbits instead",
         "Only 'set' and 'isset' operations are supported (not unset, isnotset, toggle)"
       ]
     },
     {
       "name": "aws_url_category",
-      "syntax": "aws_url_category:\"<category>\"",
+      "syntax": "aws_url_category:<category>[,<category>]",
       "keyword_level": "app_layer",
       "values": [
         "Abortion",
@@ -755,7 +786,7 @@
         "Violence and Hate Speech"
       ],
       "multi_value": true,
-      "description": "Match traffic based on AWS-maintained URL categories. Only supports HTTP protocol. Supports comma-separated categories. For HTTPS traffic, requires TLS inspection/decryption to be effective. Cannot be combined with geoip in same rule.",
+      "description": "Match traffic based on AWS-maintained URL categories. Only supports HTTP and HTTP2 protocols. Supports comma-separated categories. For HTTPS traffic, requires TLS inspection/decryption to be effective. Cannot be combined with geoip in same rule.",
       "category": "aws",
       "example": "aws_url_category:Malware",
       "examples": [
@@ -764,18 +795,19 @@
         "aws_url_category:Malware,Phishing,Command and Control;"
       ],
       "notes": [
-        "Only supports HTTP protocol (use protocol http)",
+        "Only supports HTTP and HTTP2 protocols (use protocol http or http2)",
         "Requires TLS inspection for HTTPS traffic effectiveness",
         "Cannot be combined with geoip filtering",
         "Category database automatically maintained by AWS",
         "Evaluates complete URL path (30 recursive lookups)",
         "Falls back to domain-level evaluation (10 subdomain lookups)",
-        "Single URL may map to multiple categories"
+        "Single URL may map to multiple categories",
+        "Category values must not be quoted, e.g. aws_url_category:Malware (verified against AWS Network Firewall)"
       ]
     },
     {
       "name": "aws_domain_category",
-      "syntax": "aws_domain_category:\"<category>\"",
+      "syntax": "aws_domain_category:<category>[,<category>]",
       "keyword_level": "app_layer",
       "values": [
         "Abortion",
@@ -831,7 +863,7 @@
         "Violence and Hate Speech"
       ],
       "multi_value": true,
-      "description": "Match traffic based on AWS-maintained domain categories. Supports TLS and HTTP protocols. Supports comma-separated categories. Works without TLS inspection. Cannot be combined with geoip in same rule.",
+      "description": "Match traffic based on AWS-maintained domain categories. Supports TLS, HTTP, and HTTP2 protocols. Supports comma-separated categories. Works without TLS inspection. Cannot be combined with geoip in same rule.",
       "category": "aws",
       "example": "aws_domain_category:Malware",
       "examples": [
@@ -840,14 +872,34 @@
         "aws_domain_category:Adult and Mature Content,Artificial Intelligence and Machine Learning;"
       ],
       "notes": [
-        "Supports TLS and HTTP protocols",
+        "Supports TLS, HTTP, and HTTP2 protocols",
         "For TLS: inspects SNI field (works without TLS decryption)",
         "For HTTP: inspects host header",
         "Cannot be combined with geoip filtering",
         "Category database automatically maintained by AWS",
         "Domain-level evaluation only (10 subdomain lookups)",
         "More effective with TLS inspection but functions without it",
-        "Single domain may map to multiple categories"
+        "Single domain may map to multiple categories",
+        "Category values must not be quoted, e.g. aws_domain_category:Malware (verified against AWS Network Firewall)"
+      ]
+    },
+    {
+      "name": "aws_route_53_resolved_domain",
+      "syntax": "aws_route_53_resolved_domain:\"<domain>\"",
+      "description": "Match when the VPC's Amazon Route 53 Resolver resolved the connection's destination IP for the given domain. Requires the policy-level resolved IP validation setting. The value must be a double-quoted domain string; a leading dot (e.g. .example.com) is a wildcard matching the domain and its subdomains. Multiple domains may be given as one comma-separated list inside the quotes. Exactly one aws_route_53_resolved_domain keyword is allowed per rule. Works on any protocol.",
+      "category": "aws",
+      "example": "aws_route_53_resolved_domain:\"example.com\"",
+      "examples": [
+        "aws_route_53_resolved_domain:\"example.com\";",
+        "aws_route_53_resolved_domain:\".example.com\";",
+        "aws_route_53_resolved_domain:\"api.example.com,cdn.example.com\";"
+      ],
+      "notes": [
+        "Value MUST be a double-quoted domain string",
+        "Use a leading dot for wildcard subdomain matching (e.g. .example.com); do NOT use an asterisk (*)",
+        "List multiple domains as one comma-separated value inside the quotes",
+        "Exactly one aws_route_53_resolved_domain keyword is allowed per rule",
+        "Works on any protocol; matches on the provenance of the destination IP"
       ]
     },
     {
@@ -918,7 +970,7 @@
       "syntax": "http.content_type; content:\"<pattern>\"",
       "syntax_mode": "sticky_buffer",
       "keyword_level": "app_layer",
-      "flow_direction": "to_server",
+      "flow_direction": "both",
       "modifiers": [
         "content",
         "nocase",
@@ -928,6 +980,36 @@
       "description": "Match on HTTP Content-Type header value. Sticky buffer for the Content-Type field.",
       "category": "http",
       "example": "http.content_type; content:\"application/json\";"
+    },
+    {
+      "name": "http.header",
+      "syntax": "http.header; content:\"<header>|3a 20|<value>\"",
+      "syntax_mode": "sticky_buffer",
+      "keyword_level": "app_layer",
+      "flow_direction": "both",
+      "modifiers": [
+        "content",
+        "nocase",
+        "startswith",
+        "endswith",
+        "offset",
+        "depth",
+        "distance",
+        "within",
+        "bsize"
+      ],
+      "description": "Match on the normalized HTTP header block (all request or response headers, excluding the request/status line). Sticky buffer for the full header section.",
+      "category": "http",
+      "example": "http.header; content:\"Upgrade|3a 20|websocket\"; nocase;",
+      "examples": [
+        "http.header; content:\"Upgrade|3a 20|websocket\"; nocase;",
+        "http.header; content:\"X-Forwarded-For|3a 20|\";"
+      ],
+      "notes": [
+        "Matches request headers or response headers depending on the flow direction",
+        "Use |3a 20| hex bytes for the colon-space separator between header name and value",
+        "Each header line ends with |0d 0a| in the normalized buffer"
+      ]
     },
     {
       "name": "http.stat_code",
@@ -1035,6 +1117,30 @@
       ]
     },
     {
+      "name": "tls.cert_fingerprint",
+      "syntax": "tls.cert_fingerprint; content:\"<fingerprint>\"",
+      "syntax_mode": "sticky_buffer",
+      "keyword_level": "app_layer",
+      "modifiers": [
+        "content",
+        "startswith",
+        "endswith"
+      ],
+      "description": "Match TLS/SSL server certificate SHA1 fingerprint. Sticky buffer containing the fingerprint as lowercase colon-separated hex (aa:bb:cc:...).",
+      "category": "tls",
+      "example": "tls.cert_fingerprint; content:\"6f:3c:2a:11:22:33:44:55:66:77:88:99:aa:bb:cc:dd:ee:ff:00:11\";",
+      "examples": [
+        "tls.cert_fingerprint; content:\"6f:3c:2a:11:22:33:44:55:66:77:88:99:aa:bb:cc:dd:ee:ff:00:11\";"
+      ],
+      "notes": [
+        "Fingerprint is the SHA1 hash of the DER-encoded server certificate",
+        "Buffer is lowercase hex - write content values in lowercase",
+        "Not visible in TLS 1.3 handshakes (the certificate is encrypted)",
+        "Sticky buffer form (tls.cert_fingerprint; content:\"value\"); distinct from the direct-value tls.fingerprint:\"value\" keyword, which takes the value after a colon and supports ! negation",
+        "Use with flow:to_client,established to match server certificate"
+      ]
+    },
+    {
       "name": "flowint",
       "syntax": "flowint:<name>,<operation>[,<value>]",
       "description": "Flow integer variables for counting and tracking within a flow. Allows arithmetic and comparison operations on per-flow integer counters.",
@@ -1082,11 +1188,85 @@
     {
       "name": "flow.age",
       "syntax": "flow.age:<operator><seconds>",
-      "supported": false,
-      "unsupported_reason": "not enabled in AWS Network Firewall suricata.yaml",
-      "description": "Match on the age of the flow in seconds. Not supported in AWS Network Firewall.",
+      "keyword_level": "packet",
+      "description": "Match on the age of the flow in seconds (e.g., flow.age:>60 matches flows older than 60 seconds).",
       "category": "flow",
-      "example": "flow.age:>60"
+      "example": "flow.age:>60",
+      "notes": [
+        "Packet-level keyword: cannot be combined with app-layer keywords (e.g. tls.sni, http.host, dns.query) in the same rule (verified against AWS Network Firewall)"
+      ]
+    },
+    {
+      "name": "filestore",
+      "syntax": "filestore",
+      "description": "NOT SUPPORTED by AWS Network Firewall (do not use). Store files extracted from the flow (Suricata file extraction).",
+      "category": "general",
+      "example": "filestore",
+      "supported": false,
+      "unsupported_reason": "the service rejects this keyword in customer rule groups"
+    },
+    {
+      "name": "lua",
+      "syntax": "lua:<script>",
+      "description": "NOT SUPPORTED by AWS Network Firewall (do not use). Run a Lua script to decide whether the rule matches.",
+      "category": "general",
+      "example": "lua:script.lua",
+      "supported": false,
+      "unsupported_reason": "the service rejects this keyword in customer rule groups"
+    },
+    {
+      "name": "luajit",
+      "syntax": "luajit:<script>",
+      "description": "NOT SUPPORTED by AWS Network Firewall (do not use). Run a LuaJIT script to decide whether the rule matches.",
+      "category": "general",
+      "example": "luajit:script.lua",
+      "supported": false,
+      "unsupported_reason": "the service rejects this keyword in customer rule groups"
+    },
+    {
+      "name": "luaxform",
+      "syntax": "luaxform:<script>",
+      "description": "NOT SUPPORTED by AWS Network Firewall (do not use). Transform a sticky buffer with a Lua script.",
+      "category": "general",
+      "example": "luaxform:script.lua",
+      "supported": false,
+      "unsupported_reason": "the service rejects this keyword in customer rule groups"
+    },
+    {
+      "name": "dataset",
+      "syntax": "dataset:<command>,<name>",
+      "description": "NOT SUPPORTED by AWS Network Firewall (do not use). Match a sticky buffer against a dataset (set/isset/isnotset).",
+      "category": "general",
+      "example": "dataset:isset,ds",
+      "supported": false,
+      "unsupported_reason": "the service rejects this keyword in customer rule groups"
+    },
+    {
+      "name": "datarep",
+      "syntax": "datarep:<name>,<operator>,<value>",
+      "description": "NOT SUPPORTED by AWS Network Firewall (do not use). Match a sticky buffer against a dataset reputation value.",
+      "category": "general",
+      "example": "datarep:ds,>,50",
+      "supported": false,
+      "unsupported_reason": "the service rejects this keyword in customer rule groups"
+    },
+    {
+      "name": "iprep",
+      "syntax": "iprep:<side>,<category>,<operator>,<value>",
+      "description": "NOT SUPPORTED by AWS Network Firewall (do not use). Match on IP reputation data.",
+      "category": "general",
+      "example": "iprep:src,BadHosts,>,30",
+      "supported": false,
+      "unsupported_reason": "the service rejects this keyword in customer rule groups"
+    },
+    {
+      "name": "geneve.tlv",
+      "syntax": "geneve.tlv",
+      "description": "NOT SUPPORTED by AWS Network Firewall (do not use). Inspect GENEVE tunnel TLV options.",
+      "category": "general",
+      "example": "geneve.tlv",
+      "supported": false,
+      "unsupported_reason": "the service rejects this keyword in customer rule groups"
     }
   ]
 }

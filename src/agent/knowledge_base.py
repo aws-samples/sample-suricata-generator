@@ -5,6 +5,8 @@ Loads and caches content_keywords.json and rule_templates.json from local files
 or optionally from S3. Provides grounding data for the NL Parser.
 """
 
+from __future__ import annotations
+
 import json
 import os
 from typing import Optional

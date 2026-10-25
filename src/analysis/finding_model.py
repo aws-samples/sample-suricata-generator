@@ -56,8 +56,7 @@ class Category:
     CONTRADICTORY_FLOW = "contradictory_flow"
     PACKET_DROP_FLOW_PASS = "packet_drop_flow_pass"
     ASYMMETRIC_FLOW = "asymmetric_flow"
-    REJECT_IP_PROTOCOL = "reject_ip_protocol"
-    REJECT_QUIC_PROTOCOL = "reject_quic_protocol"
+    REJECT_UNSUPPORTED_PROTOCOL = "reject_unsupported_protocol"
     UNSUPPORTED_KEYWORDS = "unsupported_keywords"
     PCRE_RESTRICTIONS = "pcre_restrictions"
     THRESHOLD_LIMITED = "threshold_limited"
@@ -79,8 +78,7 @@ ALLOWED_SEVERITIES = {
     Category.CONTRADICTORY_FLOW: {Severity.WARNING},
     Category.PACKET_DROP_FLOW_PASS: {Severity.WARNING},
     Category.ASYMMETRIC_FLOW: {Severity.CRITICAL, Severity.WARNING},
-    Category.REJECT_IP_PROTOCOL: {Severity.CRITICAL},
-    Category.REJECT_QUIC_PROTOCOL: {Severity.CRITICAL},
+    Category.REJECT_UNSUPPORTED_PROTOCOL: {Severity.CRITICAL},
     Category.UNSUPPORTED_KEYWORDS: {Severity.CRITICAL},
     Category.PCRE_RESTRICTIONS: {Severity.CRITICAL},
     Category.THRESHOLD_LIMITED: {Severity.WARNING},

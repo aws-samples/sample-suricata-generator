@@ -30,6 +30,13 @@ except ImportError:
 
 from src.agent.agent_factory import AgentFactory
 from src.agent.models import GenerationResult
+from src.analysis.rule_validator import (
+    RULE_MAX_BYTES,
+    RuleValidator,
+    load_keywords_data,
+    measure_rule_bytes,
+)
+from src.analysis.rule_validation_messages import render_terse
 from src.core.constants import BEDROCK_REGIONS
 from src.core.suricata_rule import SuricataRule
 from src.core.sid_generator import suggest_next_sid
@@ -670,11 +677,17 @@ class AIAssistantPanel:
         # happens in _insert_rules when the user clicks "Insert Rules".
         if result.rules:
             preview_rules = self._preview_final_sids(list(result.rules))
+            shared_validator = RuleValidator(
+                load_keywords_data(), getattr(self.parent, "variables", None) or {})
             for rule_str in preview_rules:
                 self._append_to_chat(f"{rule_str}\n", "code_block")
                 summary = self._summarize_rule(rule_str)
                 if summary:
                     self._append_to_chat(f"  ↳ {summary}\n", "explanation")
+                terse = self._shared_validation_terse(shared_validator, rule_str)
+                if terse:
+                    self._append_to_chat(
+                        f"  ⚠ will be inserted commented out: {terse}\n", "error_msg")
 
             # Add action buttons for the rule set
             self._insert_action_buttons(preview_rules)
@@ -698,6 +711,19 @@ class AIAssistantPanel:
             "role": "assistant",
             "content": "\n\n".join(content_parts) if content_parts else "(empty response)",
         })
+
+    @staticmethod
+    def _shared_validation_terse(validator, rule_str: str) -> str | None:
+        """Terse message for the first shared-validator error on ``rule_str``
+        (validated as _insert_rules will: parsed, then re-serialized), or None
+        when the rule would insert as an active rule."""
+        try:
+            parsed = SuricataRule.from_string(rule_str)
+        except Exception:
+            parsed = None
+        text = parsed.to_string() if parsed is not None else rule_str
+        findings = validator.errors_for_rule(text)
+        return render_terse(findings[0]) if findings else None
 
     def _preview_final_sids(self, rules: list[str]) -> list[str]:
         """Rewrite each rule's sid: to the SID that insertion would assign.
@@ -1016,7 +1042,13 @@ class AIAssistantPanel:
         import re as _re
 
         inserted_count = 0
+        commented: list[str] = []  # "SID x: <terse>" for rules inserted as comments
         errors: list[str] = []
+
+        # Shared (AWS Network Firewall) validator, built once per insert call
+        # with the same rule-local checks paste uses.
+        shared_validator = RuleValidator(
+            load_keywords_data(), getattr(self.parent, "variables", None) or {})
 
         for rule_str in rules:
             try:
@@ -1043,17 +1075,25 @@ class AIAssistantPanel:
                 if parsed.original_options:
                     parsed.original_options = _re.sub(r'sid:\s*\d+', f'sid:{new_sid}', parsed.original_options)
 
-                # Validate rule length (AWS Network Firewall limit: 8,192 chars)
+                # Validate rule length (AWS Network Firewall limit: 8,191 bytes,
+                # UTF-8, measured the same way as the main editor)
                 length_error = self._validate_rule_length(parsed)
                 if length_error:
                     errors.append(length_error)
                     continue
 
-                # Validate protocol/category compatibility
-                category_error = self._validate_protocol_category(parsed)
-                if category_error:
-                    errors.append(category_error)
-                    continue
+                # Category/protocol compatibility is covered by the shared validator check below.
+                # Shared validation: a rule AWS Network Firewall would reject is
+                # inserted as a comment row (same format as paste).
+                rule_text = parsed.to_string()
+                findings = shared_validator.errors_for_rule(rule_text)
+                if findings:
+                    terse = render_terse(findings[0])
+                    comment_rule = SuricataRule()
+                    comment_rule.is_comment = True
+                    comment_rule.comment_text = f"# [VALIDATION ERROR: {terse}] {rule_text}"
+                    commented.append(f"SID {new_sid}: {terse}")
+                    parsed = comment_rule
 
                 # Insert into the parent's rule list at the appropriate position
                 if insert_after_sid is not None:
@@ -1082,13 +1122,18 @@ class AIAssistantPanel:
                     self.parent.rules.append(parsed)
 
                 # Change tracking: create baseline snapshot so this version is preserved
-                if getattr(self.parent, 'tracking_enabled', False):
+                if getattr(self.parent, 'tracking_enabled', False) and not parsed.is_comment:
                     self._record_tracking_snapshot(parsed)
 
                 inserted_count += 1
 
             except Exception as exc:
                 errors.append(f"Error inserting rule: {exc}")
+
+        # inserted_count counts every row added (active and commented out);
+        # active_count is the subset inserted as live rules.
+        commented_count = len(commented)
+        active_count = inserted_count - commented_count
 
         # 4. Post-insertion UI updates
         if inserted_count > 0:
@@ -1098,23 +1143,33 @@ class AIAssistantPanel:
             self.parent._invalidate_ai_cache()
 
             # Update status bar
-            status_msg = f"Inserted {inserted_count} AI-generated rule{'s' if inserted_count != 1 else ''}"
+            status_msg = f"Inserted {active_count} AI-generated rule{'s' if active_count != 1 else ''}"
+            if commented_count:
+                status_msg += f" ({commented_count} commented out)"
             if hasattr(self.parent, "update_status_bar"):
                 self.parent.update_status_bar(status_msg)
 
         # 5. Display feedback in the chat area
-        if inserted_count > 0:
+        if active_count > 0:
             if insert_after_sid is not None:
                 self._append_to_chat(
-                    f"✓ Inserted {inserted_count} rule{'s' if inserted_count != 1 else ''} "
+                    f"✓ Inserted {active_count} rule{'s' if active_count != 1 else ''} "
                     f"after SID {insert_after_sid} for correct evaluation order.\n",
                     "status_msg",
                 )
             else:
                 self._append_to_chat(
-                    f"✓ Inserted {inserted_count} rule{'s' if inserted_count != 1 else ''} into the rule list.\n",
+                    f"✓ Inserted {active_count} rule{'s' if active_count != 1 else ''} into the rule list.\n",
                     "status_msg",
                 )
+
+        if commented_count:
+            details = "\n".join(f"  {c}" for c in commented)
+            self._append_to_chat(
+                f"⚠ {commented_count} rule(s) inserted commented out because AWS "
+                f"Network Firewall would reject them:\n{details}\n",
+                "error_msg",
+            )
 
         for err in errors:
             self._append_to_chat(f"⚠ {err}\n", "error_msg")
@@ -1125,49 +1180,22 @@ class AIAssistantPanel:
     # ------------------------------------------------------------------ #
 
     def _validate_rule_length(self, rule: SuricataRule) -> str | None:
-        """Check rule length against AWS Network Firewall 8,192 char limit.
+        """Check rule length against the AWS Network Firewall 8,191-byte limit.
 
-        Expands variables using the parent's variable definitions, matching
-        the same logic as the main editor's validate_total_rule_length.
-
-        Returns an error string if invalid, None if OK.
-        """
-        rule_string = rule.to_string()
-
-        # Expand variables to their actual values
-        for var_name, var_data in self.parent.variables.items():
-            definition = var_data.get("definition", "") if isinstance(var_data, dict) else var_data
-            if definition:
-                rule_string = rule_string.replace(var_name, definition)
-
-        total_length = len(rule_string)
-        if total_length > 8192:
-            return (
-                f"SID {rule.sid}: Rule length {total_length} chars exceeds "
-                f"AWS Network Firewall limit of 8,192 chars (with variables expanded)"
-            )
-        return None
-
-    def _validate_protocol_category(self, rule: SuricataRule) -> str | None:
-        """Check that aws_url_category/aws_domain_category match the rule protocol.
+        Uses the shared ``measure_rule_bytes`` (UTF-8 bytes, header variables
+        expanded from the parent's variable definitions, plus the gid and
+        ``@`` reference allowances), so the result always matches the main
+        editor's validate_total_rule_length and the save/export checks.
 
         Returns an error string if invalid, None if OK.
         """
-        content_lower = (rule.content or "").lower()
-        protocol_lower = (rule.protocol or "").lower()
-
-        if "aws_url_category:" in content_lower and protocol_lower != "http":
+        variables = getattr(self.parent, "variables", None) or {}
+        total_length = measure_rule_bytes(rule, variables)
+        if total_length > RULE_MAX_BYTES:
             return (
-                f"SID {rule.sid}: aws_url_category requires HTTP protocol "
-                f"(rule uses {rule.protocol.upper()})"
+                f"SID {rule.sid}: Rule length {total_length} bytes exceeds "
+                f"AWS Network Firewall limit of 8,191 bytes (UTF-8, with variables expanded)"
             )
-
-        if "aws_domain_category:" in content_lower and protocol_lower not in ("tls", "http"):
-            return (
-                f"SID {rule.sid}: aws_domain_category requires TLS or HTTP protocol "
-                f"(rule uses {rule.protocol.upper()})"
-            )
-
         return None
 
     def _record_tracking_snapshot(self, rule: SuricataRule) -> None:

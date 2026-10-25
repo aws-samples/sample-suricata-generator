@@ -22,7 +22,7 @@ from typing import TYPE_CHECKING
 import webbrowser
 
 from src.agent.agent_factory import AgentFactory
-from src.agent.ai_rule_analyzer import AIRuleAnalyzer
+from src.agent.ai_rule_analyzer import AIRuleAnalyzer, create_analysis_bedrock_client
 from src.agent.best_practice_checker import BestPracticeChecker
 from src.agent.models import AnalysisFinding, StructuredAnalysisResponse
 from src.analysis.rule_analyzer import RuleAnalyzer
@@ -1012,7 +1012,8 @@ class AIAnalysisTab:
             try:
                 # Create AgentFactory and get components
                 factory = AgentFactory(self._app.aws_session, data_dir="data/")
-                bedrock_client = factory.get_bedrock_client(region)
+                # AI-Analysis-specific (longer) read timeout
+                bedrock_client = create_analysis_bedrock_client(factory, region)
                 knowledge_base = factory.get_knowledge_base()
 
                 # Create supporting components

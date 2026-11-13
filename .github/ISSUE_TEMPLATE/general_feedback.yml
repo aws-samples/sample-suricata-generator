@@ -1,0 +1,33 @@
+name: Question or general feedback
+description: "Anything else: a question, a comment, or general feedback."
+title: "[Feedback]: "
+labels: ["question", "needs-triage"]
+assignees: ["bw23198"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **This creates a public GitHub issue.** Don't include IP addresses, domain names,
+        AWS account IDs, credentials, or internal hostnames. Replace them with placeholders
+        such as `10.0.0.1` or `example.com`.
+  - type: textarea
+    id: message
+    attributes:
+      label: Your question or feedback
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Optional. Filled in by Help > Send Feedback.
+      render: text
+    validations:
+      required: false
+  - type: checkboxes
+    id: privacy-confirmation
+    attributes:
+      label: Before submitting
+      options:
+        - label: I have removed sensitive information (IP addresses, domain names, AWS account IDs, credentials, internal hostnames).
+          required: true

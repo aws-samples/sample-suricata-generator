@@ -1,0 +1,71 @@
+name: Feature request
+description: An idea for a new feature or an improvement.
+title: "[Feature]: "
+labels: ["enhancement", "needs-triage"]
+assignees: ["bw23198"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **This creates a public GitHub issue.** Don't include IP addresses, domain names,
+        AWS account IDs, credentials, or internal hostnames. Replace them with placeholders
+        such as `10.0.0.1` or `example.com`.
+  - type: dropdown
+    id: feature-area
+    attributes:
+      label: Feature area
+      description: Which part of the application is this about?
+      options:
+        - Rule editor (main window)
+        - Advanced Editor
+        - Rule Analyzer
+        - Flow Tester
+        - AI Rule Assistant
+        - AWS rule group import / export
+        - Rule Usage Analyzer
+        - Traffic Analysis & VPC Endpoints
+        - Container Associations
+        - Managed Rule Group Generator
+        - Squid Converter
+        - Palo Alto Importer
+        - Rule templates
+        - Change tracking / history
+        - Other / not sure
+    validations:
+      required: true
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem or use case
+      description: What are you trying to do, and what gets in the way today?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behavior
+      description: How would you like it to work?
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Other approaches or workarounds you've tried.
+    validations:
+      required: false
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Optional. Filled in by Help > Send Feedback.
+      render: text
+    validations:
+      required: false
+  - type: checkboxes
+    id: privacy-confirmation
+    attributes:
+      label: Before submitting
+      options:
+        - label: I have removed sensitive information (IP addresses, domain names, AWS account IDs, credentials, internal hostnames).
+          required: true

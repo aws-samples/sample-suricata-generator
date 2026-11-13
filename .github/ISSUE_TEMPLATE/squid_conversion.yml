@@ -1,0 +1,67 @@
+name: Squid conversion issue
+description: A Squid rule converted wrongly, or wasn't converted.
+title: "[Squid]: "
+labels: ["bug", "squid-converter", "needs-triage"]
+assignees: ["bw23198"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **This creates a public GitHub issue.** Don't include IP addresses, domain names,
+        AWS account IDs, credentials, or internal hostnames. Replace them with placeholders
+        such as `10.0.0.1` or `example.com`.
+
+        Tip: the **Report a Conversion Issue** button in the app's Squid conversion report
+        fills in the Environment field for you.
+  - type: textarea
+    id: snippet
+    attributes:
+      label: Squid configuration snippet
+      description: >-
+        The smallest Squid snippet that shows the problem, with placeholder values.
+        Don't paste your full squid.conf.
+      placeholder: |
+        acl allowed_sites dstdomain .example.com
+        http_access allow allowed_sites
+      render: text
+    validations:
+      required: true
+  - type: textarea
+    id: output
+    attributes:
+      label: Suricata output
+      description: The Suricata rules that were produced, or "nothing was produced".
+      render: text
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected result
+      description: What you expected the conversion to produce.
+    validations:
+      required: true
+  - type: textarea
+    id: notes
+    attributes:
+      label: Conversion report notes
+      description: >-
+        Anything relevant from the conversion report's Notes or Not convertible tabs.
+        Remove sensitive values first.
+    validations:
+      required: false
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Filled in by the app. Otherwise list the app and Squid Converter versions (Help > About), your OS and your Python version.
+      render: text
+    validations:
+      required: true
+  - type: checkboxes
+    id: privacy-confirmation
+    attributes:
+      label: Before submitting
+      options:
+        - label: I have removed sensitive information (IP addresses, domain names, AWS account IDs, credentials, internal hostnames).
+          required: true

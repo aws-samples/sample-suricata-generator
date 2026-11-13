@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Report a security issue
+    url: https://aws.amazon.com/security/vulnerability-reporting/
+    about: Please don't file security issues publicly. Report them through AWS vulnerability reporting.
+  - name: Documentation
+    url: https://github.com/aws-samples/sample-suricata-generator#readme
+    about: Usage instructions and troubleshooting.

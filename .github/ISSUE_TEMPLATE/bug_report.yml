@@ -1,0 +1,82 @@
+name: Bug report
+description: Something doesn't work the way it should.
+title: "[Bug]: "
+labels: ["bug", "needs-triage"]
+assignees: ["bw23198"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **This creates a public GitHub issue.** Don't include IP addresses, domain names,
+        AWS account IDs, credentials, or internal hostnames. Replace them with placeholders
+        such as `10.0.0.1` or `example.com`.
+
+        Tip: in the app, **Help > Send Feedback** fills in the Environment field for you.
+  - type: dropdown
+    id: feature-area
+    attributes:
+      label: Feature area
+      description: Which part of the application is this about?
+      options:
+        - Rule editor (main window)
+        - Advanced Editor
+        - Rule Analyzer
+        - Flow Tester
+        - AI Rule Assistant
+        - AWS rule group import / export
+        - Rule Usage Analyzer
+        - Traffic Analysis & VPC Endpoints
+        - Container Associations
+        - Managed Rule Group Generator
+        - Squid Converter
+        - Palo Alto Importer
+        - Rule templates
+        - Change tracking / history
+        - Other / not sure
+    validations:
+      required: true
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: What went wrong, in a sentence or two.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. ...
+        2. ...
+        3. ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+      description: Include any error message. Remove sensitive values first.
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Filled in by Help > Send Feedback. Otherwise list the app version (Help > About), your OS and your Python version.
+      render: text
+    validations:
+      required: true
+  - type: checkboxes
+    id: privacy-confirmation
+    attributes:
+      label: Before submitting
+      options:
+        - label: I have removed sensitive information (IP addresses, domain names, AWS account IDs, credentials, internal hostnames).
+          required: true

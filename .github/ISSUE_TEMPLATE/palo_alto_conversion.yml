@@ -1,0 +1,64 @@
+name: Palo Alto conversion issue
+description: A Palo Alto rule converted wrongly, or wasn't converted.
+title: "[Palo Alto]: "
+labels: ["bug", "palo-alto-importer", "needs-triage"]
+assignees: ["bw23198"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **This creates a public GitHub issue.** Don't include IP addresses, domain names,
+        AWS account IDs, credentials, or internal hostnames. Replace them with placeholders
+        such as `10.0.0.1` or `example.com`.
+
+        Tip: in the app, **Help > Send Feedback** fills in the Environment field for you.
+  - type: textarea
+    id: snippet
+    attributes:
+      label: Palo Alto configuration XML excerpt
+      description: >-
+        The smallest XML excerpt that shows the problem (for example one security rule
+        and the objects it uses), with placeholder values. Don't paste your full
+        configuration export.
+      render: xml
+    validations:
+      required: true
+  - type: textarea
+    id: output
+    attributes:
+      label: Suricata output
+      description: The Suricata rules that were produced, or "nothing was produced".
+      render: text
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected result
+      description: What you expected the conversion to produce.
+    validations:
+      required: true
+  - type: textarea
+    id: notes
+    attributes:
+      label: Import report notes
+      description: >-
+        Anything relevant from the import report or preview notes.
+        Remove sensitive values first.
+    validations:
+      required: false
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Filled in by Help > Send Feedback. Otherwise list the app and Palo Alto Importer versions (Help > About), your OS and your Python version.
+      render: text
+    validations:
+      required: true
+  - type: checkboxes
+    id: privacy-confirmation
+    attributes:
+      label: Before submitting
+      options:
+        - label: I have removed sensitive information (IP addresses, domain names, AWS account IDs, credentials, internal hostnames).
+          required: true

@@ -10,27 +10,18 @@ body:
         **This creates a public GitHub issue.** Don't include IP addresses, domain names,
         AWS account IDs, credentials, or internal hostnames. Replace them with placeholders
         such as `10.0.0.1` or `example.com`.
-  - type: dropdown
+  - type: input
     id: feature-area
     attributes:
       label: Feature area
-      description: Which part of the application is this about?
-      options:
-        - Rule editor (main window)
-        - Advanced Editor
-        - Rule Analyzer
-        - Flow Tester
-        - AI Rule Assistant
-        - AWS rule group import / export
-        - Rule Usage Analyzer
-        - Traffic Analysis & VPC Endpoints
-        - Container Associations
-        - Managed Rule Group Generator
-        - Squid Converter
-        - Palo Alto Importer
-        - Rule templates
-        - Change tracking / history
-        - Other / not sure
+      description: >-
+        Which part of the application is this about? Filled in by Help > Send Feedback.
+        Otherwise use one of: Rule editor (main window), Advanced Editor, Rule Analyzer,
+        Flow Tester, AI Rule Assistant, AWS rule group import / export, Rule Usage Analyzer,
+        Traffic Analysis & VPC Endpoints, Container Associations, Managed Rule Group Generator,
+        Squid Converter, Palo Alto Importer, Rule templates, Change tracking / history,
+        Other / not sure.
+      placeholder: Other / not sure
     validations:
       required: true
   - type: textarea

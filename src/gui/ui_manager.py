@@ -93,6 +93,7 @@ class UIManager:
         file_menu.add_command(label="Load AWS Best Practices Template", command=self.parent.domain_importer.load_aws_template)
         file_menu.add_command(label="Import Domain List", command=self.parent.import_domain_list)
         file_menu.add_command(label="Import Palo Alto Configuration", command=self.parent.palo_alto_importer.import_configuration)
+        file_menu.add_command(label="Import Squid Configuration\u2026", command=self.parent.squid_importer.import_configuration)
         file_menu.add_command(label="Import Rule Group", command=self.parent.stateful_rule_importer.import_standard_rule_group)
         file_menu.add_command(label="Export Rule Group", command=self.parent.export_file)
         file_menu.add_separator()
@@ -224,6 +225,7 @@ class UIManager:
         help_menu.add_command(label="AWS Setup", command=self.show_aws_setup_help)
         help_menu.add_separator()
         
+        help_menu.add_command(label="Send Feedback\u2026", command=self.parent.show_send_feedback)
         help_menu.add_command(label="About", command=self.parent.show_about)
         
         # Keyboard shortcuts (bind both lowercase and uppercase for Ctrl+letter combos

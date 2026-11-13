@@ -25,6 +25,7 @@ from src.core.security_validator import validate_file_operation, security_valida
 from src.core.version import get_main_version
 from src.analysis.rule_validator import RuleValidator, load_keywords_data, header_variable_names
 from src.analysis.rule_validation_messages import render_terse
+from src.managers import rule_file_io
 
 
 class FileManager:
@@ -101,70 +102,22 @@ class FileManager:
 
         Pure (no dialogs). Checks, in order: duplicate SIDs among active rules
         (R10.6), then undefined variables (R10.7) when ``check_variables`` is
-        True. The message text is exactly what save_rules_to_file raises.
+        True. Delegates to rule_file_io (UI-free, shared with the Squid CLI).
         """
-        # Check for duplicate SIDs
-        sids = [rule.sid for rule in rules if not getattr(rule, 'is_comment', False) and not getattr(rule, 'is_blank', False)]
-        duplicate_sids = [sid for sid in set(sids) if sids.count(sid) > 1]
-        
-        if duplicate_sids:
-            return f"Duplicate SIDs found: {', '.join(map(str, duplicate_sids))}"
-        
-        if not check_variables:
-            return None
-        
-        # Variable validation (R10.7, extended by R13.11)
-        undefined_vars = self.find_undefined_variables(rules, variables)
-        
-        if undefined_vars:
-            var_list = ', '.join(undefined_vars)
-            return f"Rules reference undefined variables: {var_list}"
-        
-        return None
+        return rule_file_io.find_hard_save_error(rules, variables, check_variables)
 
     # Variables AWS Network Firewall defines implicitly; never reported as
     # undefined at disk save, export, or deploy (R13.11.2).
-    IMPLICIT_VARIABLES = frozenset({'$EXTERNAL_NET', '$HOME_NET'})
+    IMPLICIT_VARIABLES = rule_file_io.IMPLICIT_VARIABLES
 
     def find_undefined_variables(self, rules: List[SuricataRule], variables: dict) -> list:
         """Return the sorted undefined header variables used by active rules.
 
-        Pure (no dialogs). Shared by the disk-save hard check
-        (``find_hard_save_error``) and the export/deploy check
-        (``SuricataRuleGenerator._get_undefined_variables``). Detection uses
-        ``header_variable_names`` over the four header fields of every active
-        rule (comment and blank rows skipped), so negated (``!$X``,
-        ``!@REF``) and grouped (``[$A,10.0.0.0/8]``, ``![$A]``,
-        ``[80,$PORTS]``) forms are found (R13.11.1). A variable is undefined
-        if it is missing from ``variables`` or its definition (dict
-        ``"definition"`` or legacy string) is empty. ``$EXTERNAL_NET`` and
-        ``$HOME_NET`` are exempt (R13.11.2). Sorted for a deterministic
-        message order.
+        Pure (no dialogs). Shared by the disk-save hard check and the
+        export/deploy check (``SuricataRuleGenerator._get_undefined_variables``).
+        Delegates to rule_file_io.find_undefined_variables.
         """
-        variables = variables or {}
-        used_vars = set()
-        for rule in rules:
-            if getattr(rule, 'is_comment', False) or getattr(rule, 'is_blank', False):
-                continue
-            used_vars |= header_variable_names(rule.src_net, rule.src_port,
-                                               rule.dst_net, rule.dst_port)
-        
-        undefined_vars = []
-        for var in sorted(used_vars):
-            if var in self.IMPLICIT_VARIABLES:
-                continue
-            if var not in variables:
-                undefined_vars.append(var)
-                continue
-            var_data = variables[var]
-            # Handle both old format (string) and new format (dict with definition/description)
-            if isinstance(var_data, dict):
-                var_definition = var_data.get("definition", "")
-            else:
-                var_definition = var_data  # Legacy format
-            if not isinstance(var_definition, str) or not var_definition.strip():
-                undefined_vars.append(var)
-        return undefined_vars
+        return rule_file_io.find_undefined_variables(rules, variables)
 
     def collect_rule_group_errors(self, rules: List[SuricataRule], variables: dict,
                                   keywords_data: Optional[dict] = None) -> list:
@@ -188,7 +141,10 @@ class FileManager:
                           tags: dict = None, has_header: bool = False, tracking_enabled: bool = False, 
                           pending_history: List = None) -> bool:
         """Save rules to a .suricata file with validation
-        
+
+        Delegates to rule_file_io.save_rules_to_file (UI-free, so the Squid
+        command line writes the same files).
+
         Args:
             filename: Path to .suricata file
             rules: List of SuricataRule objects
@@ -198,50 +154,11 @@ class FileManager:
             tracking_enabled: Whether change tracking is enabled
             pending_history: Pending history entries to write
         """
-        
-        # Hard checks (duplicate SIDs, undefined variables). The reject-on-ip
-        # backstop that used to raise here is now part of the aggregate
-        # acknowledge flow (collect_rule_group_errors, R10.4).
-        hard_error = self.find_hard_save_error(rules, variables)
-        if hard_error:
-            raise ValueError(hard_error)
-        
-        # Variables used by the rules decide whether the companion .var file
-        # is written (computed here since the check moved to find_hard_save_error).
-        used_vars = self.scan_rules_for_variables(rules)
-        
-        try:
-            # Update header if present and tracking enabled
-            if has_header and tracking_enabled:
-                self.update_header(rules)
-            
-            # Save the main .suricata file
-            with open(filename, 'w', encoding='utf-8') as f:
-                for rule in rules:
-                    if getattr(rule, 'is_blank', False):
-                        f.write('\n')
-                    elif getattr(rule, 'is_comment', False):
-                        f.write(rule.comment_text + '\n')
-                    else:
-                        f.write(rule.to_string() + '\n')
-            
-            # Save companion .var file if variables or tags are used
-            if used_vars or tags:
-                self.save_variables_file(filename, variables, tags)
-            
-            # Save companion .history file if tracking enabled
-            if tracking_enabled and pending_history:
-                self.save_history_file(filename, pending_history)
-            
-            return True
-            
-        except PermissionError:
-            raise Exception(f"Permission denied writing to file: {filename}")
-        except OSError as e:
-            raise Exception(f"File system error writing to {filename}: {str(e)}")
-        except Exception as e:
-            raise Exception(f"Failed to save file {filename}: {str(e)}")
-    
+        return rule_file_io.save_rules_to_file(
+            filename, rules, variables, tags=tags, has_header=has_header,
+            tracking_enabled=tracking_enabled, pending_history=pending_history,
+            version=self.version)
+
     def detect_var_format(self, var_data: dict) -> str:
         """Detect .var file format version
         
@@ -345,69 +262,12 @@ class FileManager:
         return {}, {}
     
     def save_variables_file(self, suricata_filename: str, variables: dict, tags: dict = None):
-        """Save companion .var file with variable definitions and tags
-        
-        Always saves in v2.1 format with format_version, variables, and tags
-        sections. Any opened v1.0/v2.0 file is therefore upgraded to v2.1 on
-        the next save. Backward compatibility is maintained by supporting
-        reading of the older formats.
-        
-        The stored "type" field on @ variables (Reference vs Container) is
-        persisted as-is so container associations round-trip. $ variables are
-        written without a "type" field, since their type is inferred from
-        usage rather than stored.
-        
-        Args:
-            suricata_filename: Path to .suricata file
-            variables: Dict with structure {name: {"definition": str, "description": str, ["type": str]}}
-            tags: Tags dict with key-value pairs (optional, defaults to empty dict)
+        """Save companion .var file with variable definitions and tags (v2.1).
+
+        Delegates to rule_file_io.save_variables_file.
         """
-        if not variables and not tags:
-            return
-        
-        # Default to empty dict if tags not provided
-        if tags is None:
-            tags = {}
-        
-        var_filename = suricata_filename.replace('.suricata', '.var')
-        if not var_filename.endswith('.var'):
-            var_filename += '.var'
-        
-        # Build the variables dict for serialization. @ variables keep their
-        # stored "type" so it persists; $ variables are written without a
-        # "type" field even if one somehow leaked into the in-memory entry.
-        serialized_variables = {}
-        for name, value in variables.items():
-            if isinstance(value, dict):
-                entry = {
-                    "definition": value.get("definition", ""),
-                    "description": value.get("description", "")
-                }
-                if name.startswith('@') and 'type' in value:
-                    entry['type'] = value['type']
-                serialized_variables[name] = entry
-            else:
-                # Preserve any non-dict values as-is (defensive; not expected)
-                serialized_variables[name] = value
-        
-        try:
-            # Always save in v2.1 format with format_version, variables, and tags
-            var_data = {
-                'format_version': '2.1',
-                'variables': serialized_variables,
-                'tags': tags
-            }
-            
-            with open(var_filename, 'w', encoding='utf-8') as f:
-                json.dump(var_data, f, indent=2, ensure_ascii=False)
-                
-        except PermissionError:
-            pass  # Cannot write variable file
-        except OSError:
-            pass  # File system error
-        except (TypeError, ValueError):
-            pass  # Other errors
-    
+        rule_file_io.save_variables_file(suricata_filename, variables, tags)
+
     def validate_tag_key(self, key: str) -> tuple[bool, str]:
         """Validate AWS tag key
         
@@ -455,73 +315,12 @@ class FileManager:
         return True, ""
     
     def save_history_file(self, suricata_filename: str, pending_history: List):
-        """Save companion .history file with change tracking data"""
-        if not pending_history:
-            return
-        
-        # Validate and sanitize filename to prevent path traversal
-        base_name = os.path.basename(suricata_filename)
-        if '..' in base_name or '/' in base_name or '\\' in base_name:
-            return
-        
-        # Use only the sanitized base name and construct path in same directory as suricata file
-        suricata_dir = os.path.dirname(os.path.abspath(suricata_filename))
-        safe_base_name = base_name.replace('.suricata', '.history')
-        if not safe_base_name.endswith('.history'):
-            safe_base_name += '.history'
-        history_filename = os.path.join(suricata_dir, safe_base_name)
-        
-        try:
-            import datetime
-            
-            # Load existing history or create new
-            history_data = {
-                'file': os.path.basename(suricata_filename),
-                'tracking_enabled': datetime.datetime.now().isoformat(),
-                'changes': []
-            }
-            
-            if os.path.exists(history_filename):
-                try:
-                    with open(history_filename, 'r', encoding='utf-8') as f:
-                        history_data = json.load(f)
-                except:
-                    pass
-            
-            # Separate different entry types
-            snapshot_entries = [e for e in pending_history if 'rule_snapshot' in e.get('details', {})]
-            regular_entries = [e for e in pending_history 
-                             if 'rule_snapshot' not in e.get('details', {})]
-            
-            # Handle v2.0 snapshot entries using RevisionManager
-            if snapshot_entries:
-                try:
-                    from src.managers.revision_manager import RevisionManager
-                    revision_manager = RevisionManager(history_filename)
-                    
-                    # Write snapshot entries directly (batch write)
-                    revision_manager.write_pending_snapshots(snapshot_entries)
-                except Exception:
-                    # If RevisionManager fails, fall back to regular append
-                    history_data['changes'].extend(snapshot_entries)
-            
-            # Handle regular v1.0 entries (append to changes)
-            if regular_entries:
-                history_data['changes'].extend(regular_entries)
-                
-                # Save updated history as valid JSON
-                with open(history_filename, 'w', encoding='utf-8') as f:
-                    json.dump(history_data, f, indent=2, ensure_ascii=False)
-                
-        except PermissionError:
-            pass  # Cannot write history file
-        except OSError:
-            pass  # File system error
-        except TypeError:
-            pass  # Cannot serialize history data
-        except (ValueError, KeyError):
-            pass  # Other errors
-    
+        """Save companion .history file with change tracking data.
+
+        Delegates to rule_file_io.save_history_file.
+        """
+        rule_file_io.save_history_file(suricata_filename, pending_history)
+
     def _prepare_rules_for_export(self, rules: List, test_mode: bool) -> List:
         """Prepare rules for export with test mode conversion and action preservation
         
@@ -1138,23 +937,8 @@ EOF
     
     def scan_rules_for_variables(self, rules: List[SuricataRule]) -> set:
         """Scan all rules for variable usage and return set of used variables"""
-        used_vars = set()
-        
-        for rule in rules:
-            if getattr(rule, 'is_comment', False) or getattr(rule, 'is_blank', False):
-                continue
-            
-            if rule.src_net.startswith(('$', '@')):
-                used_vars.add(rule.src_net)
-            if rule.dst_net.startswith(('$', '@')):
-                used_vars.add(rule.dst_net)
-            if rule.src_port.startswith(('$', '@')):
-                used_vars.add(rule.src_port)
-            if rule.dst_port.startswith(('$', '@')):
-                used_vars.add(rule.dst_port)
-        
-        return used_vars
-    
+        return rule_file_io.scan_rules_for_variables(rules)
+
     def analyze_variable_usage(self, rules: List[SuricataRule]) -> dict:
         """Analyze how variables are used in rules to determine their correct types
         
@@ -1168,7 +952,9 @@ EOF
             if getattr(rule, 'is_comment', False) or getattr(rule, 'is_blank', False):
                 continue
             
-            # Check each field where variables can appear
+            # Check each field where variables can appear. Use the shared
+            # extractor so negated (!$X) and grouped ([$A,80], ![$A]) forms are
+            # detected, not only a whole-field $X / @X.
             fields = [
                 (rule.src_net, 'ip'),
                 (rule.dst_net, 'ip'), 
@@ -1177,14 +963,16 @@ EOF
             ]
             
             for field_value, position_type in fields:
-                if field_value.startswith(('$', '@')):
-                    if field_value not in usage:
-                        usage[field_value] = {'ip_positions': set(), 'port_positions': set()}
-                    
+                for var_name in header_variable_names(
+                        field_value if position_type == 'ip' else '',
+                        field_value if position_type == 'port' else '',
+                        '', ''):
+                    if var_name not in usage:
+                        usage[var_name] = {'ip_positions': set(), 'port_positions': set()}
                     if position_type == 'ip':
-                        usage[field_value]['ip_positions'].add(position_type)
-                    elif position_type == 'port':
-                        usage[field_value]['port_positions'].add(position_type)
+                        usage[var_name]['ip_positions'].add(position_type)
+                    else:
+                        usage[var_name]['port_positions'].add(position_type)
         
         return usage
     
@@ -1418,18 +1206,8 @@ EOF
     
     def update_header(self, rules: List[SuricataRule]):
         """Update header with current version and timestamp"""
-        if len(rules) < 4:
-            return
-        
-        import datetime
-        timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
-        
-        # Update line 1: version
-        rules[0].comment_text = f"# Generated by Suricata Rule Generator v{self.version}"
-        
-        # Update line 3: last modified
-        rules[2].comment_text = f"# Last Modified:\t\t{timestamp}"
-    
+        rule_file_io.update_header(rules, self.version)
+
     def _auto_correct_port_brackets(self, rule_line: str) -> str:
         """Auto-correct port specifications to use proper Suricata bracket syntax
         

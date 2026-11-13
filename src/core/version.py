@@ -6,7 +6,7 @@ The rule analyzer and flow tester have their own separate version numbers.
 """
 
 # Main program version - update this single location for version changes
-MAIN_VERSION = "2.12.0"
+MAIN_VERSION = "2.14.0"
 
 # Rule analyzer version (managed separately)
 ANALYZER_VERSION = "4.0.3"
@@ -19,6 +19,10 @@ PALO_ALTO_IMPORTER_VERSION = "1.0.2-beta"
 
 # Managed Rule Group Generator version (managed separately)
 MRG_VERSION = "1.1.5"
+
+# Squid converter version (managed separately; the engine in
+# src/importers/squid/ reads it only from here)
+SQUID_CONVERTER_VERSION = "1.0.1"
 
 
 def get_main_version() -> str:
@@ -44,3 +48,8 @@ def get_palo_alto_importer_version() -> str:
 def get_mrg_version() -> str:
     """Get the Managed Rule Group Generator version number"""
     return MRG_VERSION
+
+
+def get_squid_converter_version() -> str:
+    """Get the Squid converter version number"""
+    return SQUID_CONVERTER_VERSION

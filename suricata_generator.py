@@ -13,6 +13,7 @@ from src.managers.file_manager import FileManager
 from src.importers.domain_importer import DomainImporter
 from src.importers.stateful_rule_importer import StatefulRuleImporter
 from src.importers.palo_alto_importer import PaloAltoImporter
+from src.importers.squid_importer import SquidImporter
 from src.managers.search_manager import SearchManager
 from src.gui.ui_manager import UIManager
 from src.analysis.flow_tester import FlowTester
@@ -22,7 +23,7 @@ from src.analysis.rule_usage_analyzer import RuleUsageAnalyzer, HAS_BOTO3
 from src.aws.aws_session_manager import AWSSessionManager
 from src.core.constants import SuricataConstants, classify_reference_arn
 from src.core.sid_generator import suggest_next_sid
-from src.core.version import get_main_version, get_analyzer_version, get_flow_tester_version, get_palo_alto_importer_version, get_mrg_version
+from src.core.version import get_main_version, get_analyzer_version, get_flow_tester_version, get_palo_alto_importer_version, get_mrg_version, get_squid_converter_version
 from src.core.security_validator import security_validator, validate_rule_input, validate_file_operation
 from src.gui.ai_assistant_panel import AIAssistantPanel, HAS_BOTO3 as HAS_BOTO3_AI
 
@@ -172,6 +173,7 @@ class SuricataRuleGenerator:
         self.domain_importer = DomainImporter(self)  # Domain import functionality
         self.stateful_rule_importer = StatefulRuleImporter(self)  # Stateful rule group import functionality
         self.palo_alto_importer = PaloAltoImporter(self)  # Palo Alto configuration import functionality
+        self.squid_importer = SquidImporter(self)  # Squid configuration import (converter loaded on first use)
         
         # Import domain_list_importer after domain_importer is initialized
         from src.importers.domain_list_importer import DomainListImporter
@@ -2439,7 +2441,17 @@ class SuricataRuleGenerator:
         """Create a new file"""
         if self.modified and not self.ask_save_changes():
             return
-        
+        self.reset_to_new_file()
+
+    def reset_to_new_file(self):
+        """Reset the editor to a new, untitled file (no prompt).
+
+        The steps File > New performs after its unsaved-changes prompt: clear
+        rules, variables and tags, turn change tracking off (and sync its menu
+        item), reset the SID anchor and AI session, add the default tags, and
+        leave the editor untitled. Also used by the Squid import, which
+        prompts when it starts and then imports into a new file.
+        """
         # Disable change tracking for new content operations
         self.tracking_enabled = False
         self.tracking_menu_var.set(False)
@@ -7361,6 +7373,11 @@ class SuricataRuleGenerator:
                     except:
                         pass  # Best effort cleanup
     
+    def show_send_feedback(self):
+        """Open Help > Send Feedback (opens a GitHub issue form in the browser)."""
+        from src.gui.feedback_dialog import open_feedback_dialog
+        open_feedback_dialog(self.root)
+    
     def show_about(self):
         """Show About dialog with version information and release notes from RELEASE_NOTES.md"""
         # Try to read release notes from file
@@ -7455,11 +7472,28 @@ class SuricataRuleGenerator:
         
         text_widget.insert(tk.END, ")\n")
         
+        # Insert Fasi's author line with bolded name and hyperlink
+        fasi_name_start = text_widget.index(tk.INSERT)
+        text_widget.insert(tk.END, "Fasi Mohammed")
+        fasi_name_end = text_widget.index(tk.INSERT)
+        text_widget.tag_add("bold", fasi_name_start, fasi_name_end)
+        
+        text_widget.insert(tk.END, " (")
+        
+        fasi_linkedin_start = text_widget.index(tk.INSERT)
+        text_widget.insert(tk.END, "LinkedIn")
+        fasi_linkedin_end = text_widget.index(tk.INSERT)
+        text_widget.tag_add("hyperlink", fasi_linkedin_start, fasi_linkedin_end)
+        text_widget.tag_add("fasi_linkedin", fasi_linkedin_start, fasi_linkedin_end)
+        
+        text_widget.insert(tk.END, ")\n")
+        
         # Insert version (unbolded)
         text_widget.insert(tk.END, f"\nVersion {self.get_version_number()}")
         text_widget.insert(tk.END, f"\n  Rule Analyzer v{get_analyzer_version()}")
         text_widget.insert(tk.END, f"\n  Flow Tester v{get_flow_tester_version()}")
         text_widget.insert(tk.END, f"\n  Palo Alto Importer v{get_palo_alto_importer_version()}")
+        text_widget.insert(tk.END, f"\n  Squid Converter v{get_squid_converter_version()}")
         text_widget.insert(tk.END, f"\n  Managed Rule Group Generator v{get_mrg_version()}")
 
         text_widget.insert(tk.END, "\n\n")
@@ -7490,28 +7524,41 @@ class SuricataRuleGenerator:
             import webbrowser
             webbrowser.open("https://www.linkedin.com/in/chaitanya-c-681a6a166/")
         
-        def on_hyperlink_enter(event):
-            text_widget.config(cursor="hand2")
-            text_widget.tag_configure("hyperlink", foreground="purple", underline=True)
+        # Configure hyperlink behavior for Fasi's LinkedIn
+        def on_fasi_hyperlink_click(event):
+            import webbrowser
+            webbrowser.open("https://www.linkedin.com/in/mdfasi/")
         
-        def on_hyperlink_leave(event):
-            text_widget.config(cursor="")
-            text_widget.tag_configure("hyperlink", foreground="blue", underline=True)
+        # Hover highlighting is applied only to the link under the mouse by
+        # adding the "hyperlink_hover" tag to that link's own text range,
+        # rather than reconfiguring the shared "hyperlink" tag (which would
+        # recolor every author's link at once).
+        text_widget.tag_raise("hyperlink_hover", "hyperlink")
         
-        # Bind hyperlink events for Brian's LinkedIn
-        text_widget.tag_bind("brian_linkedin", "<Button-1>", on_brian_hyperlink_click)
-        text_widget.tag_bind("brian_linkedin", "<Enter>", on_hyperlink_enter)
-        text_widget.tag_bind("brian_linkedin", "<Leave>", on_hyperlink_leave)
+        def make_hyperlink_hover_handlers(link_tag):
+            def on_enter(event):
+                text_widget.config(cursor="hand2")
+                ranges = text_widget.tag_ranges(link_tag)
+                if ranges:
+                    text_widget.tag_add("hyperlink_hover", *ranges)
+            
+            def on_leave(event):
+                text_widget.config(cursor="")
+                text_widget.tag_remove("hyperlink_hover", "1.0", tk.END)
+            
+            return on_enter, on_leave
         
-        # Bind hyperlink events for Jesse's LinkedIn
-        text_widget.tag_bind("jesse_linkedin", "<Button-1>", on_jesse_hyperlink_click)
-        text_widget.tag_bind("jesse_linkedin", "<Enter>", on_hyperlink_enter)
-        text_widget.tag_bind("jesse_linkedin", "<Leave>", on_hyperlink_leave)
-        
-        # Bind hyperlink events for Chaitanya's LinkedIn
-        text_widget.tag_bind("chaitanya_linkedin", "<Button-1>", on_chaitanya_hyperlink_click)
-        text_widget.tag_bind("chaitanya_linkedin", "<Enter>", on_hyperlink_enter)
-        text_widget.tag_bind("chaitanya_linkedin", "<Leave>", on_hyperlink_leave)
+        # Bind click and per-link hover events for each author's LinkedIn
+        for link_tag, on_click in (
+            ("brian_linkedin", on_brian_hyperlink_click),
+            ("jesse_linkedin", on_jesse_hyperlink_click),
+            ("chaitanya_linkedin", on_chaitanya_hyperlink_click),
+            ("fasi_linkedin", on_fasi_hyperlink_click),
+        ):
+            on_enter, on_leave = make_hyperlink_hover_handlers(link_tag)
+            text_widget.tag_bind(link_tag, "<Button-1>", on_click)
+            text_widget.tag_bind(link_tag, "<Enter>", on_enter)
+            text_widget.tag_bind(link_tag, "<Leave>", on_leave)
         
         text_widget.config(state=tk.DISABLED)
         

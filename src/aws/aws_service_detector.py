@@ -141,25 +141,22 @@ class AWSServiceDetector:
                 # Skip invalid entries silently
                 continue
     
-    def _normalize_service_name(self, service: str) -> str:
-        """Normalize AWS service names for accurate VPC endpoint recommendations
-        
-        AWS's ip-ranges.json uses generic labels that need mapping:
-        - "AMAZON" → "S3" (most AMAZON IPs are S3 endpoints)
-        - Other services remain unchanged
-        
-        Args:
-            service: Raw service name from ip-ranges.json
-            
-        Returns:
-            str: Normalized service name
+    @staticmethod
+    def _best_match(intervals):
+        """Pick the ip-ranges.json entry that best identifies the service.
+
+        AWS publishes overlapping ranges: every range is also listed under the
+        catch-all AMAZON code, and when a service runs on EC2 resources its
+        ranges are listed under both that service and EC2, but are used only by
+        that service (see "Range overlaps" in the AWS IP address ranges docs).
+        So: prefer a specific service over AMAZON, prefer any other specific
+        service over EC2, then prefer the most specific (smallest) range. The
+        CIDR text breaks any remaining tie so the result is deterministic.
         """
-        # AWS labels many S3 IP ranges as "AMAZON" - normalize to S3
-        # for accurate gateway endpoint recommendations
-        if service == 'AMAZON':
-            return 'S3'
-        
-        return service
+        def rank(iv):
+            service = iv.data['service']
+            return (service == 'AMAZON', service == 'EC2', iv.end - iv.begin, iv.data['cidr'])
+        return min(intervals, key=rank)
     
     @lru_cache(maxsize=10000)
     def identify_aws_service(self, ip_str: str) -> Dict[str, any]:
@@ -172,7 +169,7 @@ class AWSServiceDetector:
             
         Returns:
             dict: {
-                'service': 'S3' | 'DYNAMODB' | 'Non-AWS',
+                'service': 'S3' | 'EC2' | 'CLOUDFRONT' | 'AMAZON' | ... | 'Non-AWS',
                 'region': 'us-east-1' | 'N/A',
                 'is_aws': bool,
                 'cidr': '52.0.0.0/8' (optional)
@@ -189,15 +186,13 @@ class AWSServiceDetector:
             intervals = tree[ip_int]
             
             if intervals:
-                # Return first match (most specific if overlapping)
-                match = intervals.pop()
-                raw_service = match.data['service']
-                
-                # Normalize service name (AMAZON → S3, etc.)
-                normalized_service = self._normalize_service_name(raw_service)
+                # Overlapping entries are normal; choose the one that best
+                # identifies the service. A range listed only under AMAZON stays
+                # 'AMAZON' (an AWS address whose service cannot be determined).
+                match = self._best_match(intervals)
                 
                 return {
-                    'service': normalized_service,
+                    'service': match.data['service'],
                     'region': match.data['region'],
                     'is_aws': True,
                     'cidr': match.data['cidr']

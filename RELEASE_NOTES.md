@@ -1,4 +1,12 @@
 # Release Notes
+## Version 2.14.1 - November 17, 2026
+### Analyze Traffic Costs enhancements
+- **Faster analysis**: CloudWatch queries now run in parallel, check for completion more often, and are sized from where the log records actually are, so empty stretches of the time range are skipped. Throttled requests are retried automatically.
+- **Responsive progress**: The analysis and Save now run in the background, so the app no longer freezes. The progress dialog shows the current step ("Step 2 of 5") with one overall progress bar for the whole run, and a count of retried throttled requests if any occur. Closing the progress dialog cancels the analysis.
+- **Complete hostname data**: Hostnames from the alert logs were previously limited to 10,000 alert records, which on busy firewalls covered only the last hour or so of the time range. Hostnames are now collected for every flow that has one. The header's hostname coverage now shows the share of Internet traffic shown under a hostname.
+- **Much smaller .stats files**: Drill-down windows now show per-source-IP totals (traffic, cost, flows and % of total) instead of expandable lists of individual flows, so saved files no longer store every flow. For a 16-day analysis of a busy firewall, the file went from 4.1 GB to 0.2 MB, and saving and opening it are much faster. Older .stats files still open, and are written in the new format the next time you save.
+- **More accurate AWS service names**: Traffic is labeled with the specific AWS service its IP address belongs to. For example, CloudFront traffic is no longer labeled as S3, and EC2 and S3 addresses are no longer mixed up. CloudFront traffic stays on the AWS Service Traffic tab, marked "SKIP - No VPC endpoint available". Hostnames are parsed more reliably: ECR's API and image-layer endpoints are shown separately, and S3 dual-stack and FIPS hostnames get the correct region.
+- **Current pricing**: All pricing was checked against current AWS pricing for every supported region (November 2026). CloudWatch Logs Insights query cost now uses each region's rate instead of $0.005/GB everywhere, and the results window shows the rate used.
 ## Version 2.14.0 - November 13, 2026
 ### Send Feedback
 New **Help > Send Feedback…** makes it easy to report a bug, a conversion problem, or an idea on the project's GitHub repository.

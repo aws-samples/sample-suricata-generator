@@ -10,6 +10,10 @@ Author: Suricata Generator Team
 Created: 2026-01-25
 """
 
+import calendar
+import ipaddress
+import re
+import threading
 import time
 import json
 import os
@@ -29,14 +33,60 @@ class TrafficAnalyzer:
     # normally returns a 'Timeout' status on its own, which is also handled. Kept
     # generous so a legitimately large server-side aggregation is not aborted early.
     MAX_QUERY_SECONDS = 900
+
+    # Maximum number of flow-breakdown chunk queries run concurrently. CloudWatch
+    # Logs Insights allows 30 concurrent queries per account/region by default, and
+    # that quota is shared with anything else running in the account, so stay well
+    # below it. Set to 1 to run strictly sequentially (the original behavior).
+    MAX_PARALLEL_QUERIES = 8
+
+    # Poll interval for a running query: starts short (small queries finish in a
+    # second or two) and backs off to the cap to avoid hammering GetQueryResults.
+    POLL_INITIAL_SECONDS = 0.5
+    POLL_MAX_SECONDS = 2.0
+    POLL_BACKOFF_FACTOR = 1.5
+
+    # Retry budget for throttled / concurrency-limited CloudWatch Logs API calls.
+    MAX_THROTTLE_RETRIES = 6
+    _THROTTLE_ERROR_NAMES = ('ThrottlingException', 'LimitExceededException',
+                             'TooManyRequestsException', 'RequestLimitExceeded',
+                             'Throttling')
+
+    # Chunk-size calibration. After the first chunk, the observed ratio of returned
+    # groups to matched records is used to re-plan the remaining chunks only when
+    # groups are clearly fewer than records (ratio below the threshold). Bursty
+    # traffic that overshoots is still handled by the adaptive bisection.
+    CALIBRATION_RATIO_THRESHOLD = 0.8
+    CALIBRATED_GROUPS_PER_CHUNK = 7000
+    CALIBRATION_MAX_REDUCTION = 4  # never plan fewer than 1/4 of the original chunks
+
+    # Target netflow records per flow-breakdown chunk (under the 10K result cap).
+    SAFE_CHUNK_ROWS = 9000
+
+    # Record-density histogram used to plan chunks: finest bin width, and the most
+    # bins one query may return (kept under the 10K result cap).
+    HISTOGRAM_MIN_BIN_SECONDS = 300
+    HISTOGRAM_MAX_BINS = 9000
+
+    # Overall-progress steps shown in the progress dialog: (key, label, share of
+    # the overall bar). Shares are rough expected proportions of the run time;
+    # the flow breakdown dominates on large windows.
+    ANALYSIS_STEPS = (
+        ('totals', 'Querying traffic totals', 0.03),
+        ('flows', 'Querying flow breakdown', 0.70),
+        ('alerts', 'Querying alert logs', 0.12),
+        ('correlate', 'Correlating flows and hostnames', 0.12),
+        ('aggregate', 'Aggregating results', 0.03),
+    )
     
     # CloudWatch Logs Insights query statuses that mean "done" (stop polling).
     # Includes Timeout/Unknown so a query in those states does not poll forever.
     _TERMINAL_QUERY_STATUSES = ('Complete', 'Failed', 'Cancelled', 'Timeout', 'Unknown')
     
     # AWS Network Firewall data processing costs by region (per GB).
-    # Source: AWS Price List API (ServiceCode AWSNetworkFirewall), validated
-    # 2026-08-21 (pricing effective 2026-02-01). Nearly all regions are $0.065/GB;
+    # Source: AWS Price List API (ServiceCode AWSNetworkFirewall, usagetype
+    # '<region>-Traffic-GB-Processed'; the Transit Gateway attachment rate is the
+    # same), validated 2026-11-16 (pricing effective 2026-09-01). Nearly all regions are $0.065/GB;
     # a few carry a premium. GB here is binary (1 GB = 1024^3 bytes), matching how
     # AWS meters Network Firewall data processing.
     FIREWALL_PRICING = {
@@ -80,7 +130,7 @@ class TrafficAnalyzer:
     
     # VPC Interface (PrivateLink) endpoint costs by region (per month).
     # Source: AWS Price List API (ServiceCode AmazonVPC, usagetype
-    # '<region>-VpcEndpoint-Hours'), validated 2026-08-21.
+    # '<region>-VpcEndpoint-Hours'), validated 2026-11-16 (pricing effective 2026-11-01).
     # Calculation: hourly_rate x 730 hours/month (rounded to cents).
     INTERFACE_ENDPOINT_PRICING = {
         'af-south-1': 9.56,      # $0.01309/hour
@@ -121,14 +171,63 @@ class TrafficAnalyzer:
         'us-west-2': 7.30,       # $0.01/hour
     }
     
-    # Interface endpoint data processing (first tier ~$0.01/GB in most regions)
+    # Interface endpoint data processing, first tier (up to 1 PB/month). Source:
+    # AWS Price List API (ServiceCode AmazonVPC, usagetype
+    # '<region>-VpcEndpoint-Bytes'), validated 2026-11-16: $0.01/GB in every
+    # region in these tables.
     INTERFACE_ENDPOINT_DATA_COST_PER_GB = 0.01
+
+    # CloudWatch Logs Insights query cost by region (per GB scanned).
+    # Source: AWS Price List API (ServiceCode AmazonCloudWatch, operation
+    # StartQuery, usagetype '<region>-DataScanned-Bytes', group "Queried Logs"),
+    # validated 2026-11-16 (pricing effective 2026-11-01). This is the usage type
+    # these queries are billed under (confirmed on a real bill); the separate
+    # '<region>-Omni-DataScanned-Bytes' price is a different product. The
+    # account-level monthly free tier (first 5 GB scanned) is not modeled.
+    CLOUDWATCH_LOGS_INSIGHTS_PRICING = {
+        'af-south-1': 0.0068,
+        'ap-east-1': 0.008,
+        'ap-east-2': 0.005,
+        'ap-northeast-1': 0.0076,
+        'ap-northeast-2': 0.0076,
+        'ap-northeast-3': 0.0076,
+        'ap-south-1': 0.0067,
+        'ap-south-2': 0.0067,
+        'ap-southeast-1': 0.007,
+        'ap-southeast-2': 0.0067,
+        'ap-southeast-3': 0.007,
+        'ap-southeast-4': 0.0067,
+        'ap-southeast-5': 0.005,
+        'ap-southeast-6': 0.005,
+        'ap-southeast-7': 0.005,
+        'ca-central-1': 0.0055,
+        'ca-west-1': 0.0055,
+        'eu-central-1': 0.0063,
+        'eu-central-2': 0.0069,
+        'eu-north-1': 0.0054,
+        'eu-south-1': 0.006,
+        'eu-south-2': 0.0057,
+        'eu-west-1': 0.0057,
+        'eu-west-2': 0.0059,
+        'eu-west-3': 0.0059,
+        'il-central-1': 0.005,
+        'me-central-1': 0.0063,
+        'me-south-1': 0.0063,
+        'mx-central-1': 0.005,
+        'sa-east-1': 0.009,
+        'us-east-1': 0.005,
+        'us-east-2': 0.005,
+        'us-gov-east-1': 0.00675,
+        'us-gov-west-1': 0.00675,
+        'us-west-1': 0.0067,
+        'us-west-2': 0.005,
+    }
     
     # AWS Network Firewall endpoint (hourly) costs by region
     # AWS Network Firewall standard PRIMARY endpoint hourly cost by region.
     # Source: AWS Price List API (ServiceCode AWSNetworkFirewall, usagetype
-    # '<region>-Endpoint-Hour'), validated 2026-08-21 (pricing effective
-    # 2026-02-01). Most regions are $0.395/hr; newer/edge regions carry a premium.
+    # '<region>-Endpoint-Hour'), validated 2026-11-16 (pricing effective
+    # 2026-09-01). Most regions are $0.395/hr; newer/edge regions carry a premium.
     # Note: this is the PRIMARY endpoint rate; secondary endpoints and Advanced
     # Inspection (TLS) endpoint hours use different rates and are not modeled here.
     ENDPOINT_HOURLY_PRICING = {
@@ -190,6 +289,14 @@ class TrafficAnalyzer:
         self.log_group = log_group
         self.region = region
         self.cancel_requested = False
+
+        # Number of CloudWatch Logs API calls retried because of throttling or the
+        # concurrent-query limit (shown in the progress dialog). Incremented from
+        # worker threads, hence the lock.
+        self.throttle_retries = 0
+        self._throttle_lock = threading.Lock()
+        # Highest overall-progress percentage reported so far (never decreases).
+        self._overall_percent = 0.0
         
         # Determine time range
         if start_date and end_date:
@@ -215,6 +322,7 @@ class TrafficAnalyzer:
         self.firewall_cost_per_gb = self.FIREWALL_PRICING.get(region, 0.065)
         self.interface_endpoint_monthly_cost = self.INTERFACE_ENDPOINT_PRICING.get(region, 7.30)
         self.endpoint_hourly_rate = self.ENDPOINT_HOURLY_PRICING.get(region, 0.395)
+        self.cloudwatch_price_per_gb = self.CLOUDWATCH_LOGS_INSIGHTS_PRICING.get(region, 0.005)
         
         # Track whether ANY pricing table lacked this region, so results can be
         # flagged. When true, the figures use us-east-1 fallback rates and may not
@@ -223,6 +331,7 @@ class TrafficAnalyzer:
             region not in self.FIREWALL_PRICING
             or region not in self.ENDPOINT_HOURLY_PRICING
             or region not in self.INTERFACE_ENDPOINT_PRICING
+            or region not in self.CLOUDWATCH_LOGS_INSIGHTS_PRICING
         )
         
         # Calculate break-even thresholds for this region
@@ -349,7 +458,7 @@ class TrafficAnalyzer:
             })
 
         try:
-            response = self.logs_client.start_query(
+            response = self._call_logs_api(self.logs_client.start_query,
                 logGroupName=self.log_group,
                 startTime=int(start_time.timestamp()),
                 endTime=int(end_time.timestamp()),
@@ -376,7 +485,7 @@ class TrafficAnalyzer:
                     pass
                 return (None, None, None, None)
 
-            result = self.logs_client.get_query_results(queryId=query_id)
+            result = self._call_logs_api(self.logs_client.get_query_results, queryId=query_id)
             status = result['status']
 
             if status in self._TERMINAL_QUERY_STATUSES:
@@ -493,7 +602,7 @@ class TrafficAnalyzer:
 
         # Keep each chunk's returned GROUP count under the 10K cap. Groups are a
         # fraction of raw records, so sizing by record count is conservative.
-        SAFE_CHUNK_ROWS = 9000
+        SAFE_CHUNK_ROWS = self.SAFE_CHUNK_ROWS
 
         if not expected_records or expected_records <= SAFE_CHUNK_ROWS:
             rows, scanned, truncated = self._query_grouped_range_adaptive(
@@ -503,53 +612,60 @@ class TrafficAnalyzer:
                 return (None, None, None)
             return (rows, scanned, truncated)
 
-        num_chunks = max(1, -(-expected_records // SAFE_CHUNK_ROWS))  # ceil division
-        total_duration = end_time - start_time
-        chunk_duration = total_duration / num_chunks
-
+        # Plan the chunks from where the records actually are (a per-time-bin
+        # record count). This skips empty stretches and sizes busy periods small,
+        # so fewer queries are needed and fewer chunks overflow and get bisected.
+        # The plan always covers the whole window, so accuracy does not depend on
+        # it; if the histogram is unavailable or disagrees with the record count,
+        # fall back to evenly sized time chunks.
         if progress_callback:
             progress_callback({
                 'stage': 'Querying flow breakdown',
-                'status': f'Aggregating per-flow bytes in {num_chunks} chunks...',
-                'phase': 'flow_chunks',
-                'chunk_current': 0,
-                'chunk_total': num_chunks,
+                'status': 'Measuring where records are in the time window...',
             })
+        histogram = self._query_record_histogram(start_time, end_time, progress_callback)
+        if self.cancel_requested:
+            return (None, None, None)
 
-        # Merge groups across chunks by their full identifying key. bytes/recs are
-        # additive; timestamps take the min/max across chunks. A flow_id is
-        # time-local so this cannot mis-merge distinct flows.
+        histogram_scanned = 0
+        bounds = None
+        if histogram is not None:
+            bins, bin_seconds, histogram_scanned = histogram
+            hist_total = sum(c for _, c in bins)
+            if hist_total > 0 and abs(hist_total - expected_records) <= 0.1 * expected_records:
+                bounds = self._bounds_from_histogram(bins, bin_seconds, start_time,
+                                                     end_time, SAFE_CHUNK_ROWS)
+            else:
+                histogram = None
+        if bounds is None:
+            num_chunks = max(1, -(-expected_records // SAFE_CHUNK_ROWS))  # ceil division
+            bounds = self._plan_chunks(start_time, end_time, num_chunks)
+        return self._query_chunked(
+            bounds, histogram, expected_records, end_time,
+            lambda s, e, cb: self._query_grouped_range_adaptive(s, e, cb),
+            self._merge_flow_rows, self._FLOW_CHUNK_LABELS,
+            histogram_scanned, progress_callback)
+
+    # Progress labels for the flow-breakdown chunk phase (unchanged wording).
+    _FLOW_CHUNK_LABELS = {
+        'stage': 'Querying flow breakdown',
+        'chunk_stage': 'Querying flow breakdown (chunked)',
+        'phase': 'flow_chunks',
+        'chunk_label': 'Flow logs',
+        'start_status': 'Aggregating per-flow bytes in {n} chunks...',
+        'done_status': 'Aggregated {rows:,} flow legs from {n} chunks',
+        'truncated_note': ' (breakdown sampled; totals unaffected)',
+    }
+
+    @staticmethod
+    def _merge_flow_rows(results: list) -> list:
+        """Merge per-chunk flow-leg groups by their full identifying key.
+
+        bytes/recs are additive; timestamps take the min/max across chunks. A
+        flow_id is time-local so this cannot mis-merge distinct flows.
+        """
         merged = {}
-        total_bytes_scanned = 0
-        truncated = False
-
-        for chunk_num in range(num_chunks):
-            if self.cancel_requested:
-                return (None, None, None)
-
-            raw_start = start_time + (chunk_duration * chunk_num)
-            chunk_start = raw_start if chunk_num == 0 else raw_start + timedelta(seconds=1)
-            chunk_end = (end_time if chunk_num == num_chunks - 1
-                         else start_time + (chunk_duration * (chunk_num + 1)))
-
-            if progress_callback:
-                progress_callback({
-                    'stage': 'Querying flow breakdown (chunked)',
-                    'status': f'Chunk {chunk_num + 1}/{num_chunks}...',
-                    'phase': 'flow_chunks',
-                    'chunk_current': chunk_num + 1,
-                    'chunk_total': num_chunks,
-                })
-
-            chunk_rows, chunk_bytes, chunk_trunc = self._query_grouped_range_adaptive(
-                chunk_start, chunk_end, progress_callback
-            )
-            if self.cancel_requested:
-                return (None, None, None)
-
-            total_bytes_scanned += chunk_bytes
-            if chunk_trunc:
-                truncated = True
+        for chunk_rows, _, _ in results:
             for r in chunk_rows:
                 key = (r['flow_id'], r['src_ip'], r['dest_ip'], r['src_port'],
                        r['dest_port'], r['proto'], r['app_proto'], r['az'])
@@ -563,29 +679,462 @@ class TrafficAnalyzer:
                         m['last_ts'] = r['last_ts']
                 else:
                     merged[key] = dict(r)
+        return list(merged.values())
 
-        rows = list(merged.values())
+    def _query_chunked(self, bounds: list, histogram, expected_records: int,
+                       end_time: datetime, run_range: Callable, merge_rows: Callable,
+                       labels: Dict[str, str], extra_scanned: int,
+                       progress_callback: Optional[Callable]) -> tuple:
+        """Run a grouped query over planned chunks and merge the results.
+
+        Shared by the flow breakdown and the alert hostname query. Chunk 0 runs
+        first and is used to recalibrate the remaining chunk sizes; the rest run
+        in parallel (MAX_PARALLEL_QUERIES). Results are merged in chunk order, so
+        the output does not depend on the order in which queries finish.
+
+        Args:
+            bounds: Planned (start, end) chunk ranges covering the window.
+            histogram: (bins, bin_seconds, scanned) used for the plan, or None if
+                the plan is the even split.
+            expected_records: Record count used for the even-split recalibration.
+            end_time: Window end.
+            run_range: (start, end, progress_callback) -> (rows, scanned, truncated).
+            merge_rows: list of per-chunk results -> merged rows.
+            labels: Progress wording (see _FLOW_CHUNK_LABELS).
+            extra_scanned: Bytes scanned by planning queries (billed too).
+            progress_callback: Optional progress callback.
+
+        Returns:
+            (rows, bytes_scanned, truncated), or (None, None, None) if cancelled.
+        """
+        num_chunks = len(bounds)
+
+        def emit(current, total, status):
+            if progress_callback:
+                progress_callback({
+                    'stage': labels['chunk_stage'],
+                    'status': status,
+                    'phase': labels['phase'],
+                    'chunk_label': labels['chunk_label'],
+                    'chunk_current': current,
+                    'chunk_total': total,
+                })
+
         if progress_callback:
-            status_msg = f'Aggregated {len(rows):,} flow legs from {num_chunks} chunks'
-            if truncated:
-                status_msg += ' (breakdown sampled; totals unaffected)'
             progress_callback({
-                'stage': 'Querying flow breakdown',
-                'status': status_msg,
-                'phase': 'flow_chunks',
-                'chunk_current': num_chunks,
+                'stage': labels['stage'],
+                'status': labels['start_status'].format(n=num_chunks),
+                'phase': labels['phase'],
+                'chunk_label': labels['chunk_label'],
+                'chunk_current': 0,
                 'chunk_total': num_chunks,
+            })
+
+        # results[i] = (rows, bytes_scanned, truncated) for chunk i.
+        results = [None] * len(bounds)
+
+        # Chunk 0 runs alone first. Besides being a normal chunk, it measures how
+        # many groups the data really produces per matched record, which lets the
+        # remaining chunks be sized more accurately (see _recalibrate_chunks).
+        emit(0, len(bounds), f'Chunk 1/{len(bounds)}...')
+        first = run_range(bounds[0][0], bounds[0][1], progress_callback)
+        if self.cancel_requested:
+            return (None, None, None)
+        results[0] = first
+
+        if histogram is not None:
+            bins, bin_seconds, _ = histogram
+            new_bounds = self._recalibrate_from_histogram(first[0], bins, bin_seconds,
+                                                          bounds, end_time)
+        else:
+            new_bounds = self._recalibrate_chunks(first[0], expected_records, bounds, end_time)
+        if new_bounds is not None:
+            bounds = new_bounds
+            results = [first] + [None] * (len(bounds) - 1)
+        total_chunks = len(bounds)
+        emit(1, total_chunks, f'Chunk 1/{total_chunks} complete...')
+
+        remaining = list(range(1, total_chunks))
+        if remaining:
+            workers = min(max(1, int(self.MAX_PARALLEL_QUERIES)), len(remaining))
+            if workers <= 1:
+                completed = 1
+                for idx in remaining:
+                    if self.cancel_requested:
+                        return (None, None, None)
+                    emit(completed, total_chunks, f'Chunk {idx + 1}/{total_chunks}...')
+                    results[idx] = run_range(bounds[idx][0], bounds[idx][1], progress_callback)
+                    if self.cancel_requested:
+                        return (None, None, None)
+                    completed += 1
+            else:
+                if not self._run_chunks_parallel(bounds, remaining, results, workers,
+                                                 total_chunks, emit, run_range):
+                    return (None, None, None)
+
+        total_bytes_scanned = extra_scanned + sum(r[1] for r in results)
+        truncated = any(r[2] for r in results)
+        rows = merge_rows(results)
+        if progress_callback:
+            status_msg = labels['done_status'].format(rows=len(rows), n=total_chunks)
+            if truncated:
+                status_msg += labels['truncated_note']
+            progress_callback({
+                'stage': labels['stage'],
+                'status': status_msg,
+                'phase': labels['phase'],
+                'chunk_label': labels['chunk_label'],
+                'chunk_current': total_chunks,
+                'chunk_total': total_chunks,
             })
         return (rows, total_bytes_scanned, truncated)
 
+    @staticmethod
+    def _plan_chunks(start_time: datetime, end_time: datetime, num_chunks: int) -> list:
+        """Split [start_time, end_time] into num_chunks disjoint (start, end) ranges.
+
+        Every chunk after the first starts 1 second after its nominal boundary so a
+        record on a boundary second is not counted in two chunks; the last chunk
+        ends exactly at end_time.
+        """
+        chunk_duration = (end_time - start_time) / num_chunks
+        bounds = []
+        for chunk_num in range(num_chunks):
+            raw_start = start_time + (chunk_duration * chunk_num)
+            chunk_start = raw_start if chunk_num == 0 else raw_start + timedelta(seconds=1)
+            chunk_end = (end_time if chunk_num == num_chunks - 1
+                         else start_time + (chunk_duration * (chunk_num + 1)))
+            bounds.append((chunk_start, chunk_end))
+        return bounds
+
+    def _histogram_bin_seconds(self, start_time: datetime, end_time: datetime) -> int:
+        """Bin width (whole minutes, in seconds) for the record histogram.
+
+        As fine as HISTOGRAM_MIN_BIN_SECONDS, but coarse enough that the window
+        produces at most HISTOGRAM_MAX_BINS rows (under the 10K result cap).
+        """
+        span = max(1, int(end_time.timestamp()) - int(start_time.timestamp()) + 1)
+        needed = -(-span // self.HISTOGRAM_MAX_BINS)
+        seconds = max(self.HISTOGRAM_MIN_BIN_SECONDS, needed)
+        return int(-(-seconds // 60) * 60)
+
+    def _query_record_histogram(self, start_time: datetime, end_time: datetime,
+                                progress_callback: Optional[Callable] = None):
+        """Count netflow records per time bin across the window.
+
+        Returns (bins, bin_seconds, bytes_scanned), where bins is a sorted list of
+        (bin_start_epoch_seconds, record_count). Returns None if the query fails,
+        is cancelled, or returns nothing usable; callers then fall back to evenly
+        sized chunks, so a failure here never affects the results.
+        """
+        return self._query_histogram(self.log_group, 'filter event.event_type = "netflow"\n',
+                                     start_time, end_time, progress_callback,
+                                     'Querying flow breakdown')
+
+    def _query_alert_histogram(self, start_time: datetime, end_time: datetime,
+                               progress_callback: Optional[Callable] = None):
+        """Count hostname-bearing alert records per time bin (see _query_histogram)."""
+        return self._query_histogram(self.alert_log_group, self._ALERT_FILTER,
+                                     start_time, end_time, progress_callback,
+                                     'Querying alert logs')
+
+    def _query_histogram(self, log_group: str, filter_text: str, start_time: datetime,
+                         end_time: datetime, progress_callback: Optional[Callable],
+                         stage: str):
+        """Count the records matching filter_text per time bin in log_group.
+
+        Returns (bins, bin_seconds, bytes_scanned) or None on any failure.
+        """
+        bin_seconds = self._histogram_bin_seconds(start_time, end_time)
+        query = filter_text + f'| stats count(*) as recs by bin({bin_seconds // 60}m)'
+        try:
+            response = self._call_logs_api(
+                self.logs_client.start_query,
+                logGroupName=log_group,
+                startTime=int(start_time.timestamp()),
+                endTime=int(end_time.timestamp()),
+                queryString=query
+            )
+            query_id = response['queryId']
+            started = time.time()
+            poll_delay = self.POLL_INITIAL_SECONDS
+            while True:
+                if self.cancel_requested:
+                    try:
+                        self.logs_client.stop_query(queryId=query_id)
+                    except Exception:
+                        pass
+                    return None
+                result = self._call_logs_api(self.logs_client.get_query_results,
+                                             queryId=query_id)
+                status = result.get('status')
+                if status in self._TERMINAL_QUERY_STATUSES:
+                    break
+                elapsed = time.time() - started
+                if elapsed > self.MAX_QUERY_SECONDS:
+                    try:
+                        self.logs_client.stop_query(queryId=query_id)
+                    except Exception:
+                        pass
+                    return None
+                if progress_callback:
+                    progress_callback({
+                        'stage': stage,
+                        'status': f'Measuring record density... ({int(elapsed)}s elapsed)'
+                    })
+                time.sleep(poll_delay)
+                poll_delay = min(self.POLL_MAX_SECONDS, poll_delay * self.POLL_BACKOFF_FACTOR)
+            if status != 'Complete':
+                return None
+
+            bins = {}
+            for row in result.get('results', []):
+                count = None
+                stamp = None
+                for cell in row:
+                    name = cell.get('field', '')
+                    if name == 'recs':
+                        count = cell.get('value')
+                    elif name.startswith('bin('):
+                        stamp = cell.get('value')
+                ts = self._parse_cw_timestamp(stamp)
+                if ts is None or count is None:
+                    continue
+                epoch = calendar.timegm(ts.timetuple())
+                bins[epoch] = bins.get(epoch, 0) + int(float(count))
+            if not bins:
+                return None
+            bytes_scanned = result.get('statistics', {}).get('bytesScanned', 0)
+            return (sorted(bins.items()), bin_seconds, bytes_scanned)
+        except Exception:
+            return None
+
+    @staticmethod
+    def _plan_epochs_from_histogram(bins: list, bin_seconds: int, first: int,
+                                    last: int, target: float) -> list:
+        """Partition the inclusive epoch-second range [first, last] into chunks.
+
+        Each chunk is planned to hold about `target` records according to the
+        histogram, assuming records are spread evenly within a bin. Chunks are
+        contiguous and disjoint (each starts one second after the previous ends),
+        cover the whole range including empty stretches, and are at least one
+        second long.
+
+        Returns a list of (start_epoch, end_epoch) inclusive pairs.
+        """
+        cuts = []
+        acc = 0.0
+        for bin_start, count in bins:
+            lo = max(first, bin_start)
+            hi = min(last, bin_start + bin_seconds - 1)
+            if lo > hi or count <= 0:
+                continue
+            rate = count / float(bin_seconds)  # records per second in this bin
+            pos = lo
+            while pos <= hi and acc + rate * (hi - pos + 1) > target:
+                fit = int((target - acc) / rate)  # whole seconds that still fit
+                cut = pos + max(fit, 1) - 1
+                if cut >= last:
+                    break
+                cuts.append(cut)
+                acc = 0.0
+                pos = cut + 1
+            if pos <= hi:
+                acc += rate * (hi - pos + 1)
+        starts = [first] + [c + 1 for c in cuts]
+        ends = cuts + [last]
+        return list(zip(starts, ends))
+
+    def _bounds_from_histogram(self, bins: list, bin_seconds: int, start_time: datetime,
+                               end_time: datetime, target: float) -> list:
+        """Chunk (start, end) datetimes for the window, planned from the histogram.
+
+        The first chunk starts exactly at start_time and the last ends exactly at
+        end_time; interior boundaries are whole seconds.
+        """
+        first = int(start_time.timestamp())
+        last = int(end_time.timestamp())
+        pairs = self._plan_epochs_from_histogram(bins, bin_seconds, first, last, target)
+        bounds = []
+        for i, (s, e) in enumerate(pairs):
+            chunk_start = start_time if i == 0 else datetime.fromtimestamp(s)
+            chunk_end = end_time if i == len(pairs) - 1 else datetime.fromtimestamp(e)
+            bounds.append((chunk_start, chunk_end))
+        return bounds
+
+    def _recalibrate_from_histogram(self, first_rows: list, bins: list, bin_seconds: int,
+                                    bounds: list, end_time: datetime) -> Optional[list]:
+        """Re-plan the chunks after the first one when groups are fewer than records.
+
+        Same idea as _recalibrate_chunks, for a histogram-based plan: the observed
+        groups-per-record ratio of the first chunk raises the per-chunk record
+        target (capped at CALIBRATION_MAX_REDUCTION times the safe size). Any chunk
+        that still hits the cap is bisected, so accuracy does not depend on this.
+        Returns the new full bounds list or None to keep the plan.
+        """
+        try:
+            first_recs = sum(int(r.get('recs') or 0) for r in first_rows)
+            if not first_rows or first_recs <= 0 or len(bounds) <= 2:
+                return None
+            ratio = len(first_rows) / float(first_recs)
+            if ratio >= self.CALIBRATION_RATIO_THRESHOLD:
+                return None
+            target = min(self.CALIBRATED_GROUPS_PER_CHUNK / ratio,
+                         float(self.SAFE_CHUNK_ROWS * self.CALIBRATION_MAX_REDUCTION))
+            sub_start = datetime.fromtimestamp(int(bounds[0][1].timestamp()) + 1)
+            if sub_start >= end_time:
+                return None
+            rest = self._bounds_from_histogram(bins, bin_seconds, sub_start, end_time, target)
+            if len(rest) >= len(bounds) - 1:
+                return None
+            return [bounds[0]] + rest
+        except Exception:
+            return None  # calibration is an optimization only; keep the safe plan
+
+    def _recalibrate_chunks(self, first_rows: list, expected_records: int,
+                            bounds: list, end_time: datetime) -> Optional[list]:
+        """Re-plan the chunks after the first one using the observed group density.
+
+        The initial plan sizes chunks by netflow RECORD count, but the 10K cap
+        applies to returned GROUPS, which are fewer. From the first chunk, the ratio
+        groups/records is len(rows) / sum(recs). When that ratio is clearly below 1
+        the remaining window can be covered by fewer, larger chunks.
+
+        Returns the new full bounds list (first chunk kept as-is) or None to keep the
+        original plan. The result never has fewer than 1/CALIBRATION_MAX_REDUCTION of
+        the original remaining chunks, and any chunk that still hits the cap is
+        bisected by _query_grouped_range_adaptive, so accuracy never depends on this
+        estimate being right.
+        """
+        try:
+            first_recs = sum(int(r.get('recs') or 0) for r in first_rows)
+            if not first_rows or first_recs <= 0 or len(bounds) <= 2:
+                return None
+            ratio = len(first_rows) / float(first_recs)
+            if ratio >= self.CALIBRATION_RATIO_THRESHOLD:
+                return None
+
+            remaining_records = max(0, expected_records - first_recs)
+            est_groups = remaining_records * ratio
+            needed = max(1, -(-int(est_groups) // self.CALIBRATED_GROUPS_PER_CHUNK))
+            orig_remaining = len(bounds) - 1
+            min_chunks = max(1, -(-orig_remaining // self.CALIBRATION_MAX_REDUCTION))
+            new_remaining = max(needed, min_chunks)
+            if new_remaining >= orig_remaining:
+                return None
+
+            sub_start = bounds[0][1] + timedelta(seconds=1)
+            if sub_start >= end_time:
+                return None
+            return [bounds[0]] + self._plan_chunks(sub_start, end_time, new_remaining)
+        except Exception:
+            return None  # calibration is an optimization only; keep the safe plan
+
+    def _run_chunks_parallel(self, bounds: list, indexes: list, results: list,
+                             workers: int, total_chunks: int, emit,
+                             run_range: Optional[Callable] = None) -> bool:
+        """Run the chunk queries for `indexes` concurrently and fill `results`.
+
+        Worker threads only issue CloudWatch queries; they never call the progress
+        callback. This (calling) thread waits for them and reports progress itself,
+        so UI code that is not thread-safe is only touched from here.
+
+        Returns False if the analysis was cancelled. Raises the first worker error
+        (after stopping the other workers).
+        """
+        from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
+
+        executor = ThreadPoolExecutor(max_workers=workers)
+        future_index = {}
+        try:
+            for idx in indexes:
+                fut = executor.submit(run_range or self._query_grouped_range_adaptive,
+                                      bounds[idx][0], bounds[idx][1], None)
+                future_index[fut] = idx
+            pending = set(future_index)
+            completed = 1  # chunk 0 is already done
+            while pending:
+                done, pending = wait(pending, timeout=0.5, return_when=FIRST_COMPLETED)
+                for fut in done:
+                    results[future_index[fut]] = fut.result()  # re-raises worker errors
+                    completed += 1
+                emit(completed, total_chunks,
+                     f'{completed}/{total_chunks} chunks complete '
+                     f'({min(workers, len(pending))} running)...')
+                if self.cancel_requested:
+                    self._stop_workers(executor, pending)
+                    return False
+            executor.shutdown(wait=True)
+            return True
+        except BaseException:
+            self._stop_workers(executor, [f for f in future_index if not f.done()])
+            raise
+
+    def _stop_workers(self, executor, pending) -> None:
+        """Cancel queued chunk tasks and wait for running ones to stop.
+
+        Running workers poll `cancel_requested` and stop their CloudWatch query, so
+        it is raised for the duration of the shutdown and then restored.
+        """
+        previous = self.cancel_requested
+        self.cancel_requested = True
+        try:
+            for fut in pending:
+                fut.cancel()
+            executor.shutdown(wait=True)
+        finally:
+            self.cancel_requested = previous
+
+    def _call_logs_api(self, func, **kwargs):
+        """Call a CloudWatch Logs API with retry/backoff on throttling.
+
+        Concurrent chunk queries can hit throttling or the concurrent-query quota
+        (LimitExceededException). Those are retried with exponential backoff; any
+        other error is raised immediately and unchanged.
+        """
+        delay = 1.0
+        for attempt in range(self.MAX_THROTTLE_RETRIES):
+            try:
+                return func(**kwargs)
+            except Exception as e:
+                code = ''
+                try:
+                    code = e.response.get('Error', {}).get('Code', '')
+                except Exception:
+                    pass
+                text = f'{code} {e}'
+                throttled = any(name in text for name in self._THROTTLE_ERROR_NAMES)
+                if (not throttled or self.cancel_requested
+                        or attempt >= self.MAX_THROTTLE_RETRIES - 1):
+                    raise
+                with self._throttle_lock:
+                    self.throttle_retries += 1
+                time.sleep(delay)
+                delay = min(delay * 2, 30.0)
+
     def _query_grouped_range_adaptive(self, start_time: datetime, end_time: datetime,
                                       progress_callback: Optional[Callable] = None) -> tuple:
-        """Run the grouped aggregation for a range; bisect if it hits the group cap.
+        """Flow breakdown for one range, bisected if it hits the group cap."""
+        return self._query_range_adaptive(self._execute_grouped_query,
+                                          start_time, end_time, progress_callback)
 
-        If the returned
-        group count hits the 10,000-row cap the range is halved (down to a 60s
-        floor) so no groups are lost; only a <=60s window still at the cap is
-        flagged truncated.
+    def _query_alert_range_adaptive(self, start_time: datetime, end_time: datetime,
+                                    progress_callback: Optional[Callable] = None) -> tuple:
+        """Alert hostnames for one range, bisected if it hits the group cap."""
+        return self._query_range_adaptive(self._execute_alert_grouped_query,
+                                          start_time, end_time, progress_callback)
+
+    def _query_range_adaptive(self, execute: Callable, start_time: datetime,
+                              end_time: datetime,
+                              progress_callback: Optional[Callable] = None) -> tuple:
+        """Run a grouped query for a range; bisect if it hits the group cap.
+
+        If the returned group count hits the 10,000-row cap the range is halved
+        (down to a 60s floor) so no groups are lost; only a <=60s window still at
+        the cap is flagged truncated.
+
+        Args:
+            execute: (start, end, progress_callback) -> (rows, scanned, hit_cap).
 
         Returns:
             Tuple of (grouped_rows, bytes_scanned, truncated)
@@ -595,9 +1144,7 @@ class TrafficAnalyzer:
         if self.cancel_requested:
             return ([], 0, False)
 
-        rows, bytes_scanned, hit_limit = self._execute_grouped_query(
-            start_time, end_time, progress_callback
-        )
+        rows, bytes_scanned, hit_limit = execute(start_time, end_time, progress_callback)
         if self.cancel_requested:
             return ([], 0, False)
 
@@ -605,19 +1152,19 @@ class TrafficAnalyzer:
             return (rows, bytes_scanned, False)
 
         if (end_time - start_time).total_seconds() <= MIN_CHUNK_SECONDS:
-            print("⚠️  Warning: a <=60s window still hit the 10K group limit; "
-                  "per-flow breakdowns for this period are a sample. "
+            print("\u26a0\ufe0f  Warning: a <=60s window still hit the 10K group limit; "
+                  "results for this period are a sample. "
                   "Authoritative totals are unaffected.")
             return (rows, bytes_scanned, True)
 
         mid = start_time + (end_time - start_time) / 2
-        left_rows, left_bytes, left_trunc = self._query_grouped_range_adaptive(
-            start_time, mid, progress_callback
+        left_rows, left_bytes, left_trunc = self._query_range_adaptive(
+            execute, start_time, mid, progress_callback
         )
         if self.cancel_requested:
             return ([], 0, False)
-        right_rows, right_bytes, right_trunc = self._query_grouped_range_adaptive(
-            mid + timedelta(seconds=1), end_time, progress_callback
+        right_rows, right_bytes, right_trunc = self._query_range_adaptive(
+            execute, mid + timedelta(seconds=1), end_time, progress_callback
         )
         return (left_rows + right_rows,
                 left_bytes + right_bytes,
@@ -631,7 +1178,8 @@ class TrafficAnalyzer:
             Tuple of (grouped_rows, bytes_scanned, hit_group_cap)
         """
         try:
-            response = self.logs_client.start_query(
+            response = self._call_logs_api(
+                self.logs_client.start_query,
                 logGroupName=self.log_group,
                 startTime=int(start_time.timestamp()),
                 endTime=int(end_time.timestamp()),
@@ -649,6 +1197,7 @@ class TrafficAnalyzer:
 
         query_id = response['queryId']
         start_query_time = time.time()
+        poll_delay = self.POLL_INITIAL_SECONDS
         while True:
             if self.cancel_requested:
                 try:
@@ -657,7 +1206,7 @@ class TrafficAnalyzer:
                     pass
                 return ([], 0, False)
 
-            result = self.logs_client.get_query_results(queryId=query_id)
+            result = self._call_logs_api(self.logs_client.get_query_results, queryId=query_id)
             status = result['status']
             if status in self._TERMINAL_QUERY_STATUSES:
                 break
@@ -675,7 +1224,8 @@ class TrafficAnalyzer:
                     'stage': 'Querying flow breakdown',
                     'status': f'Aggregation running... ({int(elapsed)}s elapsed)'
                 })
-            time.sleep(2)
+            time.sleep(poll_delay)
+            poll_delay = min(self.POLL_MAX_SECONDS, poll_delay * self.POLL_BACKOFF_FACTOR)
 
         if status != 'Complete':
             raise Exception(f"Flow breakdown query {status.lower()}: {result.get('statistics', {})}")
@@ -716,125 +1266,224 @@ class TrafficAnalyzer:
             })
         return (rows, bytes_scanned, hit_limit)
 
+    # Alerts that carry a hostname (HTTP Host header or TLS SNI).
+    _ALERT_FILTER = ('filter event.event_type = "alert"\n'
+                     '| filter (isPresent(event.http.hostname) or isPresent(event.tls.sni))\n')
+
+    # One row per flow: its hostname/SNI, alert count and first/last alert time.
+    # sortsLast() returns a value whenever any of the flow's alerts has the field.
+    _ALERT_GROUPED_QUERY = (_ALERT_FILTER +
+                            '| stats sortsLast(event.http.hostname) as http_host,'
+                            ' sortsLast(event.tls.sni) as sni, count(*) as recs,'
+                            ' min(@timestamp) as first_ts, max(@timestamp) as last_ts'
+                            ' by event.flow_id')
+
+    _ALERT_CHUNK_LABELS = {
+        'stage': 'Querying alert logs',
+        'chunk_stage': 'Querying alert logs (chunked)',
+        'phase': 'alert_chunks',
+        'chunk_label': 'Alert logs',
+        'start_status': 'Collecting hostnames in {n} chunks...',
+        'done_status': 'Collected hostnames for {rows:,} flows from {n} chunks',
+        'truncated_note': ' (some hostnames sampled)',
+    }
+
     def query_alert_logs(self, progress_callback: Optional[Callable] = None) -> tuple:
-        """Query CloudWatch Logs for alert data (hostnames from HTTP and TLS)
-        
-        Also tracks timestamps for accurate endpoint cost calculation.
-        
-        Args:
-            progress_callback: Optional callback for progress updates
-            
+        """Collect the hostname (HTTP host or TLS SNI) of every flow that has one.
+
+        Hostnames come from alert events. A single Logs Insights query returns at
+        most 10,000 rows, so instead of fetching raw alerts this groups them per
+        flow_id on the server and splits the window into chunks (planned from a
+        per-time-bin count of matching alerts), exactly like the flow breakdown.
+        Chunks that still hit the cap are bisected, so every flow is covered.
+
+        Also tracks the earliest/latest alert timestamps for the endpoint cost
+        calculation.
+
         Returns:
-            Tuple of (alert_logs, earliest_alert_ts, latest_alert_ts, bytes_scanned) or (None, None, None, None) if cancelled
+            Tuple of (alert_logs, earliest_alert_ts, latest_alert_ts, bytes_scanned)
+            where alert_logs is a list of {'flow_id', 'http_host', 'sni'} dicts
+            (one per flow), or (None, None, None, None) if cancelled.
         """
         if self.cancel_requested:
             return (None, None, None, None)
-        
+
         # Shared window helper: identical range to the flow / totals queries.
         start_time, end_time = self._get_query_window()
-        
-        # Query for alert events with hostname/SNI
-        query = """
-        fields @timestamp, event.flow_id, event.http.hostname, event.tls.sni
-        | filter event.event_type = "alert"
-        | filter (isPresent(event.http.hostname) or isPresent(event.tls.sni))
-        """
-        
+
         if progress_callback:
             progress_callback({
                 'stage': 'Querying alert logs',
-                'status': 'Starting CloudWatch query...'
+                'status': 'Measuring where alerts are in the time window...'
             })
-        
-        # Start query (using alert log group, which may be different from flow log group)
+        histogram = self._query_alert_histogram(start_time, end_time, progress_callback)
+        if self.cancel_requested:
+            return (None, None, None, None)
+
+        hist_scanned = 0
+        expected = None
+        if histogram is not None:
+            bins, bin_seconds, hist_scanned = histogram
+            expected = sum(c for _, c in bins)
+
+        if expected is not None and expected > self.SAFE_CHUNK_ROWS:
+            bounds = self._bounds_from_histogram(bins, bin_seconds, start_time, end_time,
+                                                 self.SAFE_CHUNK_ROWS)
+            rows, scanned, truncated = self._query_chunked(
+                bounds, histogram, expected, end_time,
+                lambda s, e, cb: self._query_alert_range_adaptive(s, e, cb),
+                self._merge_alert_rows, self._ALERT_CHUNK_LABELS,
+                hist_scanned, progress_callback)
+        else:
+            # Few alerts (or no density data): one query, bisected if needed.
+            rows, scanned, truncated = self._query_alert_range_adaptive(
+                start_time, end_time, progress_callback)
+            if rows is not None:
+                rows = self._merge_alert_rows([(rows, scanned, truncated)])
+                scanned += hist_scanned
+        if self.cancel_requested or rows is None:
+            return (None, None, None, None)
+
+        earliest_alert_ts = None
+        latest_alert_ts = None
+        alert_logs = []
+        for r in rows:
+            # Normalized to NAIVE UTC by the shared parser so these compare with
+            # the flow-leg timestamps in analyze() (mixing naive and tz-aware
+            # datetimes raises).
+            first = self._parse_cw_timestamp(r.get('first_ts'))
+            last = self._parse_cw_timestamp(r.get('last_ts'))
+            if first and (earliest_alert_ts is None or first < earliest_alert_ts):
+                earliest_alert_ts = first
+            if last and (latest_alert_ts is None or last > latest_alert_ts):
+                latest_alert_ts = last
+            alert_logs.append({'flow_id': r['flow_id'], 'http_host': r.get('http_host'),
+                               'sni': r.get('sni')})
+
+        if progress_callback:
+            progress_callback({
+                'stage': 'Querying alert logs',
+                'status': f'Found hostnames for {len(alert_logs):,} flows'
+            })
+        return (alert_logs, earliest_alert_ts, latest_alert_ts, scanned)
+
+    @staticmethod
+    def _merge_alert_rows(results: list) -> list:
+        """Merge per-chunk alert groups by flow_id.
+
+        A flow's alerts can fall in more than one chunk. Counts add up, first/last
+        timestamps take the min/max, and a hostname/SNI found in any chunk is kept
+        (if two chunks disagree, the one from the later alerts wins).
+        """
+        merged = {}
+        for chunk_rows, _, _ in results:
+            for r in chunk_rows:
+                fid = r.get('flow_id')
+                if not fid:
+                    continue
+                m = merged.get(fid)
+                if m is None:
+                    merged[fid] = dict(r)
+                    continue
+                later = bool(r.get('last_ts')) and (not m.get('last_ts')
+                                                    or r['last_ts'] > m['last_ts'])
+                for field in ('http_host', 'sni'):
+                    if r.get(field) and (not m.get(field) or later):
+                        m[field] = r[field]
+                m['recs'] = m.get('recs', 0) + r.get('recs', 0)
+                if r.get('first_ts') and (not m.get('first_ts') or r['first_ts'] < m['first_ts']):
+                    m['first_ts'] = r['first_ts']
+                if later:
+                    m['last_ts'] = r['last_ts']
+        return list(merged.values())
+
+    def _execute_alert_grouped_query(self, start_time: datetime, end_time: datetime,
+                                     progress_callback: Optional[Callable] = None) -> tuple:
+        """Execute one grouped alert query and parse rows.
+
+        Returns:
+            Tuple of (rows, bytes_scanned, hit_group_cap), where rows are dicts with
+            flow_id, http_host, sni, recs, first_ts, last_ts.
+        """
         try:
-            response = self.logs_client.start_query(
+            response = self._call_logs_api(
+                self.logs_client.start_query,
                 logGroupName=self.alert_log_group,
                 startTime=int(start_time.timestamp()),
                 endTime=int(end_time.timestamp()),
-                queryString=query
+                queryString=self._ALERT_GROUPED_QUERY
             )
         except Exception as e:
             error_str = str(e)
             if "ResourceNotFoundException" in error_str or "ResourceNotFound" in error_str:
                 raise Exception(f"ALERT log group not found: '{self.alert_log_group}'. Please verify the name and region.")
+            elif "MalformedQueryException" in error_str and ("creation time" in error_str or "before" in error_str.lower()):
+                return ([], 0, False)  # range predates log group creation
             else:
                 raise Exception(f"Failed to start alert log query on '{self.alert_log_group}': {error_str}")
-        
+
         query_id = response['queryId']
-        
-        # Wait for query completion
         start_query_time = time.time()
+        poll_delay = self.POLL_INITIAL_SECONDS
         while True:
             if self.cancel_requested:
                 try:
                     self.logs_client.stop_query(queryId=query_id)
-                except:
+                except Exception:
                     pass
-                return (None, None, None, None)
-            
-            result = self.logs_client.get_query_results(queryId=query_id)
+                return ([], 0, False)
+
+            result = self._call_logs_api(self.logs_client.get_query_results, queryId=query_id)
             status = result['status']
-            
             if status in self._TERMINAL_QUERY_STATUSES:
                 break
-            
-            # Wall-clock safety net: fail loudly instead of hanging if the query
-            # never reaches a terminal state.
+
+            # Wall-clock safety net: fail loudly instead of hanging.
             elapsed = time.time() - start_query_time
             if elapsed > self.MAX_QUERY_SECONDS:
                 try:
                     self.logs_client.stop_query(queryId=query_id)
-                except:
+                except Exception:
                     pass
                 raise Exception(f"Alert log query timed out after {int(elapsed)}s "
                                 f"waiting for CloudWatch Logs Insights (status '{status}').")
-            
-            # Progress update
             if progress_callback:
                 progress_callback({
                     'stage': 'Querying alert logs',
                     'status': f'Query running... ({int(elapsed)}s elapsed)'
                 })
-            
-            time.sleep(2)
-        
-        if status == 'Complete':
-            records = result.get('results', [])
-            # Capture bytes scanned for cost calculation
-            statistics = result.get('statistics', {})
-            bytes_scanned = statistics.get('bytesScanned', 0)
-            
-            if progress_callback:
-                progress_callback({
-                    'stage': 'Querying alert logs',
-                    'status': f'Retrieved {len(records):,} alert records'
-                })
-            
-            # Track timestamps from alert logs too
-            earliest_alert_ts = None
-            latest_alert_ts = None
-            
-            for alert in records:
-                timestamp_str = self._get_field_value(alert, '@timestamp')
-                if timestamp_str:
-                    # Route through the shared parser so alert timestamps are
-                    # normalized to NAIVE UTC, matching the flow-leg and metadata
-                    # timestamps. Parsing inline with fromisoformat() on a 'Z' form
-                    # yields a tz-aware datetime, which later raises "can't compare
-                    # offset-naive and offset-aware datetimes" when combined with
-                    # the naive flow timestamps in analyze().
-                    ts = self._parse_cw_timestamp(timestamp_str)
-                    if ts:
-                        if earliest_alert_ts is None or ts < earliest_alert_ts:
-                            earliest_alert_ts = ts
-                        if latest_alert_ts is None or ts > latest_alert_ts:
-                            latest_alert_ts = ts
-            
-            return (records, earliest_alert_ts, latest_alert_ts, bytes_scanned)
-        else:
+            time.sleep(poll_delay)
+            poll_delay = min(self.POLL_MAX_SECONDS, poll_delay * self.POLL_BACKOFF_FACTOR)
+
+        if status != 'Complete':
             raise Exception(f"Alert log query {status.lower()}: {result.get('statistics', {})}")
-    
+
+        records = result.get('results', [])
+        statistics = result.get('statistics', {})
+        bytes_scanned = statistics.get('bytesScanned', 0)
+        records_matched = statistics.get('recordsMatched', 0)
+        hit_limit = (len(records) >= 10000 and records_matched > 10000)
+
+        rows = []
+        for row in records:
+            recs_str = self._get_field_value(row, 'recs')
+            try:
+                recs = int(float(recs_str)) if recs_str else 1
+            except (ValueError, TypeError):
+                recs = 1
+            ts = self._get_field_value(row, '@timestamp')  # present on raw rows only
+            rows.append({
+                'flow_id': self._get_field_value(row, 'event.flow_id'),
+                'http_host': (self._get_field_value(row, 'http_host')
+                              or self._get_field_value(row, 'event.http.hostname')),
+                'sni': (self._get_field_value(row, 'sni')
+                        or self._get_field_value(row, 'event.tls.sni')),
+                'recs': recs,
+                'first_ts': self._get_field_value(row, 'first_ts') or ts,
+                'last_ts': self._get_field_value(row, 'last_ts') or ts,
+            })
+        return (rows, bytes_scanned, hit_limit)
+
     def _get_field_value(self, log_entry: List[Dict], field_name: str) -> Optional[str]:
         """Extract field value from CloudWatch Logs query result
         
@@ -915,9 +1564,16 @@ class TrafficAnalyzer:
         # Build alert lookup by flow_id
         alert_lookup = {}
         for alert in alert_logs:
-            flow_id = self._get_field_value(alert, 'event.flow_id')
-            hostname = self._get_field_value(alert, 'event.http.hostname')
-            tls_sni = self._get_field_value(alert, 'event.tls.sni')
+            if isinstance(alert, dict):
+                # One row per flow from query_alert_logs.
+                flow_id = alert.get('flow_id')
+                hostname = alert.get('http_host')
+                tls_sni = alert.get('sni')
+            else:
+                # Raw Logs Insights row (list of field/value cells).
+                flow_id = self._get_field_value(alert, 'event.flow_id')
+                hostname = self._get_field_value(alert, 'event.http.hostname')
+                tls_sni = self._get_field_value(alert, 'event.tls.sni')
             
             if flow_id:
                 # Prefer HTTP hostname over TLS SNI
@@ -1074,30 +1730,18 @@ class TrafficAnalyzer:
             
             # CRITICAL: Try hostname-based detection FIRST when available
             # Hostname is more accurate than IP-based detection for AWS services
-            if hostname and hostname != "(No hostname)" and '.amazonaws.com' in hostname:
-                # Parse service from hostname format: service.region.amazonaws.com
-                if '.s3.' in hostname or hostname.endswith('.s3.amazonaws.com'):
-                    # S3 specific patterns
-                    service_info = {'service': 'S3', 'is_aws': True, 'region': 'N/A'}
-                    # Try to extract region from hostname
-                    if '.s3.' in hostname:
-                        parts = hostname.split('.s3.')
-                        if len(parts) > 1:
-                            region_part = parts[1].split('.amazonaws.com')[0]
-                            if region_part and '-' in region_part and region_part != 'amazonaws':
-                                service_info['region'] = region_part
-                elif 'cloudfront.net' in hostname:
-                    service_info = {'service': 'CLOUDFRONT', 'region': 'GLOBAL', 'is_aws': True}
-                else:
-                    # Generic AWS service hostname: service.region.amazonaws.com
-                    parts = hostname.split('.amazonaws.com')[0].split('.')
-                    if len(parts) >= 2:
-                        # Extract service name (first part) and region (second-to-last part)
-                        service_name = parts[0].upper().replace('-', '_')
-                        # Get region from hostname (typically second-to-last part)
-                        region_part = parts[-1] if len(parts) >= 2 else 'N/A'
-                        if region_part and '-' in region_part:
-                            service_info = {'service': service_name, 'region': region_part, 'is_aws': True}
+            if hostname and hostname != "(No hostname)":
+                parsed = self._service_from_hostname(hostname)
+                if parsed:
+                    service_name, region_part = parsed
+                    if region_part is None:
+                        # Regionless hostname (e.g. bucket.s3.amazonaws.com): take
+                        # the region from the destination IP's published range.
+                        ip_info = (self.aws_service_detector.identify_aws_service(dest_ip)
+                                   if dest_ip else None)
+                        region_part = (ip_info['region'] if ip_info and ip_info.get('is_aws')
+                                       else 'N/A')
+                    service_info = {'service': service_name, 'region': region_part, 'is_aws': True}
             
             # Fall back to IP-based detection if hostname didn't provide info
             if service_info is None:
@@ -1248,6 +1892,190 @@ class TrafficAnalyzer:
         
         return result
     
+    # An AWS Region label inside a hostname, e.g. us-east-2, eu-west-1, us-gov-west-1.
+    _REGION_LABEL = re.compile(r'^(?:us|eu|ap|sa|ca|me|af|il|mx|cn)(?:-gov|-iso[a-z]*)?-[a-z]+-\d+$')
+
+    # Services reached over AWS addresses that no VPC endpoint can serve.
+    # 'AMAZON' is an address AWS publishes only under its catch-all code, so the
+    # actual service (and therefore any endpoint) cannot be determined.
+    NO_VPC_ENDPOINT_SERVICES = frozenset({
+        'CLOUDFRONT', 'CLOUDFRONT_ORIGIN_FACING', 'GLOBALACCELERATOR', 'AMAZON',
+    })
+
+    @classmethod
+    def _service_from_hostname(cls, hostname: str) -> Optional[tuple]:
+        """Work out (service, region) from an AWS hostname, or None.
+
+        Region is None when the hostname carries no Region (e.g.
+        bucket.s3.amazonaws.com); the caller then takes it from the IP.
+
+        Handles the common AWS endpoint shapes:
+          logs.us-east-2.amazonaws.com                 -> LOGS, us-east-2
+          api.ecr.us-east-2.amazonaws.com              -> ECR_API, us-east-2
+          <account>.dkr.ecr.us-east-2.amazonaws.com    -> ECR_DKR, us-east-2
+          bucket.s3.dualstack.us-east-2.amazonaws.com  -> S3, us-east-2
+          kms-fips.us-east-1.amazonaws.com             -> KMS, us-east-1
+          bucket.s3-us-west-2.amazonaws.com (legacy)   -> S3, us-west-2
+          d111111abcdef8.cloudfront.net                -> CLOUDFRONT, GLOBAL
+        The service is the label just before the Region (ignoring 'dualstack'
+        and 'fips'). ECR's API and image-layer (dkr) hostnames are separate
+        services because each needs its own interface endpoint.
+        """
+        h = (hostname or '').strip().lower().rstrip('.')
+        if h.endswith('.cloudfront.net'):
+            return ('CLOUDFRONT', 'GLOBAL')
+        if not h.endswith('.amazonaws.com'):
+            return None
+        labels = h[:-len('.amazonaws.com')].split('.')
+
+        region_idx = None
+        for i in range(len(labels) - 1, -1, -1):
+            if cls._REGION_LABEL.match(labels[i]):
+                region_idx = i
+                break
+
+        if region_idx is None:
+            # Legacy S3 forms: s3-<region>, s3-external-1, or regionless s3.
+            for label in reversed(labels):
+                if label.startswith('s3-'):
+                    rest = label[3:]
+                    if cls._REGION_LABEL.match(rest):
+                        return ('S3', rest)
+                    if rest.startswith('external-'):
+                        return ('S3', 'us-east-1')
+            if labels and (labels[-1] == 's3' or labels[-1].startswith('s3-')):
+                return ('S3', None)
+            return None
+
+        region = labels[region_idx]
+        before = [lb for lb in labels[:region_idx] if lb not in ('dualstack', 'fips')]
+        if not before:
+            return None
+        service = before[-1]
+        if service.endswith('-fips'):
+            service = service[:-len('-fips')]
+        if service == 's3' or service.startswith('s3-'):
+            return ('S3', region)
+        if service == 'ecr':
+            if len(before) >= 2 and before[-2] == 'dkr':
+                return ('ECR_DKR', region)
+            return ('ECR_API', region)
+        return (service.upper().replace('-', '_'), region)
+
+    @staticmethod
+    def internet_hostname_coverage(hostname_aggregation: Dict[str, Dict]) -> Optional[float]:
+        """Percent of Internet-tab traffic (bytes) shown under a hostname.
+
+        Computed from the Internet tab's own rows: bytes in hostname rows divided
+        by all Internet bytes (hostname rows plus IP:port rows). It therefore
+        matches what the tab displays, including hostnames inferred for flows to
+        an IP that was seen with that hostname. Returns None when there is no
+        Internet traffic.
+        """
+        total = sum(v.get('bytes', 0) for v in hostname_aggregation.values())
+        if total <= 0:
+            return None
+        named = sum(v.get('bytes', 0) for v in hostname_aggregation.values()
+                    if not v.get('is_ip_based'))
+        return named / total * 100.0
+
+    @staticmethod
+    def _is_private_for_drilldown(ip) -> bool:
+        """Private-address test used by the drill-down filters.
+
+        Uses ipaddress' is_private (the same test the drill-down dialogs have
+        always used), which is broader than RFC1918 (it also covers loopback,
+        link-local, etc.). Unparseable values count as not private.
+        """
+        try:
+            return ipaddress.ip_address(ip).is_private
+        except Exception:
+            return False
+
+    @classmethod
+    def build_source_breakdowns(cls, flows: List[Dict], internet_keys,
+                                internal_dests) -> Dict[str, Any]:
+        """Per-source-IP totals behind every drill-down row, for all three tabs.
+
+        The drill-down dialogs show, for one row, each source IP's bytes and flow
+        count. This computes those tables up front from the enriched flows, so the
+        individual flows do not need to be kept or saved. The selection rules are
+        exactly the ones the drill-downs have always applied:
+
+          Internet tab, hostname row H: non-AWS flows whose hostname is H, plus
+            non-AWS flows with no hostname whose dest IP is one of the dest IPs
+            seen with H; destination must not be private.
+          Internet tab, IP:port row: non-AWS flows with no hostname to that dest IP
+            and port; destination must not be private.
+          AWS Service tab, (service, region) row: all flows with that service and
+            region.
+          Internal tab, (dest IP, dest port) row: all flows to that dest IP and port.
+
+        Args:
+            flows: Enriched flow dicts (src_ip, dest_ip, dest_port, hostname,
+                is_aws, aws_service, aws_region, bytes).
+            internet_keys: Internet-tab row keys (hostname_aggregation keys).
+            internal_dests: Iterable of (dest_ip, dest_port) Internal-tab rows.
+
+        Returns:
+            {'internet': {key: sources},
+             'aws_service': {service: {region: sources}},
+             'internal': {dest_ip: {dest_port: sources}}}
+            where sources is {src_ip: {'bytes': int, 'flow_count': int}} and all
+            keys are strings (so the structure survives a JSON round trip).
+        """
+        no_host = "(No hostname)"
+
+        def add(table, flow):
+            src = str(flow['src_ip'])
+            entry = table.get(src)
+            if entry is None:
+                entry = table[src] = {'bytes': 0, 'flow_count': 0}
+            entry['bytes'] += flow['bytes']
+            entry['flow_count'] += 1
+
+        # One pass to index the flows each tab's rules need.
+        by_hostname = defaultdict(list)    # non-AWS flows by hostname
+        no_host_by_ip = defaultdict(list)  # non-AWS flows with no hostname, by dest IP
+        aws_service = {}
+        internal_wanted = set((str(ip), str(port)) for ip, port in internal_dests)
+        internal = {}
+        for f in flows:
+            if not f['is_aws']:
+                by_hostname[f['hostname']].append(f)
+                if f['hostname'] == no_host:
+                    no_host_by_ip[f['dest_ip']].append(f)
+            svc = aws_service.setdefault(str(f['aws_service']), {})
+            add(svc.setdefault(str(f['aws_region']), {}), f)
+            dest = (str(f['dest_ip']), str(f['dest_port']))
+            if dest in internal_wanted:
+                add(internal.setdefault(dest[0], {}).setdefault(dest[1], {}), f)
+
+        internet = {}
+        for key in internet_keys:
+            sources = {}
+            if ':' in key and not key.startswith('http'):
+                ip, port = key.rsplit(':', 1)
+                port = port.strip()
+                for f in no_host_by_ip.get(ip, ()):
+                    if (str(f['dest_port']) == port
+                            and not cls._is_private_for_drilldown(f['dest_ip'])):
+                        add(sources, f)
+            else:
+                named = by_hostname.get(key, [])
+                ips = set(f['dest_ip'] for f in named)
+                selected = list(named)
+                if key != no_host:  # avoid counting the same no-hostname flow twice
+                    for ip in ips:
+                        selected.extend(no_host_by_ip.get(ip, ()))
+                for f in selected:
+                    if not cls._is_private_for_drilldown(f['dest_ip']):
+                        add(sources, f)
+            if sources:
+                internet[key] = sources
+
+        return {'internet': internet, 'aws_service': aws_service, 'internal': internal}
+
     def aggregate_by_service(self, enriched_flows: List[Dict]) -> Dict[str, Dict[str, int]]:
         """Aggregate AWS service traffic by service and region for Tab 2
         
@@ -1375,7 +2203,7 @@ class TrafficAnalyzer:
                 # Source: https://docs.aws.amazon.com/vpc/latest/privatelink/aws-services-cross-region-privatelink-support.html
                 CROSS_REGION_SUPPORTED_SERVICES = {
                     'S3', 'LAMBDA', 'ECS', 'KINESIS_FIREHOSE', 
-                    'IAM', 'ECR', 'KMS', 'KINESISANALYTICS', 'ROUTE53'
+                    'IAM', 'ECR', 'ECR_API', 'ECR_DKR', 'KMS', 'KINESISANALYTICS', 'ROUTE53'
                 }
 
                 # Each branch sets:
@@ -1384,7 +2212,14 @@ class TrafficAnalyzer:
                 #   monthly_savings     - PROJECTED monthly savings (monthly vs monthly)
                 #   recommendation      - DEPLOY / CONSIDER / SKIP...
                 # NOTE: ALL interface endpoints use firewall region pricing.
-                if service in ['S3', 'DYNAMODB']:
+                if service in self.NO_VPC_ENDPOINT_SERVICES:
+                    # e.g. CloudFront: AWS-owned, but no VPC endpoint can serve it,
+                    # so there is nothing to deploy and no saving to project.
+                    endpoint_type = 'N/A (no VPC endpoint)'
+                    endpoint_cost = current_cost
+                    monthly_savings = 0.0
+                    recommendation = 'SKIP - No VPC endpoint available'
+                elif service in ['S3', 'DYNAMODB']:
                     if is_same_region:
                         # Gateway endpoint (FREE) - always worth deploying.
                         endpoint_type = 'Gateway'
@@ -1473,6 +2308,51 @@ class TrafficAnalyzer:
 
         return recommendations
     
+    def _step_fraction(self, step_key: str, update: Dict) -> float:
+        """How far through its own step a progress update is (0.0 to 1.0)."""
+        if update.get('chunk_total'):
+            return min(1.0, max(0.0, update.get('chunk_current', 0) / float(update['chunk_total'])))
+        if 'percent' in update:
+            pct = min(100.0, max(0.0, float(update['percent'])))
+            if step_key == 'correlate':
+                # Correlation reports two passes that each run 0-100%: grouping
+                # flow legs, then identifying AWS services. Each is half the step.
+                if update.get('stage') == 'Identifying AWS services':
+                    return 0.5 + pct / 200.0
+                return pct / 200.0
+            return pct / 100.0
+        return 0.0
+
+    def _step_callback(self, progress_callback: Optional[Callable],
+                       step_key: str) -> Optional[Callable]:
+        """Wrap progress_callback so each update also carries overall progress.
+
+        Adds: step (1-based), step_total, step_name, overall_percent (0-100, never
+        decreasing across the run) and throttle_retries. The original keys are
+        passed through unchanged. Returns None when there is no callback.
+        """
+        if progress_callback is None:
+            return None
+        keys = [s[0] for s in self.ANALYSIS_STEPS]
+        index = keys.index(step_key)
+        name = self.ANALYSIS_STEPS[index][1]
+        weight = self.ANALYSIS_STEPS[index][2]
+        base = sum(s[2] for s in self.ANALYSIS_STEPS[:index])
+        total_weight = sum(s[2] for s in self.ANALYSIS_STEPS)
+
+        def callback(update: Dict):
+            enriched = dict(update)
+            overall = (base + weight * self._step_fraction(step_key, update)) / total_weight * 100.0
+            self._overall_percent = max(self._overall_percent, min(100.0, overall))
+            enriched['step'] = index + 1
+            enriched['step_total'] = len(self.ANALYSIS_STEPS)
+            enriched['step_name'] = name
+            enriched['overall_percent'] = self._overall_percent
+            enriched['throttle_retries'] = self.throttle_retries
+            progress_callback(enriched)
+
+        return callback
+
     def analyze(self, progress_callback: Optional[Callable] = None) -> Dict[str, Any]:
         """Main analysis method
         
@@ -1481,7 +2361,8 @@ class TrafficAnalyzer:
             
         Returns:
             Dict containing analysis results:
-            - top_talkers: List of enriched flows
+            - source_breakdowns: Per-source-IP totals behind each drill-down row
+              (see build_source_breakdowns)
             - hostname_aggregation: Dict of internet traffic by hostname
             - service_totals: Dict of AWS service traffic by service/region
             - vpc_to_vpc_connections: List of VPC-to-VPC connections
@@ -1489,18 +2370,28 @@ class TrafficAnalyzer:
             - metadata: Analysis metadata (timestamp, region, days, etc.)
         """
         try:
+            # Each step reports through its own wrapper, which adds the overall
+            # step number and an overall percentage (see _step_callback) so the
+            # progress dialog can show where the whole run is.
+            self._overall_percent = 0.0
+            totals_cb = self._step_callback(progress_callback, 'totals')
+            flows_cb = self._step_callback(progress_callback, 'flows')
+            alerts_cb = self._step_callback(progress_callback, 'alerts')
+            correlate_cb = self._step_callback(progress_callback, 'correlate')
+            aggregate_cb = self._step_callback(progress_callback, 'aggregate')
+
             # Step 1: Query AUTHORITATIVE traffic totals via server-side aggregation.
             # This runs FIRST because it is the source of truth for total/per-AZ
             # bytes (not subject to the 10K-row limit) AND it returns the total
             # netflow record count, which we use to size the raw per-flow query's
             # chunking correctly in a single pass.
-            if progress_callback:
-                progress_callback({
+            if totals_cb:
+                totals_cb({
                     'stage': 'Querying traffic totals',
                     'status': 'Starting...'
                 })
             
-            totals_result = self.query_flow_totals(progress_callback)
+            totals_result = self.query_flow_totals(totals_cb)
             
             if self.cancel_requested or totals_result == (None, None, None, None):
                 return None
@@ -1513,14 +2404,14 @@ class TrafficAnalyzer:
             # by flow leg, so the breakdowns are byte-accurate at any volume. Seeded
             # with the record count to size chunking (groups are fewer than records,
             # so this is a conservative bound).
-            if progress_callback:
-                progress_callback({
+            if flows_cb:
+                flows_cb({
                     'stage': 'Querying flow breakdown',
                     'status': 'Starting...'
                 })
             
             flow_result = self.query_flow_grouped(expected_records=total_records,
-                                                  progress_callback=progress_callback)
+                                                  progress_callback=flows_cb)
             
             if self.cancel_requested or flow_result == (None, None, None):
                 return None
@@ -1531,13 +2422,13 @@ class TrafficAnalyzer:
             grouped_rows, flow_bytes_scanned, flow_truncated = flow_result
             
             # Step 3: Query alert logs
-            if progress_callback:
-                progress_callback({
+            if alerts_cb:
+                alerts_cb({
                     'stage': 'Querying alert logs',
                     'status': 'Starting...'
                 })
             
-            alert_result = self.query_alert_logs(progress_callback)
+            alert_result = self.query_alert_logs(alerts_cb)
             
             if self.cancel_requested or alert_result == (None, None, None, None):
                 return None
@@ -1546,13 +2437,13 @@ class TrafficAnalyzer:
             alert_logs, earliest_alert_ts, latest_alert_ts, alert_bytes_scanned = alert_result
             
             # Step 4: Correlate logs
-            if progress_callback:
-                progress_callback({
+            if correlate_cb:
+                correlate_cb({
                     'stage': 'Correlating logs',
                     'status': 'Starting correlation...'
                 })
             
-            result_tuple = self.correlate_logs(grouped_rows, alert_logs, progress_callback)
+            result_tuple = self.correlate_logs(grouped_rows, alert_logs, correlate_cb)
             
             if self.cancel_requested or result_tuple == (None, None, None, None, None):
                 return None
@@ -1581,31 +2472,49 @@ class TrafficAnalyzer:
                     latest_timestamp = latest_alert_ts
             
             # Step 5: Aggregate by hostname (Tab 1)
-            if progress_callback:
-                progress_callback({
+            if aggregate_cb:
+                aggregate_cb({
                     'stage': 'Aggregating traffic',
-                    'status': 'Analyzing internet traffic...'
+                    'status': 'Analyzing internet traffic...',
+                    'percent': 0
                 })
             
             hostname_aggregation = self.aggregate_by_hostname(enriched_flows)
             
             # Step 6: Aggregate by service (Tab 2)
-            if progress_callback:
-                progress_callback({
+            if aggregate_cb:
+                aggregate_cb({
                     'stage': 'Aggregating traffic',
-                    'status': 'Analyzing AWS service traffic...'
+                    'status': 'Analyzing AWS service traffic...',
+                    'percent': 40
                 })
             
             service_totals = self.aggregate_by_service(enriched_flows)
             
             # Step 7: Aggregate VPC-to-VPC (Tab 3)
-            if progress_callback:
-                progress_callback({
+            if aggregate_cb:
+                aggregate_cb({
                     'stage': 'Aggregating traffic',
-                    'status': 'Analyzing VPC-to-VPC traffic...'
+                    'status': 'Analyzing VPC-to-VPC traffic...',
+                    'percent': 70
                 })
             
             vpc_to_vpc_connections = self.aggregate_vpc_to_vpc(enriched_flows)
+            
+            # Per-source-IP tables behind each drill-down row (all three tabs).
+            # These replace keeping/saving every individual flow.
+            if aggregate_cb:
+                aggregate_cb({
+                    'stage': 'Aggregating traffic',
+                    'status': 'Building source IP breakdowns...',
+                    'percent': 80
+                })
+            
+            source_breakdowns = self.build_source_breakdowns(
+                enriched_flows,
+                hostname_aggregation.keys(),
+                [(c['dest_ip'], c['dest_port']) for c in vpc_to_vpc_connections]
+            )
             
             # Window length in hours - the single scope basis for both the fixed
             # (endpoint) cost and the window->month projection used by the
@@ -1617,10 +2526,11 @@ class TrafficAnalyzer:
                 window_hours = self.days * 24  # defensive fallback
             
             # Step 8: Calculate VPC endpoint recommendations
-            if progress_callback:
-                progress_callback({
+            if aggregate_cb:
+                aggregate_cb({
                     'stage': 'Calculating recommendations',
-                    'status': 'Analyzing VPC endpoint opportunities...'
+                    'status': 'Analyzing VPC endpoint opportunities...',
+                    'percent': 90
                 })
             
             vpc_endpoint_recommendations = self.calculate_vpc_endpoint_recommendations(
@@ -1662,13 +2572,14 @@ class TrafficAnalyzer:
             bytes_with_hostname = sum(f['bytes'] for f in enriched_flows if f['hostname'] != "(No hostname)")
             bytes_coverage_pct = (bytes_with_hostname / total_bytes * 100) if total_bytes > 0 else 0
             
-            # Calculate CloudWatch Logs Insights query cost
-            # Pricing: $0.005 per GB scanned (consistent across all regions).
-            # Includes the grouped per-flow aggregation query, the authoritative
-            # totals aggregation query, and the alert query.
+            # Calculate CloudWatch Logs Insights query cost at the region's rate
+            # (the log groups are queried in the firewall's region; see
+            # CLOUDWATCH_LOGS_INSIGHTS_PRICING). Includes the grouped per-flow
+            # aggregation, the authoritative totals, the alert queries and the
+            # chunk-planning (density) queries.
             total_bytes_scanned = flow_bytes_scanned + totals_bytes_scanned + alert_bytes_scanned
             cloudwatch_gb_scanned = total_bytes_scanned / (1024**3)
-            cloudwatch_query_cost = cloudwatch_gb_scanned * 0.005
+            cloudwatch_query_cost = cloudwatch_gb_scanned * self.cloudwatch_price_per_gb
             
             # Calculate firewall endpoint costs.
             #
@@ -1757,7 +2668,7 @@ class TrafficAnalyzer:
             
             # Return comprehensive results
             return {
-                'top_talkers': enriched_flows,
+                'source_breakdowns': source_breakdowns,
                 'hostname_aggregation': hostname_aggregation,
                 'service_totals': service_totals,
                 'vpc_to_vpc_connections': vpc_to_vpc_connections,
@@ -1801,6 +2712,7 @@ class TrafficAnalyzer:
                     'use_custom_dates': self.use_custom_dates,
                     'cloudwatch_gb_scanned': round(cloudwatch_gb_scanned, 3),
                     'cloudwatch_query_cost': round(cloudwatch_query_cost, 2),
+                    'cloudwatch_price_per_gb': self.cloudwatch_price_per_gb,
                     # --- Data completeness / accuracy diagnostics ---
                     # total_bytes/total_gb/total_cost above are authoritative
                     # (server-side aggregation). The fields below expose whether the
@@ -1827,6 +2739,59 @@ class TrafficAnalyzer:
             # Re-raise with context
             raise Exception(f"Analysis failed: {str(e)}")
     
+    # Version of the 'traffic_analysis' section written by save_results. Files
+    # without the field are the original format (per-flow 'top_talkers').
+    TRAFFIC_FORMAT_VERSION = 2
+
+    # Above this size, save_results reads only the part of the existing file it
+    # keeps (everything before the traffic section) instead of parsing it all.
+    _PARTIAL_READ_MIN_BYTES = 50 * 1024 * 1024
+
+    @staticmethod
+    def _read_existing_stats_for_save(stats_file_path: str) -> Dict[str, Any]:
+        """Read the parts of an existing .stats file that a save must preserve.
+
+        save_results keeps only the rule-usage data (and the version markers) from
+        the existing file; the traffic section is replaced. Older files can be
+        several GB because their traffic section held every flow, so for large
+        files this parses only the text BEFORE the top-level traffic section.
+
+        The cut point is found by a line that is exactly two spaces of indent
+        followed by the "traffic_analysis" key. With the indent=2 layout that
+        save_results writes, only top-level keys sit at that indent (a string
+        value cannot contain a raw newline), so the match is unambiguous. If
+        anything about the partial read fails, the whole file is parsed instead.
+        Returns {} if the file cannot be read at all (save then starts fresh).
+        """
+        try:
+            if os.path.getsize(stats_file_path) >= TrafficAnalyzer._PARTIAL_READ_MIN_BYTES:
+                marker = b'\n  "traffic_analysis": '
+                head = b''
+                with open(stats_file_path, 'rb') as f:
+                    while True:
+                        chunk = f.read(4 * 1024 * 1024)
+                        if not chunk:
+                            break
+                        # Re-scan a small overlap so a marker split across reads is found.
+                        scan_from = max(0, len(head) - len(marker))
+                        head += chunk
+                        cut = head.find(marker, scan_from)
+                        if cut < 0 and len(head) > 256 * 1024 * 1024:
+                            break  # no traffic section near the start; read it all
+                        if cut >= 0:
+                            text = head[:cut].decode('utf-8').rstrip().rstrip(',') + '\n}'
+                            data = json.loads(text)
+                            if isinstance(data, dict):
+                                return data
+                            break
+        except Exception:
+            pass  # fall back to a full read
+        try:
+            with open(stats_file_path, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        except Exception:
+            return {}  # If file is corrupt, start fresh
+
     @staticmethod
     def save_results(results: Dict[str, Any], stats_file_path: str):
         """Save traffic analysis results to .stats file
@@ -1841,11 +2806,7 @@ class TrafficAnalyzer:
         # Load existing stats file if it exists (may contain rule usage data)
         existing_data = {}
         if os.path.exists(stats_file_path):
-            try:
-                with open(stats_file_path, 'r', encoding='utf-8') as f:
-                    existing_data = json.load(f)
-            except:
-                pass  # If file is corrupt, start fresh
+            existing_data = TrafficAnalyzer._read_existing_stats_for_save(stats_file_path)
         
         # Upgrade v1.0 format to v2.0 if needed
         if existing_data.get('version') == '1.0':
@@ -1865,15 +2826,10 @@ class TrafficAnalyzer:
         earliest_ts_str = metadata['earliest_timestamp'].isoformat() if metadata.get('earliest_timestamp') else None
         latest_ts_str = metadata['latest_timestamp'].isoformat() if metadata.get('latest_timestamp') else None
         
-        # Convert timestamps in top_talkers to ISO strings
-        top_talkers_serializable = []
-        for flow in results['top_talkers']:
-            flow_copy = flow.copy()
-            if flow_copy.get('timestamp'):
-                flow_copy['timestamp'] = flow_copy['timestamp'].isoformat()
-            top_talkers_serializable.append(flow_copy)
-        
         traffic_data = {
+            # Format of this section. 2 = per-source drill-down tables
+            # ('source_breakdowns') instead of every individual flow ('top_talkers').
+            'traffic_format_version': TrafficAnalyzer.TRAFFIC_FORMAT_VERSION,
             'timestamp': timestamp_str,
             'log_group': metadata['log_group'],
             'alert_log_group': metadata['alert_log_group'],
@@ -1891,6 +2847,8 @@ class TrafficAnalyzer:
                 'total_cost': metadata['total_cost'],
                 'hostname_coverage_pct': metadata['hostname_coverage_pct'],
                 'cloudwatch_query_cost': metadata['cloudwatch_query_cost'],
+                'cloudwatch_gb_scanned': metadata.get('cloudwatch_gb_scanned', 0),
+                'cloudwatch_price_per_gb': metadata.get('cloudwatch_price_per_gb', 0.005),
                 'num_endpoints': metadata['num_endpoints'],
                 'runtime_hours': metadata['runtime_hours'],
                 'runtime_basis': metadata.get('runtime_basis', 'window'),
@@ -1916,9 +2874,10 @@ class TrafficAnalyzer:
             'vpc_to_vpc_connections': results['vpc_to_vpc_connections'],
             'vpc_endpoint_recommendations': results['vpc_endpoint_recommendations'],
             
-            # Save top_talkers for drill-down functionality (with timestamps converted)
-            # Note: This increases file size but enables full UI features
-            'top_talkers': top_talkers_serializable
+            # Per-source-IP tables for the drill-down dialogs (all three tabs).
+            # Replaces the old per-flow 'top_talkers' list, which made large
+            # analyses multi-GB files.
+            'source_breakdowns': results['source_breakdowns']
         }
         
         # Build unified v2.0 structure
@@ -1967,20 +2926,22 @@ class TrafficAnalyzer:
             earliest_ts = datetime.fromisoformat(metadata['earliest_timestamp']) if metadata.get('earliest_timestamp') else None
             latest_ts = datetime.fromisoformat(metadata['latest_timestamp']) if metadata.get('latest_timestamp') else None
             
-            # Parse timestamps back to datetime objects in top_talkers
-            top_talkers_with_ts = []
-            for flow in traffic_data.get('top_talkers', []):
-                flow_copy = flow.copy()
-                if flow_copy.get('timestamp'):
-                    try:
-                        flow_copy['timestamp'] = datetime.fromisoformat(flow_copy['timestamp'])
-                    except:
-                        flow_copy['timestamp'] = None
-                top_talkers_with_ts.append(flow_copy)
+            # Drill-down tables. Current files store them directly; older files
+            # stored every flow ('top_talkers'), so build the same tables from
+            # those flows (the flows themselves are not kept). The next save then
+            # writes the current format.
+            source_breakdowns = traffic_data.get('source_breakdowns')
+            if source_breakdowns is None:
+                source_breakdowns = TrafficAnalyzer.build_source_breakdowns(
+                    traffic_data.get('top_talkers', []),
+                    traffic_data['hostname_aggregation'].keys(),
+                    [(c['dest_ip'], c['dest_port'])
+                     for c in traffic_data['vpc_to_vpc_connections']]
+                )
             
             # Reconstruct results dictionary compatible with UI
             results = {
-                'top_talkers': top_talkers_with_ts,
+                'source_breakdowns': source_breakdowns,
                 'hostname_aggregation': traffic_data['hostname_aggregation'],
                 'service_totals': traffic_data['service_totals'],
                 'vpc_to_vpc_connections': traffic_data['vpc_to_vpc_connections'],
@@ -2017,7 +2978,10 @@ class TrafficAnalyzer:
                     'flows_with_hostname': 0,  # Not saved
                     'bytes_with_hostname': 0,  # Not saved
                     'bytes_coverage_pct': 0,  # Not saved
-                    'cloudwatch_gb_scanned': 0,  # Can't recalculate from saved data
+                    # Saved since the per-region query rate was added; older files
+                    # have neither (their cost was computed at $0.005/GB).
+                    'cloudwatch_gb_scanned': metadata.get('cloudwatch_gb_scanned', 0),
+                    'cloudwatch_price_per_gb': metadata.get('cloudwatch_price_per_gb', 0.005),
                     # Data completeness diagnostics (defaulted for older cache files
                     # written before these fields existed).
                     'flow_bytes_truncated': metadata.get('flow_bytes_truncated', False),

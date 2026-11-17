@@ -10,6 +10,9 @@ Author: Suricata Generator Team
 Created: 2026-01-25
 """
 
+import os
+import queue
+import threading
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
 from datetime import datetime, timedelta
@@ -452,7 +455,8 @@ class TrafficAnalyzerUI:
         warning_frame.pack(fill=tk.X, pady=(0, 15))
         
         warning_text = (
-            "CloudWatch Logs Insights charges $0.005 per GB scanned.\n\n"
+            "CloudWatch Logs Insights charges per GB scanned: $0.005/GB in\n"
+            "many regions (including us-east-1/us-east-2), up to $0.009/GB in others.\n\n"
             "Estimated Cost:\n"
             "• 7 days: ~$0.15 - $0.50 per analysis\n"
             "• 30 days: ~$0.50 - $2.00 per analysis\n\n"
@@ -554,7 +558,7 @@ class TrafficAnalyzerUI:
         # Create progress dialog
         progress_dialog = tk.Toplevel(self.parent.root)
         progress_dialog.title("Analyzing Network Traffic...")
-        progress_dialog.geometry("500x260")
+        progress_dialog.geometry("560x280")
         progress_dialog.transient(self.parent.root)
         progress_dialog.grab_set()
         progress_dialog.resizable(False, False)
@@ -574,7 +578,7 @@ class TrafficAnalyzerUI:
         status_label.pack(pady=(0, 10))
         
         # Progress bar
-        progress_bar = ttk.Progressbar(main_frame, mode='indeterminate', length=450)
+        progress_bar = ttk.Progressbar(main_frame, mode='indeterminate', length=510)
         progress_bar.pack(pady=10)
         progress_bar.start(10)
         
@@ -586,7 +590,7 @@ class TrafficAnalyzerUI:
         progress_line_label.pack(pady=(0, 3))
         
         # Details label
-        details_label = ttk.Label(main_frame, text="Starting analysis...")
+        details_label = ttk.Label(main_frame, text="Starting analysis...", wraplength=510)
         details_label.pack(pady=5)
         
         # Elapsed time label
@@ -604,64 +608,134 @@ class TrafficAnalyzerUI:
             progress_dialog.destroy()
         
         ttk.Button(main_frame, text="Cancel", command=on_cancel).pack(pady=(10, 0))
+        # Closing the dialog with the window's X behaves like Cancel (the analysis
+        # runs in the background, so it must be told to stop).
+        progress_dialog.protocol("WM_DELETE_WINDOW", on_cancel)
         
         # Track start time
         start_time = datetime.now()
+        throttle_retries = [0]
         
         # Update elapsed time
         def update_elapsed():
             if not cancel_flag[0]:
-                elapsed = int((datetime.now() - start_time).total_seconds())
-                elapsed_label.config(text=f"Elapsed time: {elapsed}s")
-                progress_dialog.after(1000, update_elapsed)
+                try:
+                    elapsed = int((datetime.now() - start_time).total_seconds())
+                    text = f"Elapsed time: {elapsed}s"
+                    if throttle_retries[0]:
+                        text += f"   |   Throttled requests retried: {throttle_retries[0]:,}"
+                    elapsed_label.config(text=text)
+                    progress_dialog.after(1000, update_elapsed)
+                except tk.TclError:
+                    pass  # dialog already closed
         
         update_elapsed()
         
-        # Progress callback
-        def progress_callback(update: Dict):
-            if not cancel_flag[0]:
-                try:
-                    stage = update.get('stage', 'Processing')
-                    status = update.get('status', '')
-                    
-                    status_label.config(text=f"{stage}...")
-                    details_label.config(text=status)
-                    
-                    chunk_total = update.get('chunk_total')
-                    chunk_current = update.get('chunk_current')
-                    
-                    if chunk_total:
-                        # Flow-log chunk phase: drive a DETERMINATE bar from the
-                        # fraction of chunks issued, and keep a persistent summary
-                        # line that survives the per-poll detail updates.
-                        pct = (chunk_current / chunk_total * 100.0) if chunk_total else 0.0
-                        try:
-                            progress_bar.stop()  # halt the indeterminate marquee
-                        except Exception:
-                            pass
-                        progress_bar.config(mode='determinate', maximum=100)
-                        progress_bar['value'] = pct
-                        progress_line_label.config(
-                            text=f"Flow logs: chunk {chunk_current} of {chunk_total} ({pct:.0f}%)"
-                        )
-                    elif 'percent' in update:
-                        try:
-                            progress_bar.stop()
-                        except Exception:
-                            pass
-                        progress_bar.config(mode='determinate', maximum=100)
-                        progress_bar['value'] = update['percent']
-                    # For phases without a known count (totals, alerts, correlation),
-                    # leave the bar as-is: it bounces (indeterminate) before the flow
-                    # phase and holds at 100% for the brief tail phases after it, so
-                    # progress never visibly regresses.
-                    
-                    progress_dialog.update()
-                except:
-                    pass
+        # The analysis runs on a background thread so the application stays
+        # responsive. The worker never touches tkinter: it posts progress updates
+        # and its final outcome to this queue, and the UI thread drains the queue
+        # on a timer (poll_events) and renders them.
+        events = queue.Queue()
+        bar_state = {'determinate': False, 'value': 0.0}
         
-        # Run analysis
-        def run_analysis():
+        def render(update: Dict):
+            stage = update.get('stage', 'Processing')
+            status = update.get('status', '')
+            step = update.get('step')
+            step_total = update.get('step_total')
+            
+            if step and step_total:
+                status_label.config(
+                    text=f"Step {step} of {step_total}: {update.get('step_name') or stage}"
+                )
+            else:
+                status_label.config(text=f"{stage}...")
+            details_label.config(text=status)
+            
+            if 'throttle_retries' in update:
+                throttle_retries[0] = update['throttle_retries']
+            
+            # One determinate bar for the WHOLE run, driven by overall_percent.
+            # It never moves backwards, so it does not fill up and restart for
+            # each step.
+            overall = update.get('overall_percent')
+            if overall is not None:
+                if not bar_state['determinate']:
+                    try:
+                        progress_bar.stop()  # halt the indeterminate marquee
+                    except Exception:
+                        pass
+                    progress_bar.config(mode='determinate', maximum=100)
+                    bar_state['determinate'] = True
+                bar_state['value'] = max(bar_state['value'], overall)
+                progress_bar['value'] = bar_state['value']
+            
+            # Persistent progress line: overall percentage plus, during a chunked
+            # query step (flow breakdown, alert hostnames), the chunk count. Not
+            # overwritten by per-poll details; cleared when the step changes.
+            chunk_total = update.get('chunk_total')
+            if chunk_total:
+                chunk_current = update.get('chunk_current', 0)
+                pct = (chunk_current / chunk_total * 100.0) if chunk_total else 0.0
+                label = update.get('chunk_label', 'Flow logs')
+                bar_state['chunk_text'] = (
+                    f"{label}: chunk {chunk_current:,} of {chunk_total:,} ({pct:.0f}%)"
+                )
+                bar_state['chunk_step'] = step
+            elif step and step != bar_state.get('chunk_step'):
+                bar_state.pop('chunk_text', None)
+            parts = []
+            if bar_state['determinate']:
+                parts.append(f"Overall: {bar_state['value']:.0f}%")
+            if bar_state.get('chunk_text'):
+                parts.append(bar_state['chunk_text'])
+            progress_line_label.config(text="   |   ".join(parts))
+        
+        def finish():
+            try:
+                progress_dialog.destroy()
+            except tk.TclError:
+                pass
+        
+        def poll_events():
+            if cancel_flag[0]:
+                return  # dialog closed; the worker stops on its own
+            outcome = None
+            try:
+                for _ in range(500):  # bounded per tick so the UI stays responsive
+                    kind, payload = events.get_nowait()
+                    if kind == 'progress':
+                        try:
+                            render(payload)
+                        except tk.TclError:
+                            return  # dialog closed
+                        except Exception:
+                            pass  # a bad progress update must not stop the run
+                    else:
+                        outcome = (kind, payload)
+                        break
+            except queue.Empty:
+                pass
+            
+            if outcome is None:
+                try:
+                    progress_dialog.after(150, poll_events)
+                except tk.TclError:
+                    pass
+                return
+            
+            kind, payload = outcome
+            finish()
+            if kind == 'error':
+                self._handle_analysis_error(payload)
+                return
+            if cancel_flag[0] or payload is None:
+                return
+            # Store results and show them
+            self.last_analysis_results = payload
+            self._show_results_window(payload)
+        
+        def worker():
             try:
                 # Create analyzer with either days or custom dates
                 if start_date and end_date:
@@ -672,29 +746,16 @@ class TrafficAnalyzerUI:
                     analyzer = TrafficAnalyzer(log_group, region, days, alert_log_group,
                                              aws_session=self.parent.aws_session)
                 analyzer_ref[0] = analyzer
+                if cancel_flag[0]:
+                    analyzer.cancel_analysis()  # cancelled while starting up
                 
-                # Run analysis
-                results = analyzer.analyze(progress_callback)
-                
-                if cancel_flag[0] or results is None:
-                    progress_dialog.destroy()
-                    return
-                
-                # Store results
-                self.last_analysis_results = results
-                
-                # Close progress dialog
-                progress_dialog.destroy()
-                
-                # Show results window
-                self._show_results_window(results)
-                
+                results = analyzer.analyze(lambda update: events.put(('progress', update)))
+                events.put(('done', results))
             except Exception as e:
-                progress_dialog.destroy()
-                self._handle_analysis_error(e)
+                events.put(('error', e))
         
-        # Schedule analysis to run after dialog is visible
-        progress_dialog.after(100, run_analysis)
+        threading.Thread(target=worker, name='traffic-analysis', daemon=True).start()
+        progress_dialog.after(150, poll_events)
     
     def _sort_tree_column(self, tree: ttk.Treeview, column: str, reverse: bool):
         """Sort tree view by column
@@ -789,23 +850,32 @@ class TrafficAnalyzerUI:
                  text=f"Analysis completed {time_ago}",
                  font=("TkDefaultFont", 10)).pack(side=tk.LEFT)
         
-        # Metadata with hostname coverage
-        hostname_cov = metadata.get('hostname_coverage_pct', 0)
+        # Hostname coverage of the Internet tab: share of Internet traffic (bytes)
+        # shown under a hostname, computed from the tab's own rows so it matches
+        # what the tab displays. Hostnames only apply to Internet traffic; AWS
+        # service and internal traffic are excluded. None = no Internet traffic.
+        hostname_cov = TrafficAnalyzer.internet_hostname_coverage(
+            results.get('hostname_aggregation', {}))
+        if hostname_cov is None:
+            coverage_text = "Hostname Coverage: n/a (no Internet traffic)"
+        else:
+            coverage_text = f"Hostname Coverage: {hostname_cov:.0f}% of Internet traffic"
         
         # Check if custom date range was used
         if metadata.get('use_custom_dates'):
             meta_text = (f"Time Range: {metadata['start_date']} to {metadata['end_date']} | "
                         f"Flows: {metadata['total_flows']:,} | "
                         f"Region: {metadata['region']} | "
-                        f"Hostname Coverage: {hostname_cov:.0f}%")
+                        f"{coverage_text}")
         else:
             meta_text = (f"Time Range: Last {metadata['time_range_days']} days | "
                         f"Flows: {metadata['total_flows']:,} | "
                         f"Region: {metadata['region']} | "
-                        f"Hostname Coverage: {hostname_cov:.0f}%")
+                        f"{coverage_text}")
         
         # Color code based on coverage
-        meta_color = "#2E7D32" if hostname_cov >= 70 else "#FF6F00" if hostname_cov >= 40 else "#D32F2F"
+        cov_for_color = 100.0 if hostname_cov is None else hostname_cov
+        meta_color = "#2E7D32" if cov_for_color >= 70 else "#FF6F00" if cov_for_color >= 40 else "#D32F2F"
         ttk.Label(header_frame, text=meta_text,
                  font=("TkDefaultFont", 9), foreground=meta_color).pack(side=tk.LEFT, padx=(20, 0))
         
@@ -816,7 +886,9 @@ class TrafficAnalyzerUI:
         # Show CloudWatch query cost
         cloudwatch_cost = metadata.get('cloudwatch_query_cost', 0)
         cloudwatch_gb = metadata.get('cloudwatch_gb_scanned', 0)
-        cost_text = f"💵 CloudWatch Query Cost: ${cloudwatch_cost:.2f} ({cloudwatch_gb:.2f} GB scanned at $0.005/GB)"
+        cloudwatch_rate = metadata.get('cloudwatch_price_per_gb', 0.005)
+        cost_text = (f"💵 CloudWatch Query Cost: ${cloudwatch_cost:.2f} "
+                     f"({cloudwatch_gb:.2f} GB scanned at ${cloudwatch_rate:g}/GB)")
         ttk.Label(info_frame, text=cost_text,
                  font=("TkDefaultFont", 8), foreground="#0066CC").pack(anchor=tk.W, pady=(0, 5))
         
@@ -867,8 +939,8 @@ class TrafficAnalyzerUI:
         # Show warning if low hostname coverage. Suppressed during a coverage gap:
         # a gap naturally tanks hostname coverage, and the gap warning already
         # explains the incompleteness, so showing both is redundant noise.
-        if hostname_cov < 50 and not coverage_gap:
-            warning_text = (f"⚠️ Warning: Only {hostname_cov:.0f}% of flows have hostname information. "
+        if hostname_cov is not None and hostname_cov < 50 and not coverage_gap:
+            warning_text = (f"⚠️ Warning: Only {hostname_cov:.0f}% of Internet traffic has hostname information. "
                           f"This typically means alert logging is not enabled for all traffic. "
                           f"Consider enabling HTTP/TLS alert logging for better visibility.")
             ttk.Label(info_frame, text=warning_text,
@@ -1413,73 +1485,17 @@ class TrafficAnalyzerUI:
         if not self.current_results:
             return
         
-        # Check if destination is in IP:port format
-        is_ip_port = ':' in destination and not destination.startswith('http')
+        sources = self.current_results.get('source_breakdowns', {}) \
+            .get('internet', {}).get(destination)
         
-        if is_ip_port:
-            # Parse IP:port format
-            try:
-                dest_ip, dest_port = destination.rsplit(':', 1)
-                dest_port = dest_port.strip()
-            except:
-                messagebox.showerror("Error", f"Invalid IP:port format: {destination}")
-                return
-            
-            # Filter flows for this specific dest IP and port
-            flows = []
-            for f in self.current_results['top_talkers']:
-                if (f['dest_ip'] == dest_ip and 
-                    str(f['dest_port']) == dest_port and 
-                    f['hostname'] == "(No hostname)" and 
-                    not f['is_aws']):
-                    # Additional check: Exclude VPC-to-VPC (both src and dest are RFC1918)
-                    src_is_private = self._is_private_ip(f['src_ip'])
-                    dest_is_private = self._is_private_ip(f['dest_ip'])
-                    
-                    # Only include if destination is NOT private (internet traffic)
-                    if not dest_is_private:
-                        flows.append(f)
-        else:
-            # Filter flows for this hostname (internet traffic only)
-            hostname = destination
-            
-            # BUGFIX: First, find the dest_ip(s) associated with this hostname
-            # Some flows may have hostname, others may have "(No hostname)" but same dest_ip
-            dest_ips_for_hostname = set()
-            for f in self.current_results['top_talkers']:
-                if f['hostname'] == hostname and not f['is_aws']:
-                    dest_ips_for_hostname.add(f['dest_ip'])
-            
-            # Now collect ALL flows that either:
-            # 1. Have this exact hostname, OR
-            # 2. Have "(No hostname)" but dest_ip matches one we found above
-            flows = []
-            for f in self.current_results['top_talkers']:
-                if not f['is_aws']:
-                    # Check if this flow should be included
-                    matches_hostname = (f['hostname'] == hostname)
-                    matches_ip_with_no_hostname = (f['hostname'] == "(No hostname)" and 
-                                                   f['dest_ip'] in dest_ips_for_hostname)
-                    
-                    if matches_hostname or matches_ip_with_no_hostname:
-                        # Additional check: Exclude VPC-to-VPC (both src and dest are RFC1918)
-                        src_is_private = self._is_private_ip(f['src_ip'])
-                        dest_is_private = self._is_private_ip(f['dest_ip'])
-                        
-                        # Only include if destination is NOT private (internet traffic)
-                        # VPC-to-VPC traffic (both private) should only appear on Tab 3
-                        if not dest_is_private:
-                            flows.append(f)
-        
-        if not flows:
+        if not sources:
             messagebox.showinfo("No Data", f"No flow data found for {destination}")
             return
         
-        # All destinations now use the same expandable source IP dialog
-        self._show_source_breakdown_dialog_expandable(destination, flows)
+        self._show_source_breakdown_dialog(destination, sources)
     
     def _show_drilldown_tab2(self, service: str, region: str):
-        """Show source IP breakdown with expandable rows for AWS service traffic
+        """Show source IP breakdown for AWS service traffic
         
         Args:
             service: AWS service name
@@ -1488,19 +1504,17 @@ class TrafficAnalyzerUI:
         if not self.current_results:
             return
         
-        # Filter flows for this service+region
-        flows = [f for f in self.current_results['top_talkers']
-                if f['aws_service'] == service and f['aws_region'] == region]
+        sources = self.current_results.get('source_breakdowns', {}) \
+            .get('aws_service', {}).get(str(service), {}).get(str(region))
         
-        if not flows:
+        if not sources:
             messagebox.showinfo("No Data", f"No flow data found for {service} in {region}")
             return
         
-        # Show expandable source IP breakdown dialog
-        self._show_aws_service_breakdown_expandable(f"{service} ({region})", flows)
+        self._show_source_breakdown_dialog(f"{service} ({region})", sources)
     
     def _show_drilldown_tab3(self, dest_ip: str, dest_port: str):
-        """Show source IP breakdown with expandable rows for VPC-to-VPC traffic
+        """Show source IP breakdown for VPC-to-VPC traffic
         
         Args:
             dest_ip: Destination IP address
@@ -1509,23 +1523,21 @@ class TrafficAnalyzerUI:
         if not self.current_results:
             return
         
-        # Find matching flows for this dest_ip and dest_port (all source IPs)
-        flows = [f for f in self.current_results['top_talkers']
-                if f['dest_ip'] == dest_ip and str(f['dest_port']) == str(dest_port)]
+        sources = self.current_results.get('source_breakdowns', {}) \
+            .get('internal', {}).get(str(dest_ip), {}).get(str(dest_port))
         
-        if not flows:
+        if not sources:
             messagebox.showinfo("No Data", f"No flow data found for {dest_ip}:{dest_port}")
             return
         
-        # Show expandable source IP breakdown dialog
-        self._show_source_breakdown_dialog_expandable(f"{dest_ip}:{dest_port}", flows)
+        self._show_source_breakdown_dialog(f"{dest_ip}:{dest_port}", sources)
     
-    def _show_source_breakdown_dialog_expandable(self, title: str, flows: list):
-        """Show source IP breakdown dialog with expandable rows for individual flows
+    def _show_source_breakdown_dialog(self, title: str, sources: Dict[str, Dict]):
+        """Show the per-source-IP breakdown for one destination/service row
         
         Args:
-            title: Dialog title 
-            flows: List of flow dictionaries for this destination
+            title: Dialog title (destination, service+region, or IP:port)
+            sources: {src_ip: {'bytes': int, 'flow_count': int}}
         """
         dialog = tk.Toplevel(self.parent.root)
         dialog.title(f"Source IP Breakdown for: {title}")
@@ -1536,16 +1548,7 @@ class TrafficAnalyzerUI:
         main_frame = ttk.Frame(dialog)
         main_frame.pack(fill=tk.BOTH, expand=True, padx=20, pady=20)
         
-        # Calculate aggregated source totals (group by SOURCE IP, not dest IP!)
-        source_totals = {}
-        for flow in flows:
-            src_ip = flow['src_ip']
-            if src_ip not in source_totals:
-                source_totals[src_ip] = {'bytes': 0, 'flow_count': 0, 'flows': []}
-            source_totals[src_ip]['bytes'] += flow['bytes']
-            source_totals[src_ip]['flow_count'] += 1
-            source_totals[src_ip]['flows'].append(flow)
-        
+        source_totals = sources
         total_bytes = sum(data['bytes'] for data in source_totals.values())
         
         # Header
@@ -1559,19 +1562,9 @@ class TrafficAnalyzerUI:
         table_frame = ttk.Frame(main_frame)
         table_frame.pack(fill=tk.BOTH, expand=True)
         
-        # Treeview with show="tree headings" to enable expand/collapse
         columns = ("Source IP", "Traffic (GB)", "Cost", "Flows", "% of Total")
-        tree = ttk.Treeview(table_frame, columns=columns, show="tree headings", height=15)
+        tree = ttk.Treeview(table_frame, columns=columns, show="headings", height=15)
         
-        # Column headers with sorting
-        tree.heading("#0", text="▶")  # Expand indicator column
-        tree.heading("Source IP", text="Source IP ▼")
-        tree.heading("Traffic (GB)", text="Traffic (GB)")
-        tree.heading("Cost", text="Cost")
-        tree.heading("Flows", text="Flows")
-        tree.heading("% of Total", text="% of Total")
-        
-        tree.column("#0", width=30, stretch=False)
         tree.column("Source IP", width=150, stretch=False)
         tree.column("Traffic (GB)", width=120, stretch=False)
         tree.column("Cost", width=100, stretch=False)
@@ -1588,87 +1581,39 @@ class TrafficAnalyzerUI:
         
         # Store data for sorting
         tree_data = {
-            'source_totals': source_totals,
-            'total_bytes': total_bytes,
             'sort_column': 'Traffic (GB)',
             'sort_reverse': True
         }
         
         def repopulate_tree():
             """Repopulate tree based on current sort settings"""
-            # Clear existing items
             for item in tree.get_children():
                 tree.delete(item)
             
-            # Sort destinations based on current settings
             sort_col = tree_data['sort_column']
             reverse = tree_data['sort_reverse']
             
             if sort_col == "Source IP":
                 sorted_sources = sorted(source_totals.items(), key=lambda x: x[0], reverse=reverse)
-            elif sort_col == "Traffic (GB)":
-                sorted_sources = sorted(source_totals.items(), key=lambda x: x[1]['bytes'], reverse=reverse)
-            elif sort_col == "Cost":
-                sorted_sources = sorted(source_totals.items(), key=lambda x: x[1]['bytes'], reverse=reverse)
             elif sort_col == "Flows":
                 sorted_sources = sorted(source_totals.items(), key=lambda x: x[1]['flow_count'], reverse=reverse)
-            elif sort_col == "% of Total":
+            elif sort_col in ("Traffic (GB)", "Cost", "% of Total"):
                 sorted_sources = sorted(source_totals.items(), key=lambda x: x[1]['bytes'], reverse=reverse)
             else:
                 sorted_sources = sorted(source_totals.items(), key=lambda x: x[1]['bytes'], reverse=True)
             
-            # Populate tree
             for src_ip, data in sorted_sources:
                 traffic_gb = data['bytes'] / (1024**3)
                 cost = traffic_gb * self.firewall_cost_per_gb
                 percent = (data['bytes'] / total_bytes * 100) if total_bytes > 0 else 0
                 
-                # Insert parent row (dest IP)
-                parent_id = tree.insert("", tk.END, text="", values=(
+                tree.insert("", tk.END, values=(
                     src_ip,
                     f"{traffic_gb:.2f}",
                     f"${cost:.2f}",
                     f"{data['flow_count']:,}",
                     f"{percent:.1f}%"
-                ), tags=('parent',))
-                
-                # Sort child flows based on current sort column (same as parent)
-                if sort_col == "Traffic (GB)" or sort_col == "Cost" or sort_col == "% of Total":
-                    # Sort by bytes for traffic-related columns
-                    sorted_flows = sorted(data['flows'], key=lambda f: f['bytes'], reverse=reverse)
-                elif sort_col == "Flows":
-                    # For Flows column, sort by bytes (all flows are count 1)
-                    sorted_flows = sorted(data['flows'], key=lambda f: f['bytes'], reverse=reverse)
-                elif sort_col == "Source IP":
-                    # For Source IP column, sort by timestamp (most recent first when descending)
-                    sorted_flows = sorted(data['flows'], 
-                                         key=lambda f: f.get('timestamp') or datetime.min, 
-                                         reverse=reverse)
-                else:
-                    # Default: sort by bytes descending
-                    sorted_flows = sorted(data['flows'], key=lambda f: f['bytes'], reverse=True)
-                
-                # Insert child rows (individual flows) - initially hidden
-                for flow in sorted_flows:
-                    flow_gb = flow['bytes'] / (1024**3)
-                    flow_cost = flow_gb * self.firewall_cost_per_gb
-                    # Calculate as percentage of GRAND total (not just this source's traffic)
-                    flow_percent = (flow['bytes'] / total_bytes * 100) if total_bytes > 0 else 0
-                    
-                    # Format timestamp and flow ID
-                    if flow.get('timestamp'):
-                        ts_str = flow['timestamp'].strftime('%Y-%m-%d %H:%M:%S')
-                        flow_label = f"  {ts_str} - Flow {flow['flow_id']}"
-                    else:
-                        flow_label = f"  Flow {flow['flow_id']}"
-                    
-                    tree.insert(parent_id, tk.END, text="", values=(
-                        flow_label,
-                        f"{flow_gb:.4f}",
-                        f"${flow_cost:.4f}",
-                        "1",
-                        f"{flow_percent:.1f}%"
-                    ), tags=('child',))
+                ), tags=('source',))
             
             # Update column headers
             for col in columns:
@@ -1680,39 +1625,28 @@ class TrafficAnalyzerUI:
         def on_column_click(column):
             """Handle column header click for sorting"""
             if tree_data['sort_column'] == column:
-                # Toggle sort direction
                 tree_data['sort_reverse'] = not tree_data['sort_reverse']
             else:
                 # New column, default to descending for numeric, ascending for text
                 tree_data['sort_column'] = column
                 tree_data['sort_reverse'] = (column != "Source IP")
-            
             repopulate_tree()
         
-        # Bind column headers to sorting
         for col in columns:
             tree.heading(col, command=lambda c=col: on_column_click(c))
         
-        # Initial population
         repopulate_tree()
         
-        # Configure tag colors
-        tree.tag_configure('parent', font=('TkDefaultFont', 9, 'bold'))
-        tree.tag_configure('child', font=('TkDefaultFont', 9))
+        tree.tag_configure('source', font=('TkDefaultFont', 9, 'bold'))
         
-        # Add right-click context menu for copying flow details
+        # Right-click context menu for copying rows
         def show_copy_menu(event):
-            # Get selected items
             selection = tree.selection()
             if not selection:
                 return
-            
-            # Create context menu
             menu = tk.Menu(tree, tearoff=0)
-            menu.add_command(label="Copy Selected Flows", 
-                           command=lambda: self._copy_selected_flows(tree, selection))
-            
-            # Show menu at mouse position
+            menu.add_command(label="Copy Selected Rows",
+                           command=lambda: self._copy_selected_rows(tree, columns, selection))
             try:
                 menu.tk_popup(event.x_root, event.y_root)
             finally:
@@ -1723,288 +1657,36 @@ class TrafficAnalyzerUI:
         # Helper text
         help_frame = ttk.Frame(main_frame)
         help_frame.pack(fill=tk.X, pady=(10, 0))
-        help_text = "💡 Click column headers to sort | Click ▶ arrow or double-click a source IP row to expand/collapse and see flows | Right-click to copy"
+        help_text = "💡 Click column headers to sort | Right-click to copy"
         ttk.Label(help_frame, text=help_text,
                  font=("TkDefaultFont", 8), foreground="#666666").pack(anchor=tk.W)
         
         # Close button
         ttk.Button(main_frame, text="Close", command=dialog.destroy).pack(pady=(5, 0))
     
-    def _show_aws_service_breakdown_expandable(self, title: str, flows: list):
-        """Show source IP breakdown with expandable rows for AWS service traffic
-        
-        Args:
-            title: Dialog title (service name and region)
-            flows: List of flow dictionaries for this service
-        """
-        dialog = tk.Toplevel(self.parent.root)
-        dialog.title(f"Source IP Breakdown for: {title}")
-        dialog.geometry("1000x600")
-        dialog.transient(self.parent.root)
-        dialog.grab_set()
-        
-        main_frame = ttk.Frame(dialog)
-        main_frame.pack(fill=tk.BOTH, expand=True, padx=20, pady=20)
-        
-        # Calculate aggregated source totals
-        source_totals = {}
-        for flow in flows:
-            src_ip = flow['src_ip']
-            if src_ip not in source_totals:
-                source_totals[src_ip] = {'bytes': 0, 'flow_count': 0, 'flows': []}
-            source_totals[src_ip]['bytes'] += flow['bytes']
-            source_totals[src_ip]['flow_count'] += 1
-            source_totals[src_ip]['flows'].append(flow)
-        
-        total_bytes = sum(data['bytes'] for data in source_totals.values())
-        
-        # Header
-        total_gb = total_bytes / (1024**3)
-        total_cost = total_gb * self.firewall_cost_per_gb
-        header_text = f"Total Traffic: {total_gb:.2f} GB | Total Cost: ${total_cost:.2f} | Unique Sources: {len(source_totals)}"
-        ttk.Label(main_frame, text=header_text,
-                 font=("TkDefaultFont", 10)).pack(pady=(0, 15))
-        
-        # Table frame
-        table_frame = ttk.Frame(main_frame)
-        table_frame.pack(fill=tk.BOTH, expand=True)
-        
-        # Treeview with show="tree headings" to enable expand/collapse
-        columns = ("Source IP", "Traffic (GB)", "Cost", "Flows", "% of Total")
-        tree = ttk.Treeview(table_frame, columns=columns, show="tree headings", height=15)
-        
-        # Column headers with sorting
-        tree.heading("#0", text="▶")  # Expand indicator column
-        tree.heading("Source IP", text="Source IP")
-        tree.heading("Traffic (GB)", text="Traffic (GB) ▼")
-        tree.heading("Cost", text="Cost")
-        tree.heading("Flows", text="Flows")
-        tree.heading("% of Total", text="% of Total")
-        
-        tree.column("#0", width=30, stretch=False)
-        tree.column("Source IP", width=150, stretch=False)
-        tree.column("Traffic (GB)", width=120, stretch=False)
-        tree.column("Cost", width=100, stretch=False)
-        tree.column("Flows", width=100, stretch=False)
-        tree.column("% of Total", width=100, stretch=True)
-        
-        # Scrollbars
-        v_scrollbar = ttk.Scrollbar(table_frame, orient=tk.VERTICAL, command=tree.yview)
-        h_scrollbar = ttk.Scrollbar(table_frame, orient=tk.HORIZONTAL, command=tree.xview)
-        tree.configure(yscrollcommand=v_scrollbar.set, xscrollcommand=h_scrollbar.set)
-        
-        tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        v_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
-        
-        # Store data for sorting
-        tree_data = {
-            'source_totals': source_totals,
-            'total_bytes': total_bytes,
-            'sort_column': 'Traffic (GB)',
-            'sort_reverse': True
-        }
-        
-        def repopulate_tree():
-            """Repopulate tree based on current sort settings"""
-            # Clear existing items
-            for item in tree.get_children():
-                tree.delete(item)
-            
-            # Sort sources based on current settings
-            sort_col = tree_data['sort_column']
-            reverse = tree_data['sort_reverse']
-            
-            if sort_col == "Source IP":
-                sorted_sources = sorted(source_totals.items(), key=lambda x: x[0], reverse=reverse)
-            elif sort_col == "Traffic (GB)":
-                sorted_sources = sorted(source_totals.items(), key=lambda x: x[1]['bytes'], reverse=reverse)
-            elif sort_col == "Cost":
-                sorted_sources = sorted(source_totals.items(), key=lambda x: x[1]['bytes'], reverse=reverse)
-            elif sort_col == "Flows":
-                sorted_sources = sorted(source_totals.items(), key=lambda x: x[1]['flow_count'], reverse=reverse)
-            elif sort_col == "% of Total":
-                sorted_sources = sorted(source_totals.items(), key=lambda x: x[1]['bytes'], reverse=reverse)
-            else:
-                sorted_sources = sorted(source_totals.items(), key=lambda x: x[1]['bytes'], reverse=True)
-            
-            # Populate tree
-            for src_ip, data in sorted_sources:
-                traffic_gb = data['bytes'] / (1024**3)
-                cost = traffic_gb * self.firewall_cost_per_gb
-                percent = (data['bytes'] / total_bytes * 100) if total_bytes > 0 else 0
-                
-                # Insert parent row (source IP)
-                parent_id = tree.insert("", tk.END, text="", values=(
-                    src_ip,
-                    f"{traffic_gb:.2f}",
-                    f"${cost:.2f}",
-                    f"{data['flow_count']:,}",
-                    f"{percent:.1f}%"
-                ), tags=('parent',))
-                
-                # Sort child flows based on current sort column (same as parent)
-                if sort_col == "Traffic (GB)" or sort_col == "Cost" or sort_col == "% of Total":
-                    # Sort by bytes for traffic-related columns
-                    sorted_flows = sorted(data['flows'], key=lambda f: f['bytes'], reverse=reverse)
-                elif sort_col == "Flows":
-                    # For Flows column, sort by bytes (all flows are count 1)
-                    sorted_flows = sorted(data['flows'], key=lambda f: f['bytes'], reverse=reverse)
-                elif sort_col == "Source IP":
-                    # For Source IP column, sort by timestamp (most recent first when descending)
-                    sorted_flows = sorted(data['flows'], 
-                                         key=lambda f: f.get('timestamp') or datetime.min, 
-                                         reverse=reverse)
-                else:
-                    # Default: sort by bytes descending
-                    sorted_flows = sorted(data['flows'], key=lambda f: f['bytes'], reverse=True)
-                
-                # Insert child rows (individual flows) - initially hidden
-                for flow in sorted_flows:
-                    flow_gb = flow['bytes'] / (1024**3)
-                    flow_cost = flow_gb * self.firewall_cost_per_gb
-                    # Calculate as percentage of GRAND total (not just this source's traffic)
-                    flow_percent = (flow['bytes'] / total_bytes * 100) if total_bytes > 0 else 0
-                    
-                    # Format timestamp and flow ID
-                    if flow.get('timestamp'):
-                        ts_str = flow['timestamp'].strftime('%Y-%m-%d %H:%M:%S')
-                        flow_label = f"  {ts_str} - Flow {flow['flow_id']}"
-                    else:
-                        flow_label = f"  Flow {flow['flow_id']}"
-                    
-                    tree.insert(parent_id, tk.END, text="", values=(
-                        flow_label,
-                        f"{flow_gb:.4f}",
-                        f"${flow_cost:.4f}",
-                        "1",
-                        f"{flow_percent:.1f}%"
-                    ), tags=('child',))
-            
-            # Update column headers
-            for col in columns:
-                header_text = col
-                if col == tree_data['sort_column']:
-                    header_text += ' ▼' if tree_data['sort_reverse'] else ' ▲'
-                tree.heading(col, text=header_text)
-        
-        def on_column_click(column):
-            """Handle column header click for sorting"""
-            if tree_data['sort_column'] == column:
-                # Toggle sort direction
-                tree_data['sort_reverse'] = not tree_data['sort_reverse']
-            else:
-                # New column, default to descending for numeric, ascending for text
-                tree_data['sort_column'] = column
-                tree_data['sort_reverse'] = (column != "Source IP")
-            
-            repopulate_tree()
-        
-        # Bind column headers to sorting
-        for col in columns:
-            tree.heading(col, command=lambda c=col: on_column_click(c))
-        
-        # Initial population
-        repopulate_tree()
-        
-        # Configure tag colors
-        tree.tag_configure('parent', font=('TkDefaultFont', 9, 'bold'))
-        tree.tag_configure('child', font=('TkDefaultFont', 9))
-        
-        # Add right-click context menu for copying flow details
-        def show_copy_menu(event):
-            # Get selected items
-            selection = tree.selection()
-            if not selection:
-                return
-            
-            # Create context menu
-            menu = tk.Menu(tree, tearoff=0)
-            menu.add_command(label="Copy Selected Flows", 
-                           command=lambda: self._copy_selected_flows(tree, selection))
-            
-            # Show menu at mouse position
-            try:
-                menu.tk_popup(event.x_root, event.y_root)
-            finally:
-                menu.grab_release()
-        
-        tree.bind("<Button-3>", show_copy_menu)
-        
-        # Helper text
-        help_frame = ttk.Frame(main_frame)
-        help_frame.pack(fill=tk.X, pady=(10, 0))
-        help_text = "💡 Click column headers to sort | Click ▶ arrow or double-click a source IP row to expand/collapse and see flows | Right-click to copy"
-        ttk.Label(help_frame, text=help_text,
-                 font=("TkDefaultFont", 8), foreground="#666666").pack(anchor=tk.W)
-        
-        # Close button
-        ttk.Button(main_frame, text="Close", command=dialog.destroy).pack(pady=(5, 0))
-    
-    def _copy_selected_flows(self, tree, selection):
-        """Copy selected flow details to clipboard
+    def _copy_selected_rows(self, tree, columns, selection):
+        """Copy the selected source rows to the clipboard (tab-separated)
         
         Args:
             tree: Treeview widget
+            columns: Column names (written as a header line)
             selection: Tuple of selected item IDs
         """
-        if not selection:
-            return
-        
-        # Build text to copy (tab-separated for easy paste into Excel/spreadsheets)
-        lines = []
-        
+        rows = []
         for item_id in selection:
             values = tree.item(item_id, 'values')
-            if not values:
-                continue
-            
-            # Check if this is a child row (flow detail) by checking if first column starts with spaces
-            first_col = str(values[0])
-            if first_col.startswith('  '):
-                # This is a flow detail row - copy the flow information
-                # Format: timestamp and Flow ID are in first column
-                lines.append('\t'.join(str(v) for v in values))
-            else:
-                # This is a parent row (Source IP) - optionally include it
-                # Get all child flows under this parent
-                children = tree.get_children(item_id)
-                if children:
-                    # Add parent header
-                    lines.append(f"Source IP: {first_col}")
-                    # Add all child flows
-                    for child_id in children:
-                        child_values = tree.item(child_id, 'values')
-                        if child_values:
-                            lines.append('\t'.join(str(v) for v in child_values))
-                    lines.append("")  # Blank line between sources
+            if values:
+                rows.append('\t'.join(str(v) for v in values))
+        if not rows:
+            return
         
-        if lines:
-            # Copy to clipboard
-            text_to_copy = '\n'.join(lines)
-            self.parent.root.clipboard_clear()
-            self.parent.root.clipboard_append(text_to_copy)
-            
-            # Show success message
-            flow_count = len([l for l in lines if l and not l.startswith('Source IP:')])
-            messagebox.showinfo("Copied", 
-                              f"Copied {flow_count} flow{'s' if flow_count != 1 else ''} to clipboard.\n\n"
-                              "You can now paste into Excel, text editor, or any other program.")
-    
-    def _is_private_ip(self, ip: str) -> bool:
-        """Check if IP address is RFC1918 private
+        text_to_copy = '\n'.join(['\t'.join(columns)] + rows)
+        self.parent.root.clipboard_clear()
+        self.parent.root.clipboard_append(text_to_copy)
         
-        Args:
-            ip: IP address string
-            
-        Returns:
-            True if IP is in private ranges (10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16)
-        """
-        try:
-            import ipaddress
-            ip_obj = ipaddress.ip_address(ip)
-            return ip_obj.is_private
-        except:
-            return False
+        messagebox.showinfo("Copied",
+                          f"Copied {len(rows)} row{'s' if len(rows) != 1 else ''} to clipboard.\n\n"
+                          "You can now paste into Excel, text editor, or any other program.")
     
     def _format_time_ago(self, timestamp: datetime) -> str:
         """Format timestamp as 'X minutes/hours ago'"""
@@ -2252,7 +1934,9 @@ Prerequisites:
 • IAM permissions: logs:StartQuery, logs:GetQueryResults
 
 Cost Warning:
-CloudWatch Logs Insights charges $0.005 per GB scanned.
+CloudWatch Logs Insights charges per GB scanned: $0.005/GB in many
+regions (including us-east-1 and us-east-2) and up to $0.009/GB in others.
+The results window shows the rate used for your firewall's region.
 Typical cost: $0.50 - $2.00 for 30-day analysis."""
         
         dialog = tk.Toplevel(self.parent.root)
@@ -2283,11 +1967,9 @@ Typical cost: $0.50 - $2.00 for 30-day analysis."""
                 rule_file = self.parent.current_file
                 stats_file = rule_file.rsplit('.', 1)[0] + '.stats'
                 
-                # Save results
-                TrafficAnalyzer.save_results(results, stats_file)
-                
-                messagebox.showinfo(
-                    "Save Successful",
+                # Save results (in the background; large analyses take minutes)
+                self._save_results_in_background(
+                    results, stats_file,
                     f"Traffic analysis saved to:\n{stats_file}\n\n"
                     f"This data can be loaded instantly next time you run traffic analysis "
                     f"(avoiding CloudWatch query charges)."
@@ -2324,11 +2006,9 @@ Typical cost: $0.50 - $2.00 for 30-day analysis."""
                 # Derive .stats file path from selected rule file
                 stats_file = filename.rsplit('.', 1)[0] + '.stats'
                 
-                # Save results
-                TrafficAnalyzer.save_results(results, stats_file)
-                
-                messagebox.showinfo(
-                    "Save Successful",
+                # Save results (in the background; large analyses take minutes)
+                self._save_results_in_background(
+                    results, stats_file,
                     f"Traffic analysis saved to:\n{stats_file}\n\n"
                     f"Tip: Load this rule file ({filename}) before running traffic analysis "
                     f"to automatically use the cached data."
@@ -2339,6 +2019,82 @@ Typical cost: $0.50 - $2.00 for 30-day analysis."""
                 "Save Error",
                 f"Failed to save traffic analysis:\n\n{str(e)}"
             )
+    
+    def _save_results_in_background(self, results: Dict[str, Any], stats_file: str,
+                                    success_message: str):
+        """Write the .stats file on a background thread with a 'Saving...' dialog.
+
+        Large analyses produce .stats files of several GB, which take minutes to
+        write; doing that on the UI thread froze the application. The file format
+        is unchanged (TrafficAnalyzer.save_results does the writing). The dialog
+        cannot be cancelled, because stopping part-way would leave a truncated file.
+        """
+        from src.aws.traffic_analyzer import TrafficAnalyzer
+        
+        if getattr(self, '_save_in_progress', False):
+            messagebox.showinfo("Save In Progress",
+                                "The traffic analysis is already being saved. "
+                                "Please wait for it to finish.")
+            return
+        self._save_in_progress = True
+        
+        dialog = tk.Toplevel(self.parent.root)
+        dialog.title("Saving Traffic Analysis...")
+        dialog.resizable(False, False)
+        dialog.geometry("+%d+%d" % (
+            self.parent.root.winfo_rootx() + 220,
+            self.parent.root.winfo_rooty() + 180
+        ))
+        frame = ttk.Frame(dialog)
+        frame.pack(fill=tk.BOTH, expand=True, padx=20, pady=20)
+        ttk.Label(frame, text=f"Saving to {os.path.basename(stats_file)}...",
+                  font=("TkDefaultFont", 10)).pack(pady=(0, 10))
+        bar = ttk.Progressbar(frame, mode='indeterminate', length=360)
+        bar.pack(pady=5)
+        bar.start(10)
+        ttk.Label(frame, text="Large analyses can take a few minutes to save.").pack(pady=(5, 0))
+        elapsed_label = ttk.Label(frame, text="Elapsed time: 0s")
+        elapsed_label.pack(pady=(5, 0))
+        dialog.protocol("WM_DELETE_WINDOW", lambda: None)  # not cancellable
+        dialog.grab_set()
+        
+        started = datetime.now()
+        outcome = queue.Queue()
+        
+        def worker():
+            try:
+                TrafficAnalyzer.save_results(results, stats_file)
+                outcome.put(None)
+            except Exception as e:
+                outcome.put(e)
+        
+        def poll():
+            try:
+                error = outcome.get_nowait()
+            except queue.Empty:
+                try:
+                    elapsed = int((datetime.now() - started).total_seconds())
+                    elapsed_label.config(text=f"Elapsed time: {elapsed}s")
+                    dialog.after(250, poll)
+                except tk.TclError:
+                    self._save_in_progress = False
+                return
+            self._save_in_progress = False
+            try:
+                dialog.grab_release()
+                dialog.destroy()
+            except tk.TclError:
+                pass
+            if error is None:
+                messagebox.showinfo("Save Successful", success_message)
+            else:
+                messagebox.showerror("Save Error",
+                                     f"Failed to save traffic analysis:\n\n{str(error)}")
+        
+        # Not a daemon thread: if the application is closed mid-save, Python waits
+        # for the write to finish instead of leaving a truncated .stats file.
+        threading.Thread(target=worker, name='traffic-stats-save', daemon=False).start()
+        dialog.after(250, poll)
     
     def _show_results_help(self):
         """Show comprehensive help dialog explaining results and common questions"""
@@ -2550,6 +2306,8 @@ UNDERSTANDING RECOMMENDATIONS
 • CONSIDER: Near break-even, evaluate
 • SKIP: Not cost-effective
 • SKIP - Consider CRR instead: S3 Cross-Region Replication may be a better option
+• SKIP - No VPC endpoint available: AWS traffic that no VPC endpoint can serve
+  (for example CloudFront), so there is nothing to deploy
 
 Recommendation thresholds compare the MONTHLY-projected traffic volume against
 the endpoint break-even point, so they stay consistent with the projected
